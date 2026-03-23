@@ -33,7 +33,8 @@
       "Bash(xargs cat:*)",
       "Bash(git -C /c/Users/omrib/OneDrive/Desktop/srv_quant_system log --oneline)",
       "Bash(git -C /c/Users/omrib/OneDrive/Desktop/srv_quant_system shortlog -s)",
-      "Bash(git -C \"C:/Users/omrib/OneDrive/Desktop/srv_quant_system\" shortlog -sn)"
+      "Bash(git -C \"C:/Users/omrib/OneDrive/Desktop/srv_quant_system\" shortlog -sn)",
+      "Bash(python3:*)"
     ]
   }
 }

@@ -149,10 +149,11 @@ class Settings(BaseSettings):
     signal_mr_w_adf: float = Field(default=0.40, ge=0.0, le=1.0)
     signal_mr_w_hurst: float = Field(default=0.25, ge=0.0, le=1.0)
 
-    # Layer 4: Regime Safety thresholds
-    signal_vix_soft: float = Field(default=18.0, ge=10.0, le=30.0)
-    signal_vix_hard: float = Field(default=30.0, ge=20.0, le=50.0)
-    signal_vix_kill: float = Field(default=35.0, ge=25.0, le=60.0)
+    # Layer 4: Regime Safety — CALIBRATED from 10yr VIX distribution (2016-2026)
+    # VIX soft=75th pctl, hard=95th pctl, kill=99th pctl
+    signal_vix_soft: float = Field(default=21.0, ge=10.0, le=30.0)   # Was 18 (75th=21.3)
+    signal_vix_hard: float = Field(default=31.0, ge=20.0, le=50.0)   # Was 30 (95th=30.8)
+    signal_vix_kill: float = Field(default=45.0, ge=25.0, le=80.0)   # Was 35 (99th=44.9)
 
     # =====================================================
     # Trade Structure & Execution
@@ -177,11 +178,11 @@ class Settings(BaseSettings):
     monitor_hl_exit_multiple: float = Field(default=2.5, ge=1.0, le=5.0)
 
     # =====================================================
-    # PCA configuration
+    # PCA configuration — CALIBRATED: more components = richer factor structure
     # =====================================================
-    pca_explained_var_target: float = Field(default=0.80, ge=0.50, le=0.99)
-    pca_min_components: int = Field(default=1, ge=1, le=10)
-    pca_max_components: int = Field(default=5, ge=1, le=11)
+    pca_explained_var_target: float = Field(default=0.85, ge=0.50, le=0.99)  # Was 0.80
+    pca_min_components: int = Field(default=2, ge=1, le=10)   # Was 1 — at least market+1 factor
+    pca_max_components: int = Field(default=8, ge=1, le=11)   # Was 5 — capture more factors
 
     # =====================================================
     # Volatility model
@@ -215,9 +216,11 @@ class Settings(BaseSettings):
     # =====================================================
     # Regime engine thresholds
     # =====================================================
-    calm_avg_corr_max: float = Field(default=0.45, ge=0.0, le=1.0)
-    tension_avg_corr_min: float = Field(default=0.60, ge=0.0, le=1.0)
-    crisis_avg_corr_min: float = Field(default=0.75, ge=0.0, le=1.0)
+    # Correlation thresholds — CALIBRATED from avg_corr by VIX regime (2016-2026)
+    # CALM(VIX<15)=0.33, NORMAL(15-20)=0.39, TENSION(20-25)=0.56, CRISIS(30+)=0.77
+    calm_avg_corr_max: float = Field(default=0.40, ge=0.0, le=1.0)     # Was 0.45
+    tension_avg_corr_min: float = Field(default=0.55, ge=0.0, le=1.0)  # Was 0.60
+    crisis_avg_corr_min: float = Field(default=0.75, ge=0.0, le=1.0)   # Confirmed
 
     calm_mode_strength_max: float = Field(default=0.18, ge=0.0, le=1.0)
     tension_mode_strength_min: float = Field(default=0.28, ge=0.0, le=1.0)

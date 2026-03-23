@@ -640,8 +640,8 @@ class QuantEngine:
         n = len(rel_returns)
         idx = rel_returns.index
 
-        # Pre-extract numpy arrays for faster access in workers
-        values = rel_returns.astype(float).fillna(0.0).values
+        # Pre-extract numpy arrays — forward-fill NaN (not zeros) to avoid bias
+        values = rel_returns.astype(float).ffill().fillna(0.0).values
         nan_mask_row = rel_returns.isna().values
         nan_mask_train_pct = np.array([
             rel_returns.iloc[t - window : t].isna().mean().mean()

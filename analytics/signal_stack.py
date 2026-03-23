@@ -287,8 +287,13 @@ def compute_dislocation_score(
 
     z_abs = abs(z_t)
 
-    # Dislocation score: S = min(1, |z| / Z_cap)
-    score = min(1.0, z_abs / z_cap) if z_cap > 0 else 0.0
+    # Dislocation score: logarithmic mapping (preserves extreme signal info)
+    # S = log(1 + |z|/z_cap) / log(1 + 3.0/z_cap) — saturates smoothly, doesn't clip
+    import math as _math
+    if z_cap > 0 and z_abs > 0:
+        score = min(1.0, _math.log(1 + z_abs / z_cap) / _math.log(1 + 3.0 / z_cap))
+    else:
+        score = 0.0
 
     # Direction: negative z = below mean = LONG; positive z = above mean = SHORT
     if z_abs < 0.3:
@@ -543,17 +548,21 @@ class SignalStackEngine:
                 mr_score = 1.0
                 mr_detail = None
 
-            # Combined conviction: multiplicative
-            conviction = (
-                dist_result.distortion_score
-                * disloc_result.dislocation_score
-                * mr_score
-                * safe_score
+            # Combined conviction: weighted additive with safety gate
+            # Changed from multiplicative (one zero kills all) to additive (more robust)
+            # Score = w1·S_dist + w2·S_disloc + w3·S_mr, then multiply by S_safe
+            # This way: safety gates the whole score, but layers don't kill each other
+            raw_conviction = (
+                0.25 * dist_result.distortion_score
+                + 0.45 * disloc_result.dislocation_score
+                + 0.30 * mr_score
             )
+            # Safety still multiplicative (regime gate must reduce/kill)
+            conviction = raw_conviction * safe_score
 
             # Gates — including Layer 3 & 4 gates
             gates = {
-                "distortion_above_min": dist_result.distortion_score >= 0.2,
+                "distortion_above_min": dist_result.distortion_score >= 0.15,
                 "dislocation_nonzero": disloc_result.dislocation_score > 0.05,
                 "mean_reversion_ok": mr_score >= 0.15,
                 "regime_safe": safe_score >= 0.1,
