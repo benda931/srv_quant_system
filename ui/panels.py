@@ -1092,38 +1092,43 @@ def build_correlation_panel(
 
 
 def build_tearsheet_panel() -> dbc.Container:
+    # Sector dropdown for selection (replaces signals-table dependency)
+    sector_options = [
+        {"label": t, "value": t}
+        for t in ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
+    ]
     return dbc.Container(
         fluid=True,
         children=[
-            dbc.Row(
-                [
-                    dbc.Col(
-                        dbc.Card(
-                            dbc.CardBody(
-                                [
-                                    html.H5("Sector Tear Sheet", className="mb-2"),
-                                    html.Div(
-                                        "Residual X-Ray + macro/fundamental/attribution/execution context.",
-                                        className="text-muted small mb-3",
-                                    ),
-                                    dbc.Row(
-                                        [
-                                            dbc.Col(dbc.Card(dbc.CardBody(id="card-macro")), md=3),
-                                            dbc.Col(dbc.Card(dbc.CardBody(id="card-fund")), md=3),
-                                            dbc.Col(dbc.Card(dbc.CardBody(id="card-attrib")), md=3),
-                                            dbc.Col(dbc.Card(dbc.CardBody(id="card-exec")), md=3),
-                                        ],
-                                        className="mb-3",
-                                    ),
-                                    dcc.Graph(id="residual-xray"),
-                                ]
-                            )
-                        ),
-                        md=12,
-                        className="mt-3",
-                    )
-                ]
-            )
+            dbc.Row([
+                dbc.Col([
+                    html.Label("בחר סקטור:", className="text-muted mb-1",
+                               style={"fontSize": "12px"}),
+                    dcc.Dropdown(
+                        id="tearsheet-sector-dropdown",
+                        options=sector_options,
+                        value="XLK",
+                        clearable=False,
+                        style={"backgroundColor": "#1a1a2e", "color": "#fff"},
+                    ),
+                ], md=3),
+            ], className="mb-3"),
+            dbc.Row([
+                dbc.Col(
+                    dbc.Card(
+                        dbc.CardBody([
+                            dbc.Row([
+                                dbc.Col(dbc.Card(dbc.CardBody(id="card-macro")), md=3),
+                                dbc.Col(dbc.Card(dbc.CardBody(id="card-fund")), md=3),
+                                dbc.Col(dbc.Card(dbc.CardBody(id="card-attrib")), md=3),
+                                dbc.Col(dbc.Card(dbc.CardBody(id="card-exec")), md=3),
+                            ], className="mb-3"),
+                            dcc.Graph(id="residual-xray"),
+                        ])
+                    ),
+                    md=12,
+                ),
+            ]),
         ],
     )
 

@@ -108,7 +108,10 @@ class DualLLMBridge:
             log.warning("Claude client not available — skipping")
             return ""
 
+        # Strip Hebrew/non-ASCII from prompt to avoid encoding errors
         full_prompt = f"{context}\n\n{prompt}" if context else prompt
+        # Ensure clean ASCII for API transport (Hebrew in prompts causes encoding issues)
+        full_prompt = full_prompt.encode("utf-8", errors="replace").decode("utf-8")
 
         try:
             response = self.claude_client.messages.create(
@@ -119,6 +122,20 @@ class DualLLMBridge:
             text = response.content[0].text
             log.info("Claude response received (%d chars)", len(text))
             return text
+        except UnicodeEncodeError as exc:
+            # Fallback: strip non-ASCII and retry
+            log.warning("Claude encoding error, retrying with ASCII-only: %s", exc)
+            ascii_prompt = full_prompt.encode("ascii", errors="ignore").decode("ascii")
+            try:
+                response = self.claude_client.messages.create(
+                    model=self.CLAUDE_MODEL,
+                    max_tokens=self.MAX_TOKENS,
+                    messages=[{"role": "user", "content": ascii_prompt}],
+                )
+                return response.content[0].text
+            except Exception as exc2:
+                log.error("Claude API error (retry): %s", exc2)
+                return ""
         except Exception as exc:
             log.error("Claude API error: %s", exc)
             return ""

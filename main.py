@@ -53,6 +53,7 @@ from ui.analytics_tabs import (
     build_daily_brief_panel, build_corr_vol_tab,
     build_signal_decay_tab, build_regime_timeline_tab,
     build_pnl_tracker_tab, build_dss_tab,
+    build_portfolio_tab, build_methodology_tab,
 )
 from data_ops.journal import PMJournal, open_journal
 
@@ -988,6 +989,19 @@ def build_app() -> dash.Dash:
         except Exception as _e:
             logger.debug("Methodology lab load failed: %s", _e)
 
+        # ── Methodology Lab full data (for Methodology tab) ──────
+        _methodology_ranking_full = None
+        try:
+            _ml_files_full = sorted(
+                (settings.project_root / "agents" / "methodology" / "reports").glob("*_methodology_lab.json"),
+                reverse=True,
+            )
+            if _ml_files_full:
+                import json as _json_mlf
+                _methodology_ranking_full = _json_mlf.loads(_ml_files_full[0].read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
         # ── Paper Portfolio ───────────────────────────────────────
         _paper_portfolio = None
         try:
@@ -1203,6 +1217,8 @@ def build_app() -> dash.Dash:
                     dbc.Tab(label="🔔 Regime Alerts",    tab_id="tab-regime"),
                     dbc.Tab(label="📋 Data Health",      tab_id="tab-health"),
                     dbc.Tab(label="📝 Journal",          tab_id="tab-journal"),
+                    dbc.Tab(label="💼 Portfolio",        tab_id="tab-portfolio"),
+                    dbc.Tab(label="🔬 Methodology",      tab_id="tab-methodology"),
                 ],
                 className="mt-2",
             ),
@@ -1453,6 +1469,26 @@ def build_app() -> dash.Dash:
         if active_tab == "tab-journal":
             return build_journal_tab(journal).children
 
+        if active_tab == "tab-portfolio":
+            return dbc.Container(
+                fluid=True,
+                children=[
+                    html.H5("💼 Paper Trading Portfolio — תיק מסחר נייר", className="mt-2", style=RTL_STYLE),
+                    html.Div("מעקב ביצועים, פוזיציות פתוחות, עסקאות סגורות וניתוח חשיפה.", className="text-muted small mb-3", style=RTL_STYLE),
+                    build_portfolio_tab(_paper_portfolio, engine.prices if engine else None),
+                ],
+            )
+
+        if active_tab == "tab-methodology":
+            return dbc.Container(
+                fluid=True,
+                children=[
+                    html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
+                    html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
+                    build_methodology_tab(_methodology_ranking_full),
+                ],
+            )
+
         if active_tab == "tab-tearsheet":
             return dbc.Container(
                 fluid=True,
@@ -1673,27 +1709,15 @@ def build_app() -> dash.Dash:
         Output("card-fund", "children"),
         Output("card-attrib", "children"),
         Output("card-exec", "children"),
-        Input("signals-table", "selected_rows"),
-        State("signals-table", "data"),
+        Input("tearsheet-sector-dropdown", "value"),
         State("master-store", "data"),
         prevent_initial_call=False,
     )
     def update_tearsheet(
-        selected_rows: Optional[List[int]],
-        table_data: Optional[List[Dict[str, Any]]],
+        sector_ticker: Optional[str],
         master_store: Optional[List[Dict[str, Any]]],
     ):
-        if not table_data or not master_store:
-            fig = go.Figure()
-            fig.update_layout(template="plotly_dark", title="No data")
-            return fig, "—", "—", "—", "—"
-
-        idx = int(selected_rows[0]) if selected_rows else 0
-        idx = max(0, min(idx, len(table_data) - 1))
-
-        row_tbl = table_data[idx]
-        sector_ticker = row_tbl.get("sector_ticker")
-        if not sector_ticker:
+        if not master_store or not sector_ticker:
             fig = go.Figure()
             fig.update_layout(template="plotly_dark", title="Invalid selection")
             return fig, "—", "—", "—", "—"

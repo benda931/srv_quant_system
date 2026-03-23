@@ -453,6 +453,35 @@ def run(once: bool = False) -> dict:
         (finished_at - started_at).total_seconds(), 1
     )
 
+    # ── GPT consultation — focused multi-step analysis ────────────────────────
+    try:
+        from agents.shared.gpt_conversation import GPTConversation
+        gpt = GPTConversation(system_role="quantitative strategy analyst")
+        if gpt.available and report.get("metrics"):
+            log.info("Consulting GPT for focused analysis...")
+            gpt_results = gpt.full_analysis(
+                metrics={
+                    "sharpe": report["metrics"].get("sharpe", 0),
+                    "win_rate": report["metrics"].get("hit_rate", 0),
+                    "max_dd": report["metrics"].get("max_drawdown", 0),
+                    "trades": report["metrics"].get("n_walks", 0),
+                    "regime_breakdown": report.get("regime_breakdown", {}),
+                },
+                params={
+                    "pca_window": settings.pca_window,
+                    "zscore_window": settings.zscore_window,
+                    "signal_entry_threshold": settings.signal_entry_threshold,
+                    "signal_a1_frob": settings.signal_a1_frob,
+                    "trade_max_holding_days": settings.trade_max_holding_days,
+                },
+            )
+            report["gpt_analysis"] = gpt_results
+            report["gpt_conversation"] = gpt.get_conversation_log()
+            log.info("GPT diagnosis: %s", gpt_results.get("diagnosis", "")[:100])
+            log.info("GPT suggestion: %s", gpt_results.get("suggestion", "")[:100])
+    except Exception as exc:
+        log.debug("GPT consultation failed: %s", exc)
+
     # שמירת דוח JSON
     report_path = REPORTS_DIR / f"{today}.json"
     try:

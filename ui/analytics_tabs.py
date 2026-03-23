@@ -2053,3 +2053,387 @@ def build_dss_tab(
                          style={"padding": "20px"})
 
     return html.Div(sections, style={"padding": "12px"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PORTFOLIO TAB
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_portfolio_tab(paper_portfolio: Optional[Dict] = None, prices: Optional[pd.DataFrame] = None) -> html.Div:
+    """Full Paper Trading Portfolio tab layout."""
+    if not paper_portfolio:
+        return html.Div(
+            dbc.Alert("אין נתוני Paper Portfolio זמינים. הרץ את ה-Paper Trader כדי לייצר.", color="secondary",
+                      style={"textAlign": "right", "direction": "rtl"}),
+            style={"padding": "20px"},
+        )
+
+    pp = paper_portfolio
+    sections: List = []
+
+    # ── 1. KPI Row ──────────────────────────────────────────────────────────
+    capital = pp.get("capital", 0)
+    cash = pp.get("cash", 0)
+    total_pnl = pp.get("total_pnl", 0)
+    total_pnl_pct = pp.get("total_pnl_pct", 0)
+    max_dd = pp.get("max_drawdown", 0)
+    positions = pp.get("positions", [])
+    win_rate = pp.get("win_rate", 0)
+    total_value = capital + total_pnl
+
+    pnl_color = "success" if total_pnl >= 0 else "danger"
+
+    kpi_row = dbc.Row(
+        [
+            _kpi("הון התחלתי", f"${capital:,.0f}", "info", small=True),
+            _kpi("שווי כולל", f"${total_value:,.0f}", pnl_color, small=True),
+            _kpi("P&L $", f"${total_pnl:+,.0f}", pnl_color, small=True),
+            _kpi("P&L %", f"{total_pnl_pct * 100:+.2f}%", pnl_color, small=True),
+            _kpi("מזומן", f"${cash:,.0f}", "secondary", small=True),
+            _kpi("פוזיציות", str(len(positions)), "primary", small=True),
+            _kpi("Win Rate", f"{win_rate * 100:.1f}%" if win_rate else "—", "warning", small=True),
+            _kpi("Max DD", f"{max_dd * 100:.1f}%" if max_dd else "—", "danger", small=True),
+        ],
+        className="g-2 mb-3",
+    )
+    sections.append(kpi_row)
+
+    # ── 2. Equity Curve Chart ───────────────────────────────────────────────
+    snapshots = pp.get("daily_snapshots", [])
+    if snapshots:
+        snap_df = pd.DataFrame(snapshots)
+        if "date" in snap_df.columns and "total_value" in snap_df.columns:
+            snap_df["date"] = pd.to_datetime(snap_df["date"])
+            snap_df = snap_df.sort_values("date")
+            eq_fig = go.Figure()
+            eq_fig.add_trace(go.Scatter(
+                x=snap_df["date"], y=snap_df["total_value"],
+                mode="lines", name="Total Value",
+                line=dict(color="#0dcaf0", width=2),
+                fill="tozeroy", fillcolor="rgba(13,202,240,0.1)",
+            ))
+            if "pnl_pct" in snap_df.columns:
+                eq_fig.add_trace(go.Scatter(
+                    x=snap_df["date"],
+                    y=snap_df["pnl_pct"].apply(lambda v: capital * (1 + v) if v == v else None),
+                    mode="lines", name="Benchmark (start)",
+                    line=dict(color="#6c757d", width=1, dash="dot"),
+                    visible="legendonly",
+                ))
+            eq_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                title=dict(text="Equity Curve — עקומת שווי", x=0.5, font=dict(size=14)),
+                xaxis_title="תאריך", yaxis_title="שווי ($)",
+                height=340, margin=dict(l=50, r=30, t=50, b=40),
+                legend=dict(orientation="h", y=-0.15),
+            )
+            sections.append(dbc.Card([
+                dbc.CardBody(dcc.Graph(figure=eq_fig, config={"displayModeBar": False})),
+            ], className="mb-3"))
+
+    # ── 3. Open Positions Table ─────────────────────────────────────────────
+    if positions:
+        pos_header = html.Thead(html.Tr([
+            html.Th("Ticker"), html.Th("כיוון"), html.Th("כניסה"),
+            html.Th("מחיר כניסה"), html.Th("מחיר נוכחי"),
+            html.Th("Notional"), html.Th("P&L $"), html.Th("P&L %"),
+            html.Th("ימים"), html.Th("Conviction"),
+        ]))
+        pos_rows = []
+        for p in positions:
+            pnl_val = p.get("unrealized_pnl", 0)
+            pnl_pct_val = p.get("unrealized_pnl_pct", 0)
+            row_color = "#1b4332" if pnl_val >= 0 else "#4a1526"
+            pos_rows.append(html.Tr([
+                html.Td(p.get("ticker", ""), style={"fontWeight": "bold"}),
+                html.Td(p.get("direction", ""), style={"color": "#4caf50" if p.get("direction") == "LONG" else "#ef5350"}),
+                html.Td(str(p.get("entry_date", ""))[:10]),
+                html.Td(f"${p.get('entry_price', 0):.2f}"),
+                html.Td(f"${p.get('current_price', 0):.2f}"),
+                html.Td(f"${p.get('notional', 0):,.0f}"),
+                html.Td(f"${pnl_val:+,.0f}", style={"color": "#4caf50" if pnl_val >= 0 else "#ef5350", "fontWeight": "bold"}),
+                html.Td(f"{pnl_pct_val * 100:+.2f}%", style={"color": "#4caf50" if pnl_pct_val >= 0 else "#ef5350"}),
+                html.Td(str(p.get("days_held", 0))),
+                html.Td(f"{p.get('conviction', 0):.1f}"),
+            ], style={"backgroundColor": row_color}))
+
+        pos_table = dbc.Table(
+            [pos_header, html.Tbody(pos_rows)],
+            bordered=True, hover=True, size="sm", dark=True,
+            style={"fontSize": "12px"},
+        )
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("📊 פוזיציות פתוחות — Open Positions", className="mb-0 text-center")),
+            dbc.CardBody(pos_table, style={"maxHeight": "350px", "overflowY": "auto"}),
+        ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}))
+    else:
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("📊 פוזיציות פתוחות — Open Positions", className="mb-0 text-center")),
+            dbc.CardBody(html.Div("אין פוזיציות פתוחות", className="text-muted text-center")),
+        ], className="border-secondary mb-3"))
+
+    # ── 4. Closed Trades Table ──────────────────────────────────────────────
+    closed = pp.get("closed_trades", [])
+    if closed:
+        ct_header = html.Thead(html.Tr([
+            html.Th("Ticker"), html.Th("כיוון"), html.Th("כניסה"),
+            html.Th("יציאה"), html.Th("מחיר כניסה"), html.Th("מחיר יציאה"),
+            html.Th("P&L $"), html.Th("P&L %"), html.Th("ימים"),
+            html.Th("סיבת יציאה"),
+        ]))
+        ct_rows = []
+        for t in closed:
+            rpnl = t.get("realized_pnl", 0)
+            rpct = t.get("realized_pnl_pct", 0)
+            row_color = "#1b4332" if rpnl >= 0 else "#4a1526"
+            ct_rows.append(html.Tr([
+                html.Td(t.get("ticker", ""), style={"fontWeight": "bold"}),
+                html.Td(t.get("direction", "")),
+                html.Td(str(t.get("entry_date", ""))[:10]),
+                html.Td(str(t.get("exit_date", ""))[:10]),
+                html.Td(f"${t.get('entry_price', 0):.2f}"),
+                html.Td(f"${t.get('exit_price', 0):.2f}"),
+                html.Td(f"${rpnl:+,.0f}", style={"color": "#4caf50" if rpnl >= 0 else "#ef5350", "fontWeight": "bold"}),
+                html.Td(f"{rpct * 100:+.2f}%", style={"color": "#4caf50" if rpct >= 0 else "#ef5350"}),
+                html.Td(str(t.get("holding_days", 0))),
+                html.Td(t.get("exit_reason", "—"), style={"fontSize": "11px"}),
+            ], style={"backgroundColor": row_color}))
+
+        ct_table = dbc.Table(
+            [ct_header, html.Tbody(ct_rows)],
+            bordered=True, hover=True, size="sm", dark=True,
+            style={"fontSize": "12px"},
+        )
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("📜 היסטוריית עסקאות — Closed Trades", className="mb-0 text-center")),
+            dbc.CardBody(ct_table, style={"maxHeight": "350px", "overflowY": "auto"}),
+        ], className="border-warning mb-3", style={"borderTop": "3px solid var(--bs-warning)"}))
+
+    # ── 5. Exposure Breakdown Pie ───────────────────────────────────────────
+    if positions:
+        long_notional = sum(abs(p.get("notional", 0)) for p in positions if p.get("direction") == "LONG")
+        short_notional = sum(abs(p.get("notional", 0)) for p in positions if p.get("direction") == "SHORT")
+        if long_notional + short_notional > 0:
+            pie_fig = go.Figure(go.Pie(
+                labels=["Long", "Short"],
+                values=[long_notional, short_notional],
+                marker=dict(colors=["#4caf50", "#ef5350"]),
+                textinfo="label+percent+value",
+                texttemplate="%{label}<br>%{percent:.1%}<br>$%{value:,.0f}",
+                hole=0.45,
+            ))
+            pie_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                title=dict(text="חשיפה — Long vs Short Exposure", x=0.5, font=dict(size=14)),
+                height=300, margin=dict(l=30, r=30, t=50, b=30),
+                showlegend=False,
+            )
+            sections.append(dbc.Card([
+                dbc.CardBody(dcc.Graph(figure=pie_fig, config={"displayModeBar": False})),
+            ], className="mb-3"))
+
+    return html.Div(sections, style={"padding": "12px"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# METHODOLOGY LAB TAB
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_methodology_tab(lab_data: Optional[Dict] = None) -> html.Div:
+    """Full Methodology Lab tab layout — strategy comparison and analysis."""
+    if not lab_data:
+        return html.Div(
+            dbc.Alert("אין נתוני Methodology Lab זמינים. הרץ methodology_lab כדי לייצר.", color="secondary",
+                      style={"textAlign": "right", "direction": "rtl"}),
+            style={"padding": "20px"},
+        )
+
+    sections: List = []
+    strategies = list(lab_data.keys())
+    n_strats = len(strategies)
+
+    # Find best strategy by Sharpe
+    best_name, best_sharpe, best_wr = "—", -999.0, 0.0
+    for name, data in lab_data.items():
+        s = data.get("sharpe", -999)
+        if s > best_sharpe:
+            best_sharpe = s
+            best_name = name
+        wr = data.get("win_rate", 0)
+        if wr > best_wr:
+            best_wr = wr
+
+    # ── 1. KPI Row ──────────────────────────────────────────────────────────
+    kpi_row = dbc.Row(
+        [
+            _kpi("# אסטרטגיות", str(n_strats), "info", small=True),
+            _kpi("אסטרטגיה מובילה", best_name[:20], "success", small=True),
+            _kpi("Best Sharpe", _ff(best_sharpe), "warning", small=True),
+            _kpi("Best WR", _pct(best_wr), "primary", small=True),
+        ],
+        className="g-2 mb-3",
+    )
+    sections.append(kpi_row)
+
+    # ── 2. Comparison Table ─────────────────────────────────────────────────
+    sorted_strats = sorted(lab_data.items(), key=lambda x: x[1].get("sharpe", -999), reverse=True)
+
+    cmp_header = html.Thead(html.Tr([
+        html.Th("#"), html.Th("שם אסטרטגיה"), html.Th("Sharpe"),
+        html.Th("Win Rate"), html.Th("P&L כולל"), html.Th("# עסקאות"),
+        html.Th("Max DD"), html.Th("תיאור"),
+    ]))
+    cmp_rows = []
+    max_sharpe_val = max(d.get("sharpe", 0) for d in lab_data.values()) if lab_data else 1
+    max_sharpe_val = max(max_sharpe_val, 0.01)
+
+    for i, (name, data) in enumerate(sorted_strats, 1):
+        sharpe_val = data.get("sharpe", 0)
+        sharpe_pct = max(0, min(100, (sharpe_val / max_sharpe_val) * 100)) if sharpe_val > 0 else 0
+        sharpe_color = "#4caf50" if sharpe_val > 1.0 else "#ff9800" if sharpe_val > 0.5 else "#ef5350"
+
+        sharpe_cell = html.Td([
+            html.Div(
+                style={
+                    "width": f"{sharpe_pct}%", "height": "6px",
+                    "backgroundColor": sharpe_color, "borderRadius": "3px",
+                    "marginBottom": "2px", "minWidth": "2px",
+                },
+            ),
+            html.Span(_ff(sharpe_val), style={"fontSize": "12px", "fontWeight": "bold", "color": sharpe_color}),
+        ])
+
+        cmp_rows.append(html.Tr([
+            html.Td(str(i), style={"fontWeight": "bold"}),
+            html.Td(name, style={"fontWeight": "bold", "color": "#0dcaf0"}),
+            sharpe_cell,
+            html.Td(_pct(data.get("win_rate", 0))),
+            html.Td(f"${data.get('total_pnl', 0):+,.0f}"),
+            html.Td(str(data.get("total_trades", 0))),
+            html.Td(_pct(data.get("max_drawdown", 0))),
+            html.Td(data.get("description", "—")[:60], style={"fontSize": "11px", "color": "#aaa"}),
+        ]))
+
+    cmp_table = dbc.Table(
+        [cmp_header, html.Tbody(cmp_rows)],
+        bordered=True, hover=True, size="sm", dark=True,
+        style={"fontSize": "12px"},
+    )
+    sections.append(dbc.Card([
+        dbc.CardHeader(html.H6("📊 השוואת אסטרטגיות — Strategy Comparison", className="mb-0 text-center")),
+        dbc.CardBody(cmp_table, style={"overflowX": "auto"}),
+    ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}))
+
+    # ── 3. Parameter Details (Accordion) ────────────────────────────────────
+    accordion_items = []
+    for name, data in sorted_strats:
+        params = data.get("params", {})
+        exits = data.get("exits", {})
+        if params or exits:
+            param_rows = [
+                html.Tr([html.Td(k, style={"fontWeight": "bold"}), html.Td(str(v))])
+                for k, v in params.items()
+            ]
+            if exits:
+                param_rows.append(html.Tr([
+                    html.Td("Exit Rules", style={"fontWeight": "bold", "color": "#ff9800"}),
+                    html.Td(""),
+                ]))
+                param_rows.extend([
+                    html.Tr([html.Td(f"  {k}"), html.Td(str(v))])
+                    for k, v in exits.items()
+                ])
+            param_table = dbc.Table(
+                [html.Tbody(param_rows)],
+                bordered=True, size="sm", dark=True,
+                style={"fontSize": "11px", "marginBottom": "0"},
+            )
+            accordion_items.append(dbc.AccordionItem(
+                param_table,
+                title=f"{name} — Sharpe {_ff(data.get('sharpe', 0))}",
+            ))
+
+    if accordion_items:
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("⚙️ פרמטרים — Parameter Details", className="mb-0 text-center")),
+            dbc.CardBody(dbc.Accordion(accordion_items, start_collapsed=True)),
+        ], className="border-secondary mb-3", style={"borderTop": "3px solid var(--bs-secondary)"}))
+
+    # ── 4. Regime Breakdown ─────────────────────────────────────────────────
+    has_regime = any(data.get("regime_stats") for _, data in sorted_strats)
+    if has_regime:
+        # Collect all regimes
+        all_regimes = set()
+        for _, data in sorted_strats:
+            rs = data.get("regime_stats", {})
+            all_regimes.update(rs.keys())
+        all_regimes = sorted(all_regimes)
+
+        rg_header = html.Thead(html.Tr(
+            [html.Th("אסטרטגיה")] + [html.Th(r) for r in all_regimes]
+        ))
+        rg_rows = []
+        for name, data in sorted_strats:
+            rs = data.get("regime_stats", {})
+            cells = [html.Td(name, style={"fontWeight": "bold"})]
+            for regime in all_regimes:
+                val = rs.get(regime, {})
+                if isinstance(val, dict):
+                    wr = val.get("win_rate", val.get("wr", None))
+                else:
+                    wr = val
+                if wr is not None:
+                    wr_f = float(wr)
+                    color = "#4caf50" if wr_f > 0.55 else "#ff9800" if wr_f > 0.45 else "#ef5350"
+                    cells.append(html.Td(f"{wr_f * 100:.1f}%", style={"color": color, "fontWeight": "bold"}))
+                else:
+                    cells.append(html.Td("—", style={"color": "#666"}))
+            rg_rows.append(html.Tr(cells))
+
+        rg_table = dbc.Table(
+            [rg_header, html.Tbody(rg_rows)],
+            bordered=True, hover=True, size="sm", dark=True,
+            style={"fontSize": "12px"},
+        )
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("🔔 ביצועים לפי רגים — Regime Breakdown", className="mb-0 text-center")),
+            dbc.CardBody(rg_table, style={"overflowX": "auto"}),
+        ], className="border-warning mb-3", style={"borderTop": "3px solid var(--bs-warning)"}))
+
+    # ── 5. Key Findings ─────────────────────────────────────────────────────
+    findings = []
+    if best_sharpe > 1.5:
+        findings.append(f"האסטרטגיה המובילה ({best_name}) מציגה Sharpe גבוה של {best_sharpe:.2f} — ביצועים מצוינים.")
+    elif best_sharpe > 0.8:
+        findings.append(f"האסטרטגיה המובילה ({best_name}) מציגה Sharpe סביר של {best_sharpe:.2f}.")
+    else:
+        findings.append(f"שימו לב: Sharpe מקסימלי נמוך ({best_sharpe:.2f}). יש לשקול אופטימיזציה.")
+
+    # Find most consistent
+    if n_strats > 1:
+        positive_strats = [n for n, d in lab_data.items() if d.get("sharpe", 0) > 0]
+        findings.append(f"{len(positive_strats)} מתוך {n_strats} אסטרטגיות הציגו Sharpe חיובי.")
+
+    # Max DD warning
+    worst_dd_name, worst_dd = "—", 0
+    for name, data in lab_data.items():
+        dd = abs(data.get("max_drawdown", 0))
+        if dd > worst_dd:
+            worst_dd = dd
+            worst_dd_name = name
+    if worst_dd > 0.15:
+        findings.append(f"אזהרה: {worst_dd_name} הציגה Max Drawdown של {worst_dd * 100:.1f}% — בדקו ניהול סיכונים.")
+
+    if findings:
+        findings_content = [
+            html.Li(f, className="mb-1", style={"fontSize": "13px"})
+            for f in findings
+        ]
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("💡 ממצאים עיקריים — Key Findings", className="mb-0 text-center")),
+            dbc.CardBody(html.Ul(findings_content, style={"direction": "rtl", "textAlign": "right"})),
+        ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"}))
+
+    return html.Div(sections, style={"padding": "12px"})
