@@ -221,7 +221,7 @@ def build_regime_hero(row: Dict[str, Any]) -> dbc.Card:
         try:
             v = float(x)
             return fmt.format(v) if v == v else "—"
-        except:
+        except Exception:
             return "—"
 
     ac  = _sf(row.get("avg_corr_t"))

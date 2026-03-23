@@ -639,6 +639,23 @@ def run_pipeline(
         status["steps_failed"].append("portfolio_risk")
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Ensure prices_df is available for Steps 6c-6e (it may not be set if
+    # both the backtest and optimizer steps were skipped/failed).
+    # ──────────────────────────────────────────────────────────────────────────
+    try:
+        prices_df  # noqa: test if bound
+    except NameError:
+        import pandas as pd
+        try:
+            from db.reader import DatabaseReader
+            _r2 = DatabaseReader(settings.db_path)
+            prices_df = _r2.read_prices()
+            if prices_df is None or prices_df.empty:
+                prices_df = pd.read_parquet(data_state.artifacts.prices_path)
+        except Exception:
+            prices_df = pd.read_parquet(data_state.artifacts.prices_path)
+
+    # ──────────────────────────────────────────────────────────────────────────
     # STEP 6c [OPTIONAL]: P&L Tracking
     # ──────────────────────────────────────────────────────────────────────────
     try:
