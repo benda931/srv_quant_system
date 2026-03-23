@@ -1,0 +1,773 @@
+
+--- PAGE 1 ---
+Claude-Ready Research Brief for Short Volatility
+via Correlation and Dispersion Trades
+Executive summary
+This brief converts the idea “short volatility via correlation/dispersion trades” into a reproducible
+research and implementation package: a measurement engine that detects correlation-structure
+distortions (Δ correlation matrices, Frobenius distortion, eigenvalue/“market mode” concentration,
+sector attribution, and correlation-of-correlations stability), a multi-layer signal stack (distortion →
+tradable residual dislocation → calibrated mean reversion probability via OU/ADF/Hurst → regime
+safety), and four deployable trade expressions (relative-value spreads, dispersion book, PCA residual
+baskets, and synthetic short convexity). The package is grounded in primary references for (a) variance-
+swap and volatility-index replication with option strips 1 , (b) implied correlation/dispersion
+measurement and interpretation 2 , (c) correlation eigenstructure and “market mode” using random-
+matrix/PCA perspectives 3 , and (d) rigorous backtest design and tail-risk reporting (including
+Expected Shortfall) 4 .
+Alpha thesis and trade expressions
+Core alpha thesis (precise)
+Let an equity index have constituents i = 1,…,N with weights w i, constituent volatilities σ i, and
+pairwise correlations ρ ij. The index variance decomposes into idiosyncratic (single-name) variance plus
+correlation-weighted cross terms (the same relationship used by implied-correlation calculations). 5
+When the realized correlation structure deviates sharply from a stable baseline (a structure distortion),
+and the deviation is not a true regime break, tradable residuals (spreads, factor-neutral baskets,
+dispersion gaps, and implied–realized correlation wedges) often mean-revert. Dispersion P&L is
+theoretically driven primarily by the implied vs realized correlation wedge, with additional higher-order
+volatility (“volga”) terms that must be risk-managed. 6 Evidence that correlation risk is priced in
+equity options supports the existence of persistent premia and systematic wedges exploitable by
+correlation/dispersion strategies. 7
+Notation (used throughout)
+- Returns: r i,t = ln(P i,t /P i,t−1 )
+- Return vector: r t ∈ R N
+- Correlation matrix over window W: C t (W) ∈ [−1,1]N×N
+- Index return: r I,t = ∑ i w i r i,t
+Trade expression A: Relative-value spreads
+Definition
+Construct a hedged spread x t between two tradables (ETFs, futures, sector baskets, or factor
+portfolios):
+x =
+lnP(A) −hlnP(B)
+,
+t t t
+1
+--- PAGE 2 ---
+where hedge ratio h is chosen by a neutrality objective (beta-neutral, vol-neutral, or PCA-neutral; see
+implementation section).
+Entry premise
+Enter when (i) correlation structure distortion is high and (ii) the spread/residual is dislocated (large ∣z∣)
+but statistically mean-reverting (OU/ADF/Hurst filters).
+P&L driver (conceptual)
+Profit comes from contraction of the spread (mean reversion), i.e., reduction in spread variance /
+realized volatility of x t. Because the spread is hedged, the intended exposure is to residual dynamics
+rather than directional market moves.
+What this shorts
+Primarily realized volatility of the spread (not necessarily option-implied volatility), and implicitly the
+persistence of correlation distortions.
+Trade expression B: Dispersion book (index vs components)
+Dispersion is the canonical “short vol via correlation” expression, because index variance embeds
+constituent variances and their correlations. 8
+Theoretical decomposition
+Index variance over a horizon T can be written (schematically) as:
+σ2 ≈ w2σ2+2 w w σ σ ρ .
+I ∑ i i ∑ i j i j ij
+i i<j
+Implied-correlation indices operationalize a related relationship using implied vols/variances. 9
+Trade construction (common form)
+- Long dispersion: sell index straddle/variance, buy constituent (or top-constituent basket) straddles/
+variance. 10
+- Short dispersion (the user’s “short vol” flavor often maps here): buy index variance exposure and sell
+constituent basket variance exposure, or more commonly, run a conditional short dispersion only when
+correlation is expected to rise and idiosyncratic dispersion is expected to compress.
+P&L driver
+A key primary result: dispersion-trade P&L can be expressed as (i) a correlation P&L term plus (ii) a
+volatility higher-order term (vega/volga/vanna effects). 6
+Operationally, your “alpha” is the expected move in realized correlation relative to the implied or
+“priced” correlation wedge (and whether you are positioned long vs short that wedge).
+Important practical anchor
+A standardized implied dispersion measure exists as an index: the Cboe S&P 500 Dispersion Index is
+defined as a square-root of the difference between weighted constituent expected variance and
+expected index variance (VIX²), floored at zero. 11 This provides a benchmark/feature for signals and
+monitoring.
+2
+--- PAGE 3 ---
+Trade expression C: PCA residual baskets
+Definition
+Fit PCA (or factor model) on a training window to represent returns:
+r ≈ Bf +ϵ ,
+t t t
+where f t are the top K principal components (“market mode” plus sector/factor modes) and ϵ t are
+residuals.
+Random-matrix/PCA studies show that the largest eigenvalue captures a common factor across stocks
+(“market mode”), and other significant eigenvectors often align with sectors; many remaining
+eigenvalues behave like noise. 3
+Tradable object
+Residual basket(s) formed by portfolio weights a targeting residual mispricing:
+x = a⊤ϵ
+t t
+or constructing pair/basket residuals from regression on the top components.
+P&L driver
+- Profit from residual contraction when correlation structure normalizes (residuals shrink) and from
+statistical mean reversion of residual processes. - This approach can be implemented without options; it
+is a “stat-arb style” expression of correlation normalization.
+Trade expression D: Synthetic short convexity (controlled)
+Goal
+Create a position whose payoff is negatively convex to realized variance/correlation shocks—i.e., it
+behaves like a short option gamma/short variance exposure but possibly constructed via liquid listed
+instruments (options, variance proxies, or dynamic strategies).
+Canonical option-theory anchor
+Variance swaps and volatility indices (like VIX-style indices) are motivated by model-free replication
+using portfolios of options weighted by strike-dependent kernels; the Cboe volatility-index methodology
+explicitly uses
+1/K2
+-style weighting consistent with variance replication reasoning. 1
+Controlled synthetic variants (examples for implementation, not recommendations)
+- Delta-hedged short straddle (single-name or index) with explicit gamma/vega limits.
+- Short variance exposure via listed variance proxies (if available) or via structured option strips
+approximating variance exposure (subject to liquidity constraints).
+- Dispersion-as-synthetic correlation short: a dispersion structure can generate near-pure correlation
+exposure but includes volga and other higher-order effects, which must be managed. 6
+P&L driver
+Collect convexity premium when realized variance/correlation realize below what is priced, while
+surviving tail expansions via regime filters, sizing caps, and kill-switches (risk section).
+3
+--- PAGE 4 ---
+Comparison table of trade expressions
+Trade Minimal Primary P&L Key failure Data Operational
+expression instruments driver mode intensity complexity
+Regime shift
+Medium
+Relative- Mean breaks
+ETFs / futures / (prices,
+value reversion of cointegration/ Medium
+baskets corporate
+spreads spread x t residual
+actions)
+stationarity
+Implied vs
+Index options
+realized Correlation High
++ constituent
+Dispersion correlation spikes + vol-of- (options
+options (or High
+book wedge + vol (“volga”) surfaces,
+variance swaps
+higher-order losses 12 IV, greeks)
+if available)
+vol terms 12
+Residual
+contraction
+PCA after PCA instability;
+ETFs/futures/ Medium– Medium–
+residual correlation eigenvector
+stocks High High
+baskets distortion; regime changes
+factor-neutral
+returns
+Synthetic Options / Short gamma/ Tail events;
+short variance short variance liquidity gaps; High Very high
+convexity proxies carry margin spirals
+Measurement engine specification
+This section specifies the measurement layer that produces features for signals, risk, and monitoring.
+The emphasis is reproducibility: all calculations are explicit, parameterized, and logged.
+Correlation matrices and ΔC
+Inputs
+- Daily close-to-close returns for universe U of size N: {r t } t T =1 . - Optional: intraday returns for more
+robust realized covariance (not required).
+Windows (parameters; values unspecified)
+- Short window W s (e.g., 20–60 trading days; unspecified)
+- Base window W b (e.g., 126–252 trading days; unspecified)
+Compute
+Cs = Corr(r ), Cb = Corr(r )
+t t−Ws+1:t t t−Wb+1:t
+ΔC = Cs−Cb
+t t t
+4
+--- PAGE 5 ---
+Notes on estimation risk
+Correlation estimates are noisy in small samples; stability depends on sample size and regime. 13 A
+production-grade system should support shrinkage or robust estimators (e.g., optional DCC overlay),
+but baseline rolling correlation is acceptable for prototyping.
+Frobenius distortion score
+Define off-diagonal masking matrix M where M ij = 1 for i  j,= 0 otherwise.
+Distortion
+D = ∥ΔC ⊙M∥
+t t F
+Optionally normalize by N(N −1) to make the scale stable across universe size.
+Interpretation
+- High D t means correlation structure recently moved away from its baseline (a “correlation regime
+move”). - This is distinct from “average correlation” because it captures broad structural changes, not
+just a scalar level.
+Eigenvalue and market-mode metrics
+PCA / eigen-decomposition:
+Cs = V Λ V⊤, Λ = diag(λ ≥ ⋯ ≥ λ )
+t t t t t 1,t N,t
+Metrics - Market-mode share: m t = λ 1,t /N. (Higher indicates stronger common factor.)
+- Eigenvalue concentration: e.g., Herfindahl H t = ∑ k (λ k,t /∑ j λ j,t )2 .
+Random-matrix work supports interpreting the top eigenvalue as a market-wide mode and other
+significant eigenvectors as sector-like structures, with many eigenvalues consistent with noise. 3
+Sector contributions to distortion
+Let assets be partitioned into sectors g ∈ {1,…,G}, each with index set S g.
+Compute blockwise distortion contributions: - Within-sector:
+Dwithin = ∥ΔC [S ,S ]⊙M∥
+g,t t g g F
+- Cross-sector:
+Dcross = ∥ΔC [S ,S ]∥
+g,h,t t g h F
+Define normalized contributions:
+(Dwithin)2 (Dcross)2
+πwithin = g,t , πcross = g,h,t
+g,t D2 g,h,t D2
+t t
+These become “who is causing the correlation regime change?” features.
+5
+--- PAGE 6 ---
+Correlation-of-correlations stability
+You want a scalar capturing how stable the correlation structure itself is, beyond level and distortion.
+Two implementable definitions:
+(1) Matrix similarity over time
+Let u(C) vectorize the upper triangle excluding diagonal. Define:
+CoC
+t
+= 1−Corr(u(C
+t
+s),u(C
+t
+s
+−1
+))
+Higher CoC t = structure changing rapidly day-to-day.
+(2) Within-window correlation volatility
+Within the short window, compute “corr series” for each pair via sub-windowed correlations and take
+average standard deviation across pairs (more compute heavy; optional).
+Measurement-engine pseudocode
+# config (all horizons/thresholds intentionally unspecified)
+Ws=CONFIG.short_corr_window
+Wb=CONFIG.base_corr_window
+MIN_OBS=CONFIG.min_obs_per_asset
+defcompute_corr_matrix(returns_df):
+# returns_df: DataFrame[T_window x N]
+# robust options: winsorize, volatility-normalize, shrinkage (optional)
+returnreturns_df.corr()
+deffrobenius_offdiag(mat):
+n=mat.shape[0]
+off=mat.copy()
+np.fill_diagonal(off.values,0.0)
+returnnp.sqrt((off.values**2).sum())
+defeigen_metrics(C):
+# symmetric PSD; use eigh for stability
+vals,vecs=np.linalg.eigh(C.values)
+vals=vals[::-1] # descending
+n=len(vals)
+market_mode_share=vals[0]/n
+herfindahl=np.sum((vals/np.sum(vals))**2)
+returndict(lambda1=vals[0],market_mode_share=market_mode_share,
+herfindahl=herfindahl)
+defvectorize_upper(C):
+n=C.shape[0]
+idx=np.triu_indices(n,k=1)
+returnC.values[idx]
+6
+--- PAGE 7 ---
+defmeasurement_step(returns,sectors,t):
+# returns: DataFrame indexed by date, columns assets
+Rs=returns.loc[t-Ws+1:t]
+Rb=returns.loc[t-Wb+1:t]
+C_s=compute_corr_matrix(Rs)
+C_b=compute_corr_matrix(Rb)
+dC =C_s-C_b
+D=frobenius_offdiag(dC)
+eig=eigen_metrics(C_s)
+# sector contributions
+contrib_within={}
+contrib_cross ={}
+forg,Sginsectors.items():
+block=dC.loc[Sg,Sg]
+contrib_within[g]=frobenius_offdiag(block)**2
+forg,Sginsectors.items():
+forh,Shinsectors.items():
+ifg>=h:
+continue
+block=dC.loc[Sg,Sh]
+contrib_cross[(g,h)]=np.sqrt((block.values**2).sum())**2
+# normalize contributions
+denom=(D**2)ifD>0elsenp.nan
+contrib_within={k:v/denomfork,vincontrib_within.items()}
+contrib_cross ={k:v/denomfork,vincontrib_cross.items()}
+# correlation-of-correlations (matrix similarity)
+ift-1inreturns.index:
+C_prev=compute_corr_matrix(returns.loc[t-Ws:t-1])
+coc=1.0-np.corrcoef(vectorize_upper(C_s),vectorize_upper(C_prev))[0,1]
+else:
+coc=np.nan
+returndict(
+C_short=C_s,C_base=C_b,dC=dC,
+frob_distortion=D,
+coc_instability=coc,
+**eig,
+sector_within_contrib=contrib_within,
+sector_cross_contrib=contrib_cross
+)
+7
+--- PAGE 8 ---
+Signal design and decision logic
+This is the “multi-layer scoring” spec. Each layer outputs a score in [0,1] (or a z-score), then the system
+combines them into an entry/exit decision. Threshold values are explicitly unspecified (placeholders),
+as requested.
+Layer 1: Distortion score
+Feature: D t (Frobenius distortion), plus eigen concentration m t, plus CoC instability.
+Normalize (example):
+D −μ(D )
+zD = t t−L:t−1
+t σ(D )
+t−L:t−1
+where L is a long lookback (unspecified).
+Distortion score:
+S
+t
+dist = σ(a
+1
+z
+t
+D +a
+2
+⋅rank(m
+t
+)+a
+3
+z
+t
+CoC)
+with logistic σ(⋅); coefficients a k unspecified.
+Rationale
+Eigenstructure identifies whether the market is dominated by a common mode (often where correlation
+trades behave differently). 3
+Layer 2: Residual dislocation score
+This layer asserts “there is actually something tradable mispriced,” not just a global regime story.
+For each candidate trade j (pair spread, basket residual, dispersion gap), define a residual process
+x(j)
+t
+and compute a dislocation z-score:
+x(j) −μ(x(j)
+)
+z(j) = t t−k:t−1
+t σ(x(j)
+)
+t−k:t−1
+k unspecified.
+Define:
+∣z(j)
+∣
+Sdisloc = min 1, t
+j,t Z
+( cap)
+with Z cap unspecified.
+Layer 3: Mean-reversion probability score (OU + ADF + Hurst)
+You want robust evidence that the residual is likely to revert in your holding horizon.
+8
+--- PAGE 9 ---
+OU calibration
+Model residual x t as OU:
+dx = λ(μ−x )dt+σdZ
+t t t
+Half-life:
+ln2
+τ =
+λ
+This half-life relationship appears explicitly in practical mean-reverting portfolio work and is useful for
+translating estimated λ into trading horizons. 14
+OU-based score (example): - target half-life range [τ min ,τ max ] unspecified
+- map distance to a score:
+τ −τ⋆ 2
+SOU = exp − j,t
+j,t ( s )
+( τ )
+parameters unspecified.
+ADF stationarity filter
+Use ADF (unit root) test to reject non-stationarity (p-value threshold unspecified). The Dickey–Fuller
+framework is the canonical reference for this class of tests. 15
+Hurst exponent (long memory) filter
+Estimate Hurst H of x t. Classic references trace H to Hurst’s original work and subsequent long-
+memory literature. 16
+Heuristic interpretation (common in practice):
+- H < 0.5: mean-reverting tendency
+- H ≈ 0.5: random walk-like
+- H > 0.5: trending/persistent
+Combined mean-reversion score:
+Smr = clip b SOU+b 1[ADF pass]+b 1[H < H⋆],0,1
+j,t ( 1 j,t 2 3 )
+Thresholds and weights unspecified.
+Layer 4: Regime safety score
+This is the layer that prevents “short vol at the cliff.”
+Motivation
+Correlations behave differently in extremes; tail dependence can increase and invalidate normal-regime
+assumptions. 17
+Also, implied-volatility indices are built from option prices in a way consistent with variance replication;
+rapid repricing can accompany regime breaks. 18
+Regime features (examples; inputs depend on available data) - Realized vol acceleration: ΔRV t =
+RV 20,t −RV 60,t - Market-mode share m t and its change Δm t - CoC instability - Liquidity proxies (bid-
+9
+--- PAGE 10 ---
+ask spreads, volume, realized gaps) (assumptions unspecified) - Event calendar (optional; unspecified
+integration)
+Safety score (example):
+Ssafe = 1−σ(c z(ΔRV)+c z(m )+c z(CoC ))
+t 1 2 t 3 t
+Coefficients and thresholds unspecified.
+Decision logic (per trade candidate)
+Define a unified conviction score:
+Score = Sdist×Sdisloc×Smr×Ssafe
+j,t t j,t j,t t
+Entry rule (placeholder): - Enter trade j if: - Score j,t ≥ Θ enter (unspecified), and - Layer gates satisfied:
+ADF pass (optional hard gate), τ in range (optional), regime safety above floor (hard gate).
+Exit rule (placeholder): - Exit if: - residual crosses mean / z-score compresses below Θ exit (unspecified),
+or - regime safety collapses (kill-switch), or - hedge instability exceeds threshold (unspecified).
+Trade implementation and execution blueprint
+This section defines instruments, hedging, and execution considerations. It is written so an AI can
+implement trade objects with standardized interfaces.
+Instruments (menu; availability-dependent)
+• Index futures (directional hedging / fast beta control): e.g., E-mini equity index futures contract
+specs are published by CME Group 19 . 20
+• Index options: Cboe Global Markets 21 lists SPX options as cash-settled, European exercise,
+with published contract specifications. 22
+• ETFs / sector ETFs: for RV spreads and PCA baskets (data and borrow considerations:
+unspecified).
+• Single-name options: required for true dispersion at constituent level.
+• Variance swaps / correlation swaps: typically OTC; include only if your environment supports
+them. Variance swaps have payoff linked to realized variance minus strike. 23
+• Volatility-index methodology data products: implied correlation and dispersion indices
+provide features/benchmarks. 24
+Hedge ratios (beta-, vol-, PCA-neutral)
+Define a standardized hedge interface:
+Beta-neutral
+Estimate β via regression (rolling window unspecified):
+r(A)
+=
+α+βr(B)
++ϵ ⇒ h = β
+t t t
+10
+--- PAGE 11 ---
+Vol-neutral
+Set hedge ratio to equalize volatility contribution:
+Vol(r(A))
+h = ⋅ρ
+Vol(r(B)) AB
+(or alternative; exact convention logged)
+PCA-neutral
+Let v 1 ,…,v K be top eigenvectors of C. Choose weights w to minimize exposure:
+min ∥V⊤w∥ s.t. constraints (dollar/sector).
+K 2
+w
+PCA structure is motivated by empirical findings on market/sector eigenmodes. 25
+Implementation specifics by trade type
+Relative-value spreads - Instruments: ETFs / futures / stock baskets
+- Rebalance: daily or threshold-based (unspecified)
+- Risk controls: cap gross, cap per-cluster (see risk section)
+Dispersion book - Instruments: index options (SPX) + constituent options (top-N or basket)
+- Construction: match notionals by vega-neutral or variance-notional conventions; note that dispersion
+P&L contains correlation term plus higher-order vol terms (must be monitored). 12
+- Benchmark features: implied correlation indices and dispersion indices for timing/risk. 26
+PCA residual baskets - Instruments: futures/ETFs/stocks
+- Construction: compute PCA loadings on training window; generate residuals; trade residual z-scores;
+enforce factor neutrality constraints.
+Synthetic short convexity - Instruments: options or variance proxies
+- Rules: strict gamma/vega limits, explicit stop-outs on volatility-of-vol spikes, margin utilization caps
+(thresholds unspecified).
+Transaction costs and execution considerations
+Transaction cost model is unspecified by requirement; implement as configuration: - Slippage: basis
+points per notional (unspecified)
+- Commission/fees: per contract/share (unspecified)
+- Borrow costs (if shorting equities/ETFs): unspecified
+- Option bid-ask modeling: mid ± half-spread; spread model unspecified
+Execution considerations - Use time-of-day rules (avoid open/close if spreads wide; unspecified).
+- Use liquidity constraints (max participation rate, max order size; unspecified).
+- Roll management for futures/options (roll calendar rules unspecified).
+- For options strategies, integrate greeks and scenario P&L; dispersion has volga sensitivity as shown in
+dispersion P&L decomposition. 12
+11
+--- PAGE 12 ---
+Backtest protocol and validation
+This section is intentionally “audit-like”: it specifies how to produce a credible research result.
+Universe selection
+Two baseline universes (choose one; both supported): 1. Index + sectors: index proxy + sector ETFs/
+futures for spreads/PCA (simpler, fewer survivorship issues).
+2. Index + constituents: index constituents for dispersion and residual baskets (requires survivorship-
+safe constituent history).
+Universe rules (all explicit; values unspecified): - Liquidity filter (ADV threshold unspecified)
+- Corporate action handling (splits/dividends/mergers)
+- Tradability constraints (options listing availability, min OI, etc.)
+Data requirements
+Minimum: - Daily prices for all assets; corporate actions adjusted. - Risk-free rate series (optional, for
+option parity; unspecified). For dispersion/options: - Option chain snapshots (bid/ask, IV, strikes,
+expiries), greeks or ability to compute. - Implied vol surfaces (or ATM IV by delta=0.5 convention as
+referenced in implied correlation index methodology). 27
+Optional: - Realized intraday covariance (for better correlation estimates).
+- Standardized implied correlation / dispersion indices as features/labels. 26
+Bias controls: lookahead and survivorship
+Hard requirements: - Point-in-time constituent membership (no survivorship bias). - Use only data
+available at decision time t (no forward-looking IV, weights, or fundamentals). - Corporate actions
+applied with correct effective dates. - For any ML calibration, use purged walk-forward (described
+below).
+Rebalancing and holding
+Specify: - Signal computation frequency (daily EOD vs intraday; unspecified). - Rebalance frequency
+(daily/weekly/event-driven; unspecified). - Holding horizon constraints (min/max days; unspecified),
+potentially tied to OU half-life estimate. 14
+Performance metrics
+Report at minimum: - Annualized return, annualized volatility, Sharpe
+- Max drawdown
+- Tail risk metrics including Expected Shortfall (ES) at a chosen confidence (value unspecified)
+A key regulatory reference explicitly notes the shift from VaR to ES for better tail-risk capture under
+stress. 28
+12
+--- PAGE 13 ---
+Stress tests (correlation shock scenarios)
+At least three families:
+1. Historical stress windows (dates chosen from data; unspecified):
+2. Example: “high correlation shock” regime; evaluate dispersion and synthetic convexity losses
+under rapid correlation increases.
+3. Parametric correlation shock
+4. Replace correlation matrix with stressed version:
+Cstress = (1−η)C+η11⊤
+where η stress intensity (unspecified).
+5. Tail dependence check
+Tail correlations behave differently than normal correlations; incorporate a tail-correlation or
+quantile-correlation diagnostic. 17
+Walk-forward validation and overfitting controls
+Use: - Rolling train/validation/test splits (lengths unspecified). - Combinatorially Symmetric Cross-
+Validation (CSCV) and/or related methods to estimate overfitting probability. 29
+- Report parameter sensitivity: show performance bands across plausible W s ,W b ,k, etc. (values
+unspecified).
+Sample backtest result table (placeholders)
+Ann. Ann. Max ES
+Strategy Sharpe Turnover Notes
+return vol DD (97.5%)
+Costs:
+RV spreads [TBD] [TBD] [TBD] [TBD] [TBD] [TBD]
+[unspecified]
+Volga risk
+Dispersion [TBD] [TBD] [TBD] [TBD] [TBD] [TBD]
+managed? 12
+PCA residual PCA stability
+[TBD] [TBD] [TBD] [TBD] [TBD] [TBD]
+baskets tracked 25
+Synthetic
+Strict kill-switch
+short [TBD] [TBD] [TBD] [TBD] [TBD] [TBD]
+applied
+convexity
+Risk, sizing, and monitoring
+Short-vol/correlation strategies can have attractive average returns but are vulnerable to tail events; risk
+design is central, not optional. Variance risk premia literature motivates that implied variance can
+exceed realized variance over time (a “premium”), but harvesting it tends to require surviving rare
+crashes. 30
+13
+--- PAGE 14 ---
+Convexity-aware sizing rules
+Principle
+Position size should generally decrease when: - market-mode share m t is extreme,
+- correlation-of-correlations instability is high,
+- realized vol acceleration is high.
+Implementation (example; parameters unspecified)
+Let g t be gross exposure multiplier:
+g = clip g ⋅(1−α z(m )−α z(CoC )−α z(ΔRV )), g ,g
+t ( 0 1 t 2 t 3 t min max)
+Cluster caps and overlap control
+Prevent “many trades that are actually one trade.” - Define clusters by sector, factor exposure, and
+correlation similarity (e.g., hierarchical clustering on C t b ). - Cap gross per cluster: ∑ j∈cluster k ∣w j ∣ ≤
+Cap (unspecified). - Cap dispersion vega/gamma per bucket.
+k
+Regime-adjusted gross and kill-switch logic
+Kill-switch triggers (hard gates; thresholds unspecified): -
+zD
+increases further after entry (distortion
+t
+worsening).
+- CoC instability spikes above threshold (structure changing too fast).
+- Market-mode share m t exceeds extreme threshold.
+- Tail-correlation diagnostic indicates “panic coupling.” 31
+Stop logic
+Avoid naive price stops; use model invalidation stops: - Residual stationarity fails (ADF no longer rejects
+unit root). 32
+- OU half-life explodes outside bounds (residual no longer mean reverting). 14
+- Hedge instability: rolling beta/vol hedge ratio changes beyond tolerance.
+VaR/ES calculations
+Implement both: - Parametric (normal / t) only as baseline
+- Historical simulation ES (confidence unspecified), consistent with the motivation for ES as a tail-risk
+metric in stressed contexts. 33
+Monitoring and dashboard spec
+Real-time (or daily) dashboard panels - Correlation heatmaps: C t s , ΔC t
+- Distortion time series: D t, z
+t
+D
+- Eigen metrics: m t, H t
+- Sector attribution bars:
+πwithin
+, top
+πcross
+g,t g,h,t
+- Candidate list: top trades by Score j,t with layer breakdown
+- Active trades: exposure by cluster, beta, vega/gamma (if options), ES contribution
+- Outcomes chart: distortion quantile vs forward outcomes (next 5/10/20 days returns of strategy;
+windows unspecified)
+Mermaid: system architecture
+14
+--- PAGE 15 ---
+flowchart LR
+A[Market data ingest] --> B[Clean & align time series]
+B --> C[Measurement engine: C_short, C_base, ΔC]
+C --> D[Features: Frobenius distortion, eigen metrics, sector attribution,
+CoC]
+D --> E[Signal engine: distortion, dislocation, mean reversion, regime
+safety]
+E --> F[Portfolio construction: constraints, cluster caps, sizing]
+F --> G[Execution engine: orders, slippage model]
+G --> H[Risk engine: VaR/ES, scenario shocks, kill-switch]
+H --> I[Monitoring/dashboard + logs]
+I --> E
+Mermaid: signal → execution flowchart
+flowchart TD
+S0[Compute features at time t] --> S1{Regime safety OK?}
+S1 -- No --> X0[No trade / reduce gross / exit risky positions]
+S1 -- Yes --> S2{Distortion above threshold?}
+S2 -- No --> X1[No trade]
+S2 -- Yes --> S3{Residual dislocation tradable?}
+S3 -- No --> X2[No trade]
+S3 -- Yes --> S4{Mean reversion tests pass? (OU/ADF/Hurst)}
+S4 -- No --> X3[No trade]
+S4 -- Yes --> S5[Construct hedge ratio + position size]
+S5 --> S6[Place orders under execution constraints]
+S6 --> S7[Post-trade risk checks + set kill-switch monitors]
+Mermaid: timeline of a trade candidate lifecycle
+timeline
+title Signal lifecycle (one candidate)
+Feature build : compute C_short/C_base, ΔC, distortion, eigen metrics
+Candidate formation : form residual x_t, compute z-score dislocation
+Qualification : calibrate OU parameters, run ADF, estimate Hurst
+Entry gating : regime safety + thresholds -> enter or reject
+Position mgmt : rebalance hedge, monitor distortion & CoC instability
+Exit : mean reversion realized OR invalidation OR kill-switch
+Postmortem : log attribution, costs, slippage, regime context
+Claude deliverables and file-package blueprint
+This section defines the concrete artifacts Claude should generate and the expected I/O formats. All
+parameter values remain externalized (YAML/JSON) and unspecified by default.
+15
+--- PAGE 16 ---
+Datasets (schemas and formats)
+Prices - data/raw/prices_daily.parquet
+- columns: date, asset_id, close, adj_close, volume, corporate_action_flags
+Universe and metadata - data/meta/universe.csv
+- asset_id, asset_type, sector, currency, exchange, start_date, end_date - data/
+meta/index_weights.parquet (point-in-time)
+- date, asset_id, weight
+Options (if used) - data/raw/options_chain.parquet
+- timestamp, underlying_id, expiry, strike, cp_flag, bid, ask, iv, delta, gamma,
+vega, theta, open_interest - data/meta/contract_specs.json (SPX, futures multipliers,
+etc.)
+- SPX contract characteristics are published by Cboe. 34
+- Futures contract specs published by CME. 20
+Derived features - data/features/corr_features.parquet
+- date, frob_distortion, market_mode_share, herfindahl, coc_instability, ... -
+data/features/sector_contrib.parquet
+- date, sector, within_contrib, ...
+Code modules (Python package layout)
+repo/
+config/
+base.yaml
+research.yaml
+prod.yaml
+src/
+ingest/
+prices.py
+options.py
+universe.py
+metrics/
+correlation.py
+eigen.py
+dispersion.py
+residuals.py
+signal/
+distortion.py
+dislocation.py
+mean_reversion.py
+regime.py
+score.py
+portfolio/
+hedging.py
+sizing.py
+constraints.py
+16
+--- PAGE 17 ---
+construction.py
+risk/
+var_es.py
+scenarios.py
+clusters.py
+killswitch.py
+backtest/
+engine.py
+attribution.py
+walkforward.py
+reports.py
+utils/
+logging.py
+calendars.py
+math.py
+reports/
+research_brief.md
+figures/
+outputs/
+daily_signals.parquet
+trades.parquet
+pnl.parquet
+risk.parquet
+Expected outputs (for research and prototype)
+• outputs/daily_signals.parquet : per date, per candidate trade: layer scores + decision +
+hedge ratio
+• outputs/trades.parquet : executions with timestamps, fills, slippage
+• outputs/pnl.parquet : daily P&L with decomposition (carry vs dislocation vs hedge)
+• outputs/risk.parquet : VaR/ES, stress P&L, liquidity metrics
+• reports/research_brief.md : automatically generated summary including:
+• distortion quantile → forward return analysis
+• regime-conditioned performance
+• correlation shock stress results
+Primary-source anchors Claude should cite in code comments/tests
+• Variance/volatility-index replication and VIX-style methodology, including strike-weighting and
+variance formula. 35
+• Implied correlation index methodology and the index-variance decomposition it uses. 9
+• Standardized dispersion index definition (DSPX formula and relationship to VIX² and constituent
+variances). 11
+• Dispersion P&L decomposition into correlation P&L plus volatility higher-order terms. 6
+• Correlation eigenstructure and market/sector modes (PCA/RMT motivation). 3
+• OU half-life formula used for trading horizons. 14
+• Backtest overfitting controls (CSCV / probability of backtest overfitting). 29
+• ES as a tail-risk metric in stress contexts (Basel market-risk standards). 28
+17
+--- PAGE 18 ---
+1 18 35 cdn.cboe.com
+https://cdn.cboe.com/resources/indices/Cboe_Volatility_Index_Mathematics_Methodology.pdf
+2 5 8 9 10 27 cdn.cboe.com
+https://cdn.cboe.com/resources/indices/documents/Implied_Correlation-WhitePaper-v1.0.5.pdf
+3 25 A Random Matrix Approach to Cross-Correlations in Financial Data
+https://arxiv.org/abs/cond-mat/0108023?utm_source=chatgpt.com
+4 29 davidhbailey.com
+https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf
+6 12 19 ma.imperial.ac.uk
+https://www.ma.imperial.ac.uk/~ajacquie/index_files/Jacquier%2C%20Slaoui%20-%20Dispersion.pdf
+7 The Price of Correlation Risk: Evidence from Equity Options
+https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.2009.01467.x?utm_source=chatgpt.com
+11 spglobal.com
+https://www.spglobal.com/spdji/en/documents/methodologies/methodology-cboe-sp-500-dispersion-index.pdf
+13 At what sample size do correlations stabilize?
+https://www.sciencedirect.com/science/article/abs/pii/S0092656613000858?utm_source=chatgpt.com
+14 arxiv.org
+https://arxiv.org/pdf/0708.3048
+15 32 Distribution of the Estimators for Autoregressive Time ...
+https://www.tandfonline.com/doi/abs/10.1080/01621459.1979.10482531?utm_source=chatgpt.com
+16 Long-Term Storage Capacity of Reservoirs
+https://ascelibrary.com/doi/10.1061/TACEAT.0006518?utm_source=chatgpt.com
+17 31 Extreme Correlation of International Equity Markets
+https://www.longin.fr/Recherche_Publications/Articles_pdf/
+Longin_Solnik_Extreme_corelation_of_international_equity_market.pdf?utm_source=chatgpt.com
+20 E-mini S&P 500 Futures Contract Specs
+https://www.cmegroup.com/markets/equities/sp/e-mini-sandp500.contractSpecs.html?utm_source=chatgpt.com
+21 24 26 Cboe®Implied Correlation® Index (COR3M)
+https://cdn.cboe.com/resources/indices/documents/Implied_Correlation-WhitePaper-v1.0.5.pdf?utm_source=chatgpt.com
+22 34 S&P 500 Index Options Product Specifications
+https://www.cboe.com/en/tradable-products/sp-500/spx-options/spx-specifications/?utm_source=chatgpt.com
+23 Quantitative Strategies Research Notes - Emanuel Derman
+https://emanuelderman.com/wp-content/uploads/1999/02/gs-volatility_swaps.pdf?utm_source=chatgpt.com
+28 33 bis.org
+https://www.bis.org/bcbs/publ/d352.pdf
+30 Variance Risk Premia∗ - NYU Tandon School of Engineering
+https://engineering.nyu.edu/sites/default/files/2019-01/CarrReviewofFinStudiesMarch2009-a.pdf?utm_source=chatgpt.com
+18

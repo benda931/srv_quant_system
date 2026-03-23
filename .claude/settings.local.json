@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -rn \"delta_spy_i\\\\|delta_tnx_i\\\\|delta_dxy_i\\\\|w_final\\\\|sector_ticker\\\\|direction\\\\|conviction_score\\\\|decision_label\\\\|action_bias\\\\|sector_name\\\\|mc_score\" /c/Users/omrib/OneDrive/Desktop/srv_quant_system/analytics/*.py)",
+      "Bash(pip show:*)",
+      "Bash(wc -l \"C:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\\\\tests\\\\test_\"*.py)",
+      "Bash(grep -l 'def ' C:UsersomribOneDriveDesktopsrv_quant_systemanalytics *.py)",
+      "Bash(ls \"C:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\\\\data_lake\\\\parquet\"\" 2>/dev/null && echo \"EXISTS\" || echo \"NOT FOUND \")",
+      "Read(//c/Users/omrib/OneDrive/Desktop/**)",
+      "Bash(python3 -c \":*)",
+      "Bash(find /c/Users/omrib/OneDrive/Desktop/srv_quant_system -name \"*.py\" -type f -exec wc -l {} +)",
+      "Bash(head -5 __NEW_LINE_9b177827a69d43fe__ python -c \":*)",
+      "Bash(xargs ls:*)",
+      "Bash(ls -lah \"C:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\\\\analytics\"\" 2>/dev/null | grep -v \"^d \")",
+      "Bash(find /c/Users/omrib/OneDrive/Desktop/srv_quant_system -name *cron* -o -name *schedule* -o -name *periodic*)",
+      "Bash(grep \"\\\\.py$\")",
+      "Bash(grep -r \"schedule\\\\|cron\\\\|APScheduler\\\\|at_time\\\\|periodic\" /c/Users/omrib/OneDrive/Desktop/srv_quant_system --include=*.py)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(ls -la data/srv_quant*)",
+      "Bash(dir data/srv_quant*)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(find C:UsersomribOneDriveDesktopsrv_quant_system -type f -name *.py -o -name *.txt -o -name *.md -o -name *.bat -o -name .env)",
+      "Bash(xargs wc:*)",
+      "Bash(tasklist)",
+      "Bash(find /c/Users/omrib/OneDrive/Desktop/srv_quant_system -name *optimization* -o -name *improve*)"
+    ]
+  }
+}

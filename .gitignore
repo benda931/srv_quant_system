@@ -1,0 +1,53 @@
+# ─── Secrets ───────────────────────────────────────────────
+.env
+agents/credentials/api_keys.env
+
+# ─── Python ────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Data (large/sensitive) ────────────────────────────────
+data_lake/
+data/*.duckdb
+data/*.duckdb.wal
+data/*.db
+data/cache/
+data/paper_portfolio.json
+data/dss_trade_state.json
+data/orchestrator_state.json
+data/alerts/
+
+# ─── Logs ──────────────────────────────────────────────────
+logs/
+*.log
+*.log.bak
+
+# ─── Backups ───────────────────────────────────────────────
+*.bak
+*.bak2
+*.bak3
+*.py.bak
+
+# ─── IDE ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Reports output (regenerated) ─────────────────────────
+reports/output/
+
+# ─── Agent reports (regenerated) ──────────────────────────
+agents/methodology/reports/*.json
+agents/optimizer/optimization_history.json
+agents/math/math_proposals/

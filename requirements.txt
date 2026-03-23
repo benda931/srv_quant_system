@@ -1,0 +1,56 @@
+# =============================================================================
+# SRV Quantamental Decision Support System — Python dependencies
+#
+# System overview:
+#   Sector-rotation / statistical-arbitrage DSS built on SPDR sector ETFs
+#   (XLC–XLU) vs SPY.  Data is ingested from Financial Modeling Prep (FMP)
+#   and stored as Parquet artifacts in data_lake/.  The analytics core
+#   (analytics/stat_arb.py) runs rolling out-of-sample PCA, EWMA vol,
+#   macro betas, and correlation-structure diagnostics.  Attribution scores
+#   (SDS / FJS / MSS / STF / MC) are computed per sector and surfaced through
+#   a Dash / Plotly dashboard with a Hebrew RTL UI.  A data-ops layer
+#   (data_ops/) provides freshness, coverage, and validation health checks
+#   that are wired into the dashboard's Data Health tab.
+#
+# Python requirement: >= 3.11
+# Versions pinned to stable, production-grade releases as of early 2026.
+# No ML frameworks (torch / transformers / jax) are required.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Web framework & UI
+# ---------------------------------------------------------------------------
+dash==2.18.2
+dash-bootstrap-components==1.6.0
+plotly==5.24.1
+
+# ---------------------------------------------------------------------------
+# Data layer
+# ---------------------------------------------------------------------------
+pandas==2.2.3
+numpy==2.1.3
+pyarrow==18.1.0          # Parquet engine (engine="pyarrow" in pipeline.py)
+duckdb>=1.1.0            # Columnar OLAP database — primary data store (db/)
+
+# ---------------------------------------------------------------------------
+# Analytics & modelling
+# ---------------------------------------------------------------------------
+scipy==1.14.1
+scikit-learn==1.5.2      # PCA + StandardScaler in analytics/stat_arb.py
+
+# ---------------------------------------------------------------------------
+# Configuration & settings
+# ---------------------------------------------------------------------------
+pydantic==2.9.2
+pydantic-settings==2.6.1 # BaseSettings + .env loading in config/settings.py
+
+# ---------------------------------------------------------------------------
+# HTTP & secrets
+# ---------------------------------------------------------------------------
+requests==2.32.3         # FMP REST calls in data/pipeline.py
+python-dotenv==1.0.1     # .env file parsing (pulled by pydantic-settings)
+
+# ---------------------------------------------------------------------------
+# AI Agent loop
+# ---------------------------------------------------------------------------
+anthropic>=0.86.0        # Claude API — multi-agent feedback loop in scripts/
