@@ -27,7 +27,13 @@
       "Bash(find C:UsersomribOneDriveDesktopsrv_quant_system -type f -name *.py -o -name *.txt -o -name *.md -o -name *.bat -o -name .env)",
       "Bash(xargs wc:*)",
       "Bash(tasklist)",
-      "Bash(find /c/Users/omrib/OneDrive/Desktop/srv_quant_system -name *optimization* -o -name *improve*)"
+      "Bash(find /c/Users/omrib/OneDrive/Desktop/srv_quant_system -name *optimization* -o -name *improve*)",
+      "Bash(find . -name \"*.py\" -not -path \"*/__pycache__/*\" -not -path \"./.git/*\" -exec wc -l {})",
+      "Bash(ls -t /c/Users/omrib/OneDrive/Desktop/srv_quant_system/agents/methodology/reports/*_methodology_lab.json)",
+      "Bash(xargs cat:*)",
+      "Bash(git -C /c/Users/omrib/OneDrive/Desktop/srv_quant_system log --oneline)",
+      "Bash(git -C /c/Users/omrib/OneDrive/Desktop/srv_quant_system shortlog -s)",
+      "Bash(git -C \"C:/Users/omrib/OneDrive/Desktop/srv_quant_system\" shortlog -sn)"
     ]
   }
 }

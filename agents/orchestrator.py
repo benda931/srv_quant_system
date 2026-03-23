@@ -137,6 +137,12 @@ TASKS = {
         "description": "backtest שבועי מלא עם methodology lab (13 אסטרטגיות)",
         "function": "_task_weekly_backtest",
     },
+    "alpha_research": {
+        "schedule": "monday_10:00",
+        "depends_on": ["weekly_backtest"],
+        "description": "מחקר alpha: OOS validation + regime-adaptive + GPT suggestions",
+        "function": "_task_alpha_research",
+    },
     "pair_scan": {
         "schedule": "06:15_weekdays",
         "depends_on": ["data_refresh"],
@@ -518,6 +524,36 @@ class Orchestrator:
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
             return {"status": "ok", **recap}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_alpha_research(self) -> dict:
+        """מחקר alpha: OOS validation + regime-adaptive + GPT suggestions."""
+        try:
+            import pandas as pd
+            from config.settings import get_settings
+            from analytics.alpha_research import run_alpha_research
+            prices = pd.read_parquet(ROOT / "data_lake" / "parquet" / "prices.parquet")
+            settings = get_settings()
+            report = run_alpha_research(prices, settings, include_gpt=True)
+
+            result = {
+                "status": "ok",
+                "oos_sharpe": report.best_single_strategy.out_of_sample_sharpe,
+                "oos_valid": report.best_single_strategy.is_valid,
+                "regime_sharpes": report.regime_adaptive.regime_sharpes,
+                "ensemble_sharpe": report.ensemble_sharpe,
+                "n_gpt_suggestions": len(report.gpt_suggestions),
+                "recommendations": report.recommendations[:3],
+            }
+
+            # Alert if positive OOS found
+            if report.best_single_strategy.is_valid:
+                self._dispatch_alert("INFO", "Positive OOS Alpha Found",
+                    f"OOS Sharpe={report.best_single_strategy.out_of_sample_sharpe:.3f}, "
+                    f"params={report.best_single_strategy.params}")
+
+            return result
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 

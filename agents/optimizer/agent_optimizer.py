@@ -56,6 +56,20 @@ from scripts.claude_loop import execute_actions, _extract_json_block, send_to_cl
 from agents.optimizer.optimization_log import get_optimization_log
 from agents.shared.agent_registry import get_registry, AgentStatus
 
+# ── GPT Fallback — when Claude is unavailable, use GPT via LLM bridge ──
+def _query_gpt_fallback(prompt: str) -> str:
+    """Query GPT when Claude API is not configured."""
+    try:
+        from agents.math.llm_bridge import DualLLMBridge
+        bridge = DualLLMBridge()
+        if bridge.has_gpt:
+            return bridge.query_gpt(prompt, "optimization")
+        elif bridge.has_claude:
+            return bridge.query_claude(prompt, "optimization")
+    except Exception as e:
+        log.warning("GPT fallback failed: %s", e)
+    return ""
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # עזרים — קריאת מצב המערכת
@@ -487,8 +501,20 @@ def _run_optimizer_loop(
         turn += 1
         log.info("[Turn %d/%d] Sending to Claude...", turn, max_turns)
 
-        reply, messages = send_to_claude(system_prompt, messages, current_message)
-        log.info("[Turn %d] Claude replied (%d chars)", turn, len(reply))
+        # Try Claude first, fall back to GPT if Claude unavailable
+        try:
+            reply, messages = send_to_claude(system_prompt, messages, current_message)
+            log.info("[Turn %d] Claude replied (%d chars)", turn, len(reply))
+        except Exception as claude_err:
+            log.warning("[Turn %d] Claude failed (%s) — trying GPT fallback", turn, claude_err)
+            reply = _query_gpt_fallback(f"{system_prompt}\n\n{current_message}")
+            if reply:
+                messages.append({"role": "user", "content": current_message})
+                messages.append({"role": "assistant", "content": reply})
+                log.info("[Turn %d] GPT replied (%d chars)", turn, len(reply))
+            else:
+                log.error("[Turn %d] Both Claude and GPT failed — aborting", turn)
+                break
 
         loop_log.append({
             "turn": turn,
