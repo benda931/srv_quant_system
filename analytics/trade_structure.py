@@ -665,12 +665,22 @@ class PositionSizingEngine:
           1. Scale all weights to fit gross leverage limit
           2. Apply per-name concentration limit
           3. Regime-scale: multiply by size_cap
-          4. Re-normalize if needed
+          4. Net exposure constraint (max 30% net — target market-neutral)
+          5. Max 8 concurrent positions
 
         Returns tickets with updated final_weight.
         """
         if not tickets:
             return tickets
+
+        # Max concurrent positions
+        active = [t for t in tickets if t.final_weight > 1e-6]
+        if len(active) > 8:
+            active.sort(key=lambda t: t.conviction_score, reverse=True)
+            for t in active[8:]:
+                t.final_weight = 0.0
+                for leg in t.legs:
+                    leg.notional_weight = 0.0
 
         # Gross exposure check
         gross = sum(t.final_weight for t in tickets)
@@ -682,6 +692,27 @@ class PositionSizingEngine:
                 t.final_weight = round(t.final_weight * scale, 6)
                 for leg in t.legs:
                     leg.notional_weight = round(leg.notional_weight * scale, 6)
+
+        # Net exposure constraint: max 30% net
+        long_w = sum(t.final_weight for t in tickets if t.direction == "LONG" and t.final_weight > 0)
+        short_w = sum(t.final_weight for t in tickets if t.direction == "SHORT" and t.final_weight > 0)
+        net = abs(long_w - short_w)
+        if net > 0.30:
+            # Scale down the larger side
+            excess_dir = "LONG" if long_w > short_w else "SHORT"
+            excess_tickets = sorted(
+                [t for t in tickets if t.direction == excess_dir and t.final_weight > 0],
+                key=lambda t: t.conviction_score,
+            )
+            while net > 0.20 and excess_tickets:
+                t = excess_tickets.pop(0)
+                reduction = min(t.final_weight, net - 0.20)
+                t.final_weight = round(t.final_weight - reduction, 6)
+                for leg in t.legs:
+                    leg.notional_weight = round(leg.notional_weight * (t.final_weight / (t.final_weight + reduction)) if t.final_weight + reduction > 0 else 0, 6)
+                long_w = sum(t2.final_weight for t2 in tickets if t2.direction == "LONG" and t2.final_weight > 0)
+                short_w = sum(t2.final_weight for t2 in tickets if t2.direction == "SHORT" and t2.final_weight > 0)
+                net = abs(long_w - short_w)
 
         # Per-name concentration
         for t in tickets:

@@ -145,10 +145,15 @@ def compute_distortion_score(
     market_mode_share: float,
     coc_instability_z: float,
     *,
-    # Logistic coefficients — from config, calibrated via backtest
-    a1_frob: float = 1.0,
-    a2_mode: float = 0.5,
+    # Logistic coefficients — CALIBRATED via grid search
+    a1_frob: float = 0.3,
+    a2_mode: float = 0.2,
     a3_coc: float = 0.3,
+    # Cross-asset features (new — Wave 5)
+    credit_z: float = 0.0,       # HYG/IEF spread z-score (negative = stress)
+    vix_term_slope: float = 0.0, # VIX term structure slope (negative = backwardation)
+    a4_credit: float = 0.15,     # Credit spread coefficient
+    a5_term: float = 0.10,       # Term structure coefficient
     # Market-mode ranking: percentile within historical distribution
     market_mode_history: Optional[pd.Series] = None,
 ) -> DistortionScoreResult:
@@ -175,6 +180,8 @@ def compute_distortion_score(
     # Default fallbacks for NaN inputs
     z_D = frob_distortion_z if math.isfinite(frob_distortion_z) else 0.0
     z_CoC = coc_instability_z if math.isfinite(coc_instability_z) else 0.0
+    z_credit = credit_z if math.isfinite(credit_z) else 0.0
+    z_term = vix_term_slope if math.isfinite(vix_term_slope) else 0.0
 
     # Market-mode rank: percentile of current m_t in historical distribution
     if market_mode_history is not None and len(market_mode_history.dropna()) >= 20:
@@ -184,8 +191,9 @@ def compute_distortion_score(
         # Heuristic: map m_t to [0,1] assuming typical range [0.1, 0.7]
         rank_pct = max(0.0, min(1.0, (market_mode_share - 0.1) / 0.6))
 
-    # Logistic combination
-    logit = a1_frob * z_D + a2_mode * rank_pct + a3_coc * z_CoC
+    # Logistic combination (5-feature: frob + mode + coc + credit + term structure)
+    logit = (a1_frob * z_D + a2_mode * rank_pct + a3_coc * z_CoC
+             + a4_credit * abs(z_credit) + a5_term * max(0, -z_term))  # Backwardation = opportunity
     score = _logistic(logit)
 
     # Interpretation

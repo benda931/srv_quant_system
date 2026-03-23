@@ -196,30 +196,61 @@ class PaperTrader:
                 pos["days_held"] = (date.today() - date.fromisoformat(pos["entry_date"])).days
                 actions["updates"].append(pos["trade_id"])
 
-        # 2. Check exit conditions
+        # 2. Portfolio-level risk checks FIRST
         safety_score = regime_safety.regime_safety_score if regime_safety else 1.0
         safety_label = regime_safety.label if regime_safety else "SAFE"
         to_close = []
 
-        for pos in self.portfolio.positions:
-            should_close = False
-            reason = ""
+        # ── Portfolio drawdown kill-switch (max 5% portfolio loss) ──
+        total_unrealized = sum(p.get("unrealized_pnl", 0) for p in self.portfolio.positions)
+        portfolio_dd_pct = total_unrealized / self.portfolio.capital if self.portfolio.capital > 0 else 0
+        if portfolio_dd_pct <= -0.05:  # 5% portfolio drawdown
+            log.warning("🚨 PORTFOLIO STOP-LOSS: DD=%.1f%% — closing ALL positions", portfolio_dd_pct * 100)
+            for pos in self.portfolio.positions:
+                to_close.append((pos, "PORTFOLIO_STOP_LOSS"))
 
-            # Time exit
-            if pos["days_held"] >= 45:
-                should_close, reason = True, "TIME_EXIT"
-            # Regime kill
-            elif safety_label in ("KILLED", "CRISIS") or safety_score < 0.1:
-                should_close, reason = True, "REGIME_EXIT"
-            # Profit target: 2% gain
-            elif pos["unrealized_pnl_pct"] >= 0.02:
-                should_close, reason = True, "PROFIT_TARGET"
-            # Stop loss: 3% loss
-            elif pos["unrealized_pnl_pct"] <= -0.03:
-                should_close, reason = True, "STOP_LOSS"
+        # ── Net exposure constraint (max 30% net, target market-neutral) ──
+        if not to_close:
+            long_notional = sum(p["notional"] for p in self.portfolio.positions if p["direction"] == "LONG")
+            short_notional = sum(p["notional"] for p in self.portfolio.positions if p["direction"] == "SHORT")
+            net_exposure = (long_notional - short_notional) / self.portfolio.capital if self.portfolio.capital > 0 else 0
+            if abs(net_exposure) > 0.30:
+                # Close the most directional positions to reduce net
+                excess_dir = "LONG" if net_exposure > 0 else "SHORT"
+                excess_positions = sorted(
+                    [p for p in self.portfolio.positions if p["direction"] == excess_dir],
+                    key=lambda p: abs(p.get("unrealized_pnl_pct", 0)),
+                )
+                while abs(net_exposure) > 0.20 and excess_positions:
+                    pos = excess_positions.pop(0)
+                    to_close.append((pos, "NET_EXPOSURE_LIMIT"))
+                    if pos["direction"] == "LONG":
+                        long_notional -= pos["notional"]
+                    else:
+                        short_notional -= pos["notional"]
+                    net_exposure = (long_notional - short_notional) / self.portfolio.capital
 
-            if should_close:
-                to_close.append((pos, reason))
+        # ── Position-level exit conditions ──
+        if not to_close:
+            for pos in self.portfolio.positions:
+                should_close = False
+                reason = ""
+
+                # Time exit (calibrated: 25 days)
+                if pos["days_held"] >= 25:
+                    should_close, reason = True, "TIME_EXIT"
+                # Regime kill
+                elif safety_label in ("KILLED", "DANGER") or safety_score < 0.1:
+                    should_close, reason = True, "REGIME_EXIT"
+                # Profit target: 2% gain
+                elif pos["unrealized_pnl_pct"] >= 0.02:
+                    should_close, reason = True, "PROFIT_TARGET"
+                # Stop loss: 3% loss
+                elif pos["unrealized_pnl_pct"] <= -0.03:
+                    should_close, reason = True, "STOP_LOSS"
+
+                if should_close:
+                    to_close.append((pos, reason))
 
         for pos, reason in to_close:
             trade = {

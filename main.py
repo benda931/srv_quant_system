@@ -1419,7 +1419,7 @@ def build_app() -> dash.Dash:
                         ]
                     ),
                     build_backtest_tab(None),  # None triggers "Run Backtest" button
-                    html.Div(id="backtest-output"),
+                    dcc.Loading(html.Div(id="backtest-output"), type="dot", color="#0dcaf0"),
                 ],
             )
 
