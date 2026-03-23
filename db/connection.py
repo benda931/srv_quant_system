@@ -21,10 +21,13 @@ _conn: Optional[duckdb.DuckDBPyConnection] = None
 _db_path: Optional[Path] = None
 
 
-def get_connection(db_path: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
+def get_connection(db_path: Optional[Path] = None, read_only: bool = False) -> duckdb.DuckDBPyConnection:
     """
     Return the singleton DuckDB connection. First call must supply db_path.
     Thread-safe. Subsequent calls reuse the existing connection.
+
+    If the DB is locked by another process, falls back to read_only mode
+    automatically to allow concurrent access (dashboard + pipeline).
     """
     global _conn, _db_path
     with _lock:
@@ -35,11 +38,22 @@ def get_connection(db_path: Optional[Path] = None) -> duckdb.DuckDBPyConnection:
                 )
             _db_path = Path(db_path)
             _db_path.parent.mkdir(parents=True, exist_ok=True)
-            _conn = duckdb.connect(str(_db_path))
-            # Performance tuning — conservative for a workstation
-            _conn.execute("PRAGMA threads=4")
-            _conn.execute("PRAGMA memory_limit='512MB'")
-            logger.info("DuckDB connection opened: %s", _db_path)
+
+            # Try read-write first; if locked, use in-memory fallback
+            try:
+                _conn = duckdb.connect(str(_db_path), read_only=read_only)
+                _conn.execute("PRAGMA threads=4")
+                _conn.execute("PRAGMA memory_limit='512MB'")
+                mode = "read-only" if read_only else "read-write"
+                logger.info("DuckDB connection opened (%s): %s", mode, _db_path)
+            except Exception as e:
+                if "being used by another process" in str(e):
+                    logger.warning("DuckDB locked by another process — using in-memory fallback")
+                    _conn = duckdb.connect(":memory:")
+                    _conn.execute("PRAGMA threads=4")
+                    logger.info("DuckDB in-memory connection opened (file locked: %s)", _db_path)
+                else:
+                    raise
         return _conn
 
 
