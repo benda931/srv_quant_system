@@ -858,10 +858,18 @@ class MethodologyLab:
         lab.print_comparison()
     """
 
-    def __init__(self, prices: pd.DataFrame, settings=None, step: int = 5):
+    def __init__(self, prices: pd.DataFrame, settings=None, step: int = 5,
+                 cost_bps: float = 5.0):
+        """
+        Parameters
+        ----------
+        cost_bps : Transaction cost in basis points per side (entry + exit = 2x).
+                   Default 5bps = 0.05% per side (10bps round-trip). Conservative for ETFs.
+        """
         self.prices = prices
         self.settings = settings
         self.step = step
+        self.cost_bps = cost_bps  # bps per side
         self.results: Dict[str, MethodologyResult] = {}
 
         # Prepare common data
@@ -1092,7 +1100,7 @@ class MethodologyLab:
         return path
 
     def _aggregate(self, name, desc, trades, daily_pnl, params) -> MethodologyResult:
-        """חישוב מטריקות מצרפיות."""
+        """חישוב מטריקות מצרפיות כולל עלויות טרנזקציה."""
         n_trades = len(trades)
         if n_trades == 0:
             return MethodologyResult(
@@ -1102,6 +1110,11 @@ class MethodologyLab:
                 equity_curve=pd.Series(dtype=float), drawdown_curve=pd.Series(dtype=float),
                 trades=[], params=params,
             )
+
+        # Transaction cost deduction: cost_bps per side × 2 (entry + exit) × weight
+        cost_per_trade = self.cost_bps / 10000.0 * 2  # Round-trip cost as fraction
+        for t in trades:
+            t.pnl -= cost_per_trade * t.weight  # Deduct cost from each trade P&L
 
         pnls = [t.pnl for t in trades]
         eq = daily_pnl.cumsum()

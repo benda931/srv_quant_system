@@ -317,11 +317,21 @@ def compute_regime_safety_score(
     if state == "CRISIS" and not any(k for k, v in hard_kills.items() if v and k != "regime_crisis"):
         alerts.append("HARD KILL: Regime classified as CRISIS")
 
-    # Labels
+    # Labels — consider both score AND market state for accurate labeling
     if any_hard_kill:
         label = "KILLED"
         rationale = f"Trade BLOCKED — hard kill active: {', '.join(a for a in alerts if 'HARD KILL' in a)}"
-    elif score >= 0.7:
+    elif state in ("TENSION", "CRISIS") or score < 0.85:
+        if score >= 0.7:
+            label = "CAUTION"
+            rationale = f"Regime elevated ({state}), proceed with reduced sizing: S^safe={score:.2f}"
+        elif score >= 0.4:
+            label = "CAUTION"
+            rationale = f"Proceed with reduced size: state={state}, S^safe={score:.2f}"
+        else:
+            label = "DANGER"
+            rationale = f"Elevated risk environment: state={state}, S^safe={score:.2f} — minimal sizing"
+    elif score >= 0.85:
         label = "SAFE"
         rationale = f"Regime favorable for short-vol: state={state}, S^safe={score:.2f}"
     elif score >= 0.4:
