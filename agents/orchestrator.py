@@ -131,6 +131,18 @@ TASKS = {
         "description": "בדיקת בריאות מערכת",
         "function": "_task_health_check",
     },
+    "weekly_backtest": {
+        "schedule": "monday_09:00",
+        "depends_on": ["methodology"],
+        "description": "backtest שבועי מלא עם methodology lab (13 אסטרטגיות)",
+        "function": "_task_weekly_backtest",
+    },
+    "pair_scan": {
+        "schedule": "06:15_weekdays",
+        "depends_on": ["data_refresh"],
+        "description": "סריקת זוגות סקטורים — 55 pairs cointegration",
+        "function": "_task_pair_scan",
+    },
 }
 
 
@@ -506,6 +518,52 @@ class Orchestrator:
                     "ts": datetime.now(timezone.utc).isoformat(),
                 })
             return {"status": "ok", **recap}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_weekly_backtest(self) -> dict:
+        """הרצת backtest שבועי מלא עם methodology lab."""
+        try:
+            import pandas as pd
+            from analytics.methodology_lab import MethodologyLab
+            prices = pd.read_parquet(ROOT / "data_lake" / "parquet" / "prices.parquet")
+            lab = MethodologyLab(prices, step=10)
+            results = lab.run_all()
+            lab.save_results()
+
+            best = max(results.values(), key=lambda r: r.sharpe) if results else None
+            return {
+                "status": "ok",
+                "n_strategies": len(results),
+                "best_name": best.name if best else "N/A",
+                "best_sharpe": best.sharpe if best else 0,
+            }
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_pair_scan(self) -> dict:
+        """סריקת זוגות סקטורים לאותות cointegration."""
+        try:
+            import pandas as pd
+            from analytics.pair_scanner import scan_pairs
+            from config.settings import get_settings
+            prices = pd.read_parquet(ROOT / "data_lake" / "parquet" / "prices.parquet")
+            sectors = get_settings().sector_list()
+            pairs = scan_pairs(prices, sectors)
+
+            top = pairs[:5] if pairs else []
+            result = {
+                "status": "ok",
+                "n_pairs_scanned": len(pairs),
+                "top_signals": [
+                    {"pair": p.pair_name, "z": p.spread_z, "hl": p.half_life,
+                     "dir": p.direction, "strength": p.signal_strength}
+                    for p in top
+                ],
+            }
+            if self.bus:
+                self.bus.publish("pair_scan", result)
+            return result
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 

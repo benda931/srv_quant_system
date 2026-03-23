@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "srv-quant-system"
+version = "1.0.0"
+description = "SRV Quantamental DSS — Sector Relative Value Decision Support System"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Proprietary"}
+
+[project.scripts]
+srv-dashboard = "main:main"
+srv-pipeline = "scripts.run_all:main"
+srv-agents = "agents.run_agents:main"
+srv-orchestrator = "agents.orchestrator:main"
+
+[tool.setuptools.packages.find]
+include = [
+    "analytics*",
+    "agents*",
+    "config*",
+    "data*",
+    "data_ops*",
+    "db*",
+    "reports*",
+    "scripts*",
+    "ui*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line length handled separately
