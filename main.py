@@ -1760,16 +1760,17 @@ def build_app() -> dash.Dash:
         sector_ticker: Optional[str],
         master_store: Optional[List[Dict[str, Any]]],
     ):
+        _dark = dict(template="plotly_dark", paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e", height=520)
         if not master_store or not sector_ticker:
             fig = go.Figure()
-            fig.update_layout(template="plotly_dark", title="Invalid selection")
+            fig.update_layout(**_dark, title="בחר סקטור")
             return fig, "—", "—", "—", "—"
 
         full_df = pd.DataFrame(master_store)
         row_full = full_df.loc[full_df["sector_ticker"] == sector_ticker]
         if row_full.empty:
             fig = go.Figure()
-            fig.update_layout(template="plotly_dark", title="Selection not found")
+            fig.update_layout(**_dark, title="סקטור לא נמצא")
             return fig, "—", "—", "—", "—"
 
         row = row_full.iloc[0].to_dict()
@@ -1784,6 +1785,8 @@ def build_app() -> dash.Dash:
         fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_2s"], name="-2σ", mode="lines"))
         fig.update_layout(
             template="plotly_dark",
+            paper_bgcolor="#1a1a2e",
+            plot_bgcolor="#1a1a2e",
             height=520,
             title=f"{sector_name} ({sector_ticker}) — OOS PCA Residual X-Ray",
             legend=dict(orientation="h"),
