@@ -18,5 +18,11 @@
     "depends_on": [],
     "script": "agents/math/run.py",
     "description": "סוכן מתמטי — ניתוח שבועי (שני)"
+  },
+  "architect": {
+    "cron": "0 9 * * 1-5",
+    "depends_on": ["optimizer"],
+    "script": "agents/architect/run.py",
+    "description": "סוכן ארכיטקט — שיפור שיטתי של המערכת (אחרי אופטימיזציה)"
   }
 }

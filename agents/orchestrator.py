@@ -154,6 +154,12 @@ TASKS = {
         "description": "סריקת זוגות סקטורים — 55 pairs cointegration",
         "function": "_task_pair_scan",
     },
+    "architect": {
+        "schedule": "09:00_weekdays",
+        "depends_on": ["optimizer"],
+        "description": "סוכן ארכיטקט — שיפור שיטתי של המערכת",
+        "function": "_task_architect",
+    },
 }
 
 
@@ -605,6 +611,15 @@ class Orchestrator:
             if self.bus:
                 self.bus.publish("pair_scan", result)
             return result
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_architect(self) -> dict:
+        """סוכן ארכיטקט — שיפור שיטתי של המערכת."""
+        try:
+            from agents.architect.agent_architect import run as run_architect
+            run_architect(once=True)
+            return {"status": "ok"}
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 
