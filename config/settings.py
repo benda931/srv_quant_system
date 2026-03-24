@@ -325,6 +325,15 @@ class Settings(BaseSettings):
     zscore_threshold_crisis:  float = Field(default=9.99, ge=1.0, le=10.0)  # effectively disabled
 
     # =====================================================
+    # Leverage engine
+    # =====================================================
+    max_leverage: float = Field(default=5.0, ge=1.0, le=10.0)
+    target_vol_annual: float = Field(default=0.10, ge=0.01, le=0.50)
+    kelly_fraction: float = Field(default=0.5, ge=0.1, le=1.0)
+    dd_deleverage_start: float = Field(default=0.02)
+    dd_deleverage_full_stop: float = Field(default=0.12)
+
+    # =====================================================
     # UI / dashboard defaults
     # =====================================================
     dashboard_title: str = Field(default="SRV Quantamental DSS")
