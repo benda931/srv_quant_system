@@ -3131,3 +3131,144 @@ def build_agent_status_tab(
         ],
         style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
     )
+
+
+def build_agent_monitor_tab(
+    registry_data: Optional[Dict] = None,
+    audit_changes: Optional[List[Dict]] = None,
+) -> html.Div:
+    """
+    Agent Monitor tab -- status cards + parameter change audit trail.
+
+    Parameters
+    ----------
+    registry_data : dict | None
+        Output of AgentRegistry.all_agents() -- keyed by agent name.
+    audit_changes : list[dict] | None
+        Recent parameter changes from AuditTrail, each with keys:
+        param_name, old_value, new_value, changed_by, timestamp.
+    """
+    _RTL = {"direction": "rtl", "textAlign": "right"}
+
+    if registry_data is None:
+        registry_data = {}
+    if audit_changes is None:
+        audit_changes = []
+
+    # ── Status color mapping ─────────────────────────────────────────────
+    status_colors = {
+        "IDLE": "secondary",
+        "RUNNING": "primary",
+        "COMPLETED": "success",
+        "FAILED": "danger",
+        "STALE": "warning",
+    }
+    status_icons = {
+        "IDLE": "⏸",
+        "RUNNING": "▶",
+        "COMPLETED": "✓",
+        "FAILED": "✗",
+        "STALE": "⚠",
+    }
+
+    # ── Agent definitions (display order) ────────────────────────────────
+    agent_defs = [
+        ("agent_methodology", "Methodology", "methodology evaluation & benchmarking"),
+        ("agent_optimizer", "Optimizer", "parameter & code optimization"),
+        ("agent_math", "Math", "mathematical research & proposals"),
+    ]
+
+    # ── Build 3 status cards ─────────────────────────────────────────────
+    agent_cards = []
+    for agent_key, agent_label, default_role in agent_defs:
+        rec = registry_data.get(agent_key, {})
+        status = rec.get("status", "IDLE")
+        last_run = rec.get("last_run", None)
+        run_count = rec.get("run_count", 0)
+        last_error = rec.get("last_error", None)
+        color = status_colors.get(status, "secondary")
+        icon = status_icons.get(status, "?")
+
+        run_display = last_run[:19].replace("T", " ") if last_run else "Never"
+
+        error_section = html.Div()
+        if last_error and status == "FAILED":
+            error_section = dbc.Alert(
+                f"Error: {last_error[:150]}",
+                color="danger",
+                className="mt-2 mb-0 py-1 px-2",
+                style={"fontSize": "0.8rem"},
+            )
+
+        card = dbc.Col(
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span(f"{icon} ", style={"fontSize": "1.2rem"}),
+                    html.Strong(agent_label),
+                    dbc.Badge(status, color=color, className="ms-2"),
+                ], style={"backgroundColor": "#16213e"}),
+                dbc.CardBody([
+                    html.Small(default_role, className="text-muted d-block mb-2"),
+                    html.Div([
+                        html.Span("Last run: ", className="text-muted"),
+                        html.Span(run_display),
+                    ], className="mb-1", style={"fontSize": "0.85rem"}),
+                    html.Div([
+                        html.Span("Total runs: ", className="text-muted"),
+                        html.Span(str(run_count)),
+                    ], className="mb-2", style={"fontSize": "0.85rem"}),
+                    error_section,
+                ], style={"backgroundColor": "#1a1a2e"}),
+            ], className="h-100", style={"border": "1px solid #2a2a4a"}),
+            md=4,
+            className="mb-3",
+        )
+        agent_cards.append(card)
+
+    cards_row = dbc.Row(agent_cards, className="g-3 mb-4")
+
+    # ── Parameter Changes Audit Trail ────────────────────────────────────
+    change_rows = []
+    for ch in audit_changes[:20]:
+        change_rows.append(
+            html.Tr([
+                html.Td(str(ch.get("timestamp", ""))[:19], style={"fontSize": "0.82rem"}),
+                html.Td(str(ch.get("param_name", "")), style={"fontSize": "0.82rem"}),
+                html.Td(str(ch.get("old_value", "")), style={"fontSize": "0.82rem"}),
+                html.Td(str(ch.get("new_value", "")), style={"fontSize": "0.82rem"}),
+                html.Td(str(ch.get("changed_by", "")), style={"fontSize": "0.82rem"}),
+            ])
+        )
+
+    audit_card = dbc.Card([
+        dbc.CardHeader(
+            html.Strong("Parameter Changes — Audit Trail"),
+            style={"backgroundColor": "#16213e"},
+        ),
+        dbc.CardBody(
+            dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Timestamp"), html.Th("Parameter"),
+                    html.Th("Old"), html.Th("New"), html.Th("Changed By"),
+                ]))] + [html.Tbody(change_rows)],
+                bordered=True, dark=True, hover=True, size="sm", className="mb-0",
+            ) if change_rows else html.Div(
+                "No parameter changes recorded.",
+                className="text-muted p-3",
+            ),
+            style={"backgroundColor": "#1a1a2e", "padding": "0"},
+        ),
+    ], style={"border": "1px solid #2a2a4a"})
+
+    return html.Div(
+        [
+            html.H4("Agent Monitor", className="text-info mb-1"),
+            html.P(
+                "מעקב סוכנים: סטטוס, היסטוריית הרצות, ושינויי פרמטרים",
+                className="text-muted mb-3", style=_RTL,
+            ),
+            cards_row,
+            audit_card,
+        ],
+        style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
+    )

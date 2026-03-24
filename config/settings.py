@@ -159,6 +159,17 @@ class Settings(BaseSettings):
     sector_mr_whitelist: str = Field(default="XLC,XLF,XLI,XLU")
     # Enable whitelist filter (set False to trade all sectors)
     sector_mr_filter_enabled: bool = Field(default=True)
+
+    # Regime-adaptive conviction scaling — CALIBRATED from 10yr OOS study
+    # CALM=+0.660 Sharpe, NORMAL=+0.232, TENSION=+0.681, CRISIS=-0.782
+    regime_conviction_scale_calm: float = Field(default=1.3, ge=0.0, le=3.0)
+    regime_conviction_scale_normal: float = Field(default=1.0, ge=0.0, le=3.0)
+    regime_conviction_scale_tension: float = Field(default=0.5, ge=0.0, le=3.0)
+    regime_conviction_scale_crisis: float = Field(default=0.0, ge=0.0, le=3.0)
+
+    # Non-whitelist sector penalty (0.3 = reduce conviction by 70% for non-MR sectors)
+    non_whitelist_penalty: float = Field(default=0.3, ge=0.0, le=1.0)
+
     # Optimal hold period (days) — CALIBRATED: lb=60 hold=5 → Sharpe 0.456
     signal_optimal_hold: int = Field(default=5, ge=1, le=60)
 

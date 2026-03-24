@@ -560,6 +560,34 @@ class SignalStackEngine:
         except Exception as e:
             log.warning("Failed to load Optuna weights: %s", e)
 
+    def load_feature_importances(self, importances: dict) -> None:
+        """Load ML-learned weights and blend with calibrated defaults (70% ML + 30% default)."""
+        ml_blend = 0.7
+        default_blend = 0.3
+
+        # Map feature importance keys to signal stack coefficients
+        key_map = {
+            "frob_distortion_z": "a1_frob",
+            "market_mode_share": "a2_mode",
+            "coc_instability_z": "a3_coc",
+        }
+
+        total_importance = sum(importances.get(k, 0) for k in key_map)
+        if total_importance < 1e-6:
+            return  # No ML signal, keep defaults
+
+        for feat_key, attr in key_map.items():
+            imp = importances.get(feat_key, 0)
+            normalized = imp / total_importance if total_importance > 0 else 0.33
+            default_val = getattr(self, attr)
+            blended = ml_blend * (normalized * 3.0) + default_blend * default_val  # scale to ~1.0 range
+            setattr(self, attr, round(blended, 4))
+
+        log.info(
+            "Signal weights updated from feature importances: a1=%.3f, a2=%.3f, a3=%.3f",
+            self.a1_frob, self.a2_mode, self.a3_coc,
+        )
+
     def get_regime_multiplier(self, regime_label: str = "NORMAL") -> float:
         """Get position size multiplier for current regime."""
         return self.regime_size.get(regime_label.upper(), 1.0)

@@ -4,13 +4,19 @@ analytics/bayesian_optimizer.py
 Bayesian Hyperparameter Optimization via Optuna.
 Replaces brute-force grid search with TPE (Tree-structured Parzen Estimator).
 
-Usage:
+Single-objective (TPE):
     from analytics.bayesian_optimizer import run_optimization, promote_best_params
     best = run_optimization(n_trials=200, study_name="srv_main")
     promote_best_params()  # writes best params to settings.py
 
+Multi-objective (NSGA-II, 3 objectives: Sharpe/MaxDD/IC):
+    from analytics.bayesian_optimizer import run_multi_objective
+    result = run_multi_objective(n_trials=50)
+    # result["pareto_front"] contains all Pareto-optimal parameter sets
+
 CLI:
-    python analytics/bayesian_optimizer.py --n-trials 50
+    python -m analytics.bayesian_optimizer --n-trials 50
+    python -m analytics.bayesian_optimizer --multi --trials 50
 """
 from __future__ import annotations
 
@@ -344,82 +350,185 @@ def promote_best_params(params_path: Optional[Path] = None) -> Dict[str, Any]:
 
 PARETO_PATH = DATA_DIR / "optuna_pareto.json"
 
+# ---------------------------------------------------------------------------
+# Multi-objective search space (focused regime/signal params)
+# ---------------------------------------------------------------------------
 
-def _build_multi_objective(prices: pd.DataFrame):
-    """Build multi-objective function: maximize Sharpe, minimize MaxDD."""
+MULTI_OBJ_SEARCH_SPACE: Dict[str, Dict[str, Any]] = {
+    "zscore_threshold_calm":          {"type": "float", "low": 0.3,  "high": 1.5},
+    "zscore_threshold_normal":        {"type": "float", "low": 0.5,  "high": 2.0},
+    "zscore_threshold_tension":       {"type": "float", "low": 0.8,  "high": 2.5},
+    "regime_conviction_scale_calm":   {"type": "float", "low": 0.5,  "high": 2.0},
+    "regime_conviction_scale_normal": {"type": "float", "low": 0.5,  "high": 1.5},
+    "regime_conviction_scale_tension":{"type": "float", "low": 0.1,  "high": 1.0},
+    "non_whitelist_penalty":          {"type": "float", "low": 0.1,  "high": 0.8},
+    "signal_a1_frob":                 {"type": "float", "low": 0.3,  "high": 2.0},
+    "signal_a2_mode":                 {"type": "float", "low": 0.1,  "high": 1.5},
+    "signal_a3_coc":                  {"type": "float", "low": 0.1,  "high": 1.0},
+}
+
+
+def _create_settings_with_overrides(param_overrides: Dict[str, Any]) -> "Settings":
+    """
+    Create a Settings instance with trial parameter overrides.
+
+    Uses environment variable injection so pydantic-settings picks up the
+    trial values while keeping all other settings at their defaults.
+    """
+    import os
+    from config.settings import Settings, get_settings
+
+    env_overrides: Dict[str, str] = {}
+    for k, v in param_overrides.items():
+        env_overrides[k.upper()] = str(v)
+
+    old_env: Dict[str, Optional[str]] = {}
+    for k, v in env_overrides.items():
+        old_env[k] = os.environ.get(k)
+        os.environ[k] = v
+
+    try:
+        get_settings.cache_clear()
+        settings = Settings()
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        get_settings.cache_clear()
+
+    return settings
+
+
+def _load_backtest_data() -> tuple:
+    """
+    Load prices and create empty fundamentals/weights DataFrames
+    needed by WalkForwardBacktester.
+
+    Returns (prices_df, fundamentals_df, weights_df).
+    """
+    prices = _load_prices()
+
+    # The walk-forward backtester accepts fundamentals and weights for
+    # interface consistency, but the PCA residual signal does not use them.
+    fundamentals_df = pd.DataFrame()
+    weights_df = pd.DataFrame()
+
+    return prices, fundamentals_df, weights_df
+
+
+def _build_multi_objective(
+    prices: pd.DataFrame,
+    fundamentals_df: pd.DataFrame,
+    weights_df: pd.DataFrame,
+):
+    """
+    Build a 3-objective function for NSGA-II:
+        0) maximize Sharpe ratio
+        1) minimize MaxDD (absolute value)
+        2) maximize IC (information coefficient)
+
+    Each trial creates a Settings override with the suggested parameters,
+    then runs a walk-forward backtest to extract the three objectives.
+    """
 
     def objective(trial) -> tuple:
-        from analytics.methodology_lab import MethodologyLab, PcaZReversal
-
-        params = {}
-        for name, spec in SEARCH_SPACE.items():
-            if spec["type"] == "int":
-                params[name] = trial.suggest_int(
-                    name, spec["low"], spec["high"], step=spec.get("step", 1)
-                )
-            else:
-                params[name] = trial.suggest_float(name, spec["low"], spec["high"])
+        # Sample from the multi-objective search space
+        params = _suggest_params(trial, MULTI_OBJ_SEARCH_SPACE)
 
         try:
-            strategy = PcaZReversal(
-                z_entry=params.get("zscore_threshold_normal", 0.9),
-                z_exit_ratio=0.3,
-                z_stop_ratio=2.5,
-                max_hold=25,
-                max_weight=0.05,
+            settings = _create_settings_with_overrides(params)
+
+            from analytics.backtest import WalkForwardBacktester
+
+            backtester = WalkForwardBacktester(settings)
+            result = backtester.run_backtest(
+                prices_df=prices,
+                fundamentals_df=fundamentals_df,
+                weights_df=weights_df,
             )
-            lab = MethodologyLab(prices, step=10)
-            result = lab.run_methodology(strategy)
 
             sharpe = result.sharpe if math.isfinite(result.sharpe) else -10.0
             max_dd = abs(result.max_drawdown) if math.isfinite(result.max_drawdown) else 1.0
+            ic = result.ic_mean if math.isfinite(result.ic_mean) else -1.0
 
-            return sharpe, max_dd
+            logger.info(
+                "Trial %d: Sharpe=%.4f, MaxDD=%.4f, IC=%.4f | %s",
+                trial.number, sharpe, max_dd, ic,
+                {k: round(v, 4) if isinstance(v, float) else v for k, v in params.items()},
+            )
+
+            return sharpe, max_dd, ic
 
         except Exception as e:
             logger.warning("Multi-obj trial %d failed: %s", trial.number, e)
-            return -10.0, 1.0
+            return -10.0, 1.0, -1.0
 
     return objective
 
 
-def run_multi_objective_optimization(
-    n_trials: int = 100,
-    study_name: str = "srv_pareto",
+def run_multi_objective(
+    n_trials: int = 50,
+    study_name: str = "srv_pareto_3obj",
     prices: Optional[pd.DataFrame] = None,
     timeout: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Multi-objective optimization: maximize Sharpe while minimizing MaxDD.
-    Uses NSGA-II sampler for Pareto front exploration.
+    Multi-objective optimization with 3 objectives via NSGA-II:
+        - Maximize Sharpe ratio
+        - Minimize Maximum Drawdown
+        - Maximize Information Coefficient (IC)
+
+    Uses Optuna's NSGAIISampler to explore the Pareto front across
+    10 regime/signal parameters.
+
+    Parameters
+    ----------
+    n_trials : int
+        Number of optimization trials (default 50).
+    study_name : str
+        Optuna study name for persistence.
+    prices : pd.DataFrame, optional
+        Price panel. If None, loaded from data lake.
+    timeout : int, optional
+        Maximum optimization time in seconds.
 
     Returns
     -------
-    dict with pareto_front, n_trials, best_trials
+    dict
+        Contains pareto_front (list of Pareto-optimal param sets with
+        objective values), metadata, and timestamp.
     """
-    try:
-        import optuna
-        from optuna.samplers import NSGAIISampler
-    except ImportError:
-        raise ImportError("optuna is required: pip install optuna")
+    import optuna
+    from optuna.samplers import NSGAIISampler
+    from datetime import datetime
 
     if prices is None:
-        prices = _load_prices()
+        prices_df, fundamentals_df, weights_df = _load_backtest_data()
+    else:
+        prices_df = prices
+        fundamentals_df = pd.DataFrame()
+        weights_df = pd.DataFrame()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     storage = f"sqlite:///{STUDY_DB_PATH}"
-    sampler = NSGAIISampler(seed=42)
+    sampler = NSGAIISampler(seed=42, population_size=50)
 
     study = optuna.create_study(
         study_name=study_name,
         storage=storage,
-        directions=["maximize", "minimize"],
+        directions=["maximize", "minimize", "maximize"],  # Sharpe, MaxDD, IC
         sampler=sampler,
         load_if_exists=True,
     )
 
-    objective = _build_multi_objective(prices)
-    logger.info("Starting multi-objective optimization: %d trials", n_trials)
+    objective = _build_multi_objective(prices_df, fundamentals_df, weights_df)
+
+    logger.info(
+        "Starting 3-objective optimization (Sharpe/MaxDD/IC): %d trials, study=%s",
+        n_trials, study_name,
+    )
 
     study.optimize(
         objective,
@@ -429,32 +538,50 @@ def run_multi_objective_optimization(
         catch=(Exception,),
     )
 
+    # Extract Pareto front
     pareto_trials = study.best_trials
     pareto_front = []
     for t in pareto_trials:
         entry = dict(t.params)
         entry["sharpe"] = t.values[0]
         entry["max_dd"] = t.values[1]
+        entry["ic"] = t.values[2]
         entry["trial"] = t.number
         pareto_front.append(entry)
 
-    pareto_front.sort(key=lambda x: x["sharpe"], reverse=True)
+    # Sort by composite score: Sharpe - MaxDD + IC (balanced ranking)
+    for entry in pareto_front:
+        entry["_composite"] = entry["sharpe"] - entry["max_dd"] + entry["ic"]
+    pareto_front.sort(key=lambda x: x["_composite"], reverse=True)
+
+    # Clean up internal sort key
+    for entry in pareto_front:
+        del entry["_composite"]
 
     result = {
+        "timestamp": datetime.now(tz=None).isoformat(),
         "n_trials": len(study.trials),
         "n_pareto": len(pareto_front),
-        "pareto_front": pareto_front[:20],
-        "best_sharpe_trial": pareto_front[0] if pareto_front else None,
+        "objectives": ["sharpe (max)", "max_dd (min)", "ic (max)"],
+        "parameter_space": {
+            name: {"low": spec["low"], "high": spec["high"]}
+            for name, spec in MULTI_OBJ_SEARCH_SPACE.items()
+        },
+        "pareto_front": pareto_front,
     }
 
     with open(PARETO_PATH, "w") as f:
         json.dump(result, f, indent=2, default=str)
     logger.info(
-        "Multi-objective done: %d trials, %d Pareto-optimal. Saved to %s",
+        "3-objective optimization done: %d trials, %d Pareto-optimal. Saved to %s",
         len(study.trials), len(pareto_front), PARETO_PATH,
     )
 
     return result
+
+
+# Keep backward-compatible alias
+run_multi_objective_optimization = run_multi_objective
 
 
 def get_study_summary(study_name: str = "srv_main") -> Dict[str, Any]:
@@ -488,7 +615,7 @@ def main():
         description="Bayesian hyperparameter optimization for SRV Quant System"
     )
     parser.add_argument(
-        "--n-trials", type=int, default=200,
+        "--n-trials", "--trials", type=int, default=200,
         help="Number of optimization trials (default: 200)",
     )
     parser.add_argument(
@@ -505,7 +632,7 @@ def main():
     )
     parser.add_argument(
         "--multi", action="store_true",
-        help="Run multi-objective optimization (Sharpe vs MaxDD Pareto)",
+        help="Run 3-objective optimization (Sharpe/MaxDD/IC Pareto via NSGA-II)",
     )
     args = parser.parse_args()
 
@@ -515,16 +642,25 @@ def main():
     )
 
     if args.multi:
-        result = run_multi_objective_optimization(
+        result = run_multi_objective(
             n_trials=args.n_trials,
-            study_name=args.study_name + "_pareto",
+            study_name=args.study_name + "_pareto_3obj",
             timeout=args.timeout,
         )
-        print(f"\nPareto front: {result['n_pareto']} optimal trials from {result['n_trials']}")
-        if result["best_sharpe_trial"]:
-            bst = result["best_sharpe_trial"]
-            print(f"Best Sharpe on Pareto: {bst['sharpe']:.4f} (MaxDD={bst['max_dd']:.4f})")
-        print(f"Saved to: {PARETO_PATH}")
+        print(f"\n=== 3-Objective Pareto Optimization Complete ===")
+        print(f"Trials: {result['n_trials']}")
+        print(f"Pareto-optimal solutions: {result['n_pareto']}")
+        print(f"Objectives: Sharpe (max), MaxDD (min), IC (max)")
+        if result["pareto_front"]:
+            print(f"\nTop Pareto solutions:")
+            print(f"{'#':>3}  {'Sharpe':>8}  {'MaxDD':>8}  {'IC':>8}")
+            print(f"{'---':>3}  {'------':>8}  {'------':>8}  {'------':>8}")
+            for i, entry in enumerate(result["pareto_front"][:10]):
+                print(
+                    f"{i+1:>3}  {entry['sharpe']:>8.4f}  "
+                    f"{entry['max_dd']:>8.4f}  {entry['ic']:>8.4f}"
+                )
+        print(f"\nPareto front saved to: {PARETO_PATH}")
     else:
         best = run_optimization(
             n_trials=args.n_trials,

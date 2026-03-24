@@ -55,6 +55,7 @@ from ui.analytics_tabs import (
     build_pnl_tracker_tab, build_dss_tab,
     build_portfolio_tab, build_methodology_tab,
     build_ml_insights_tab,
+    build_agent_monitor_tab,
 )
 from data_ops.journal import PMJournal, open_journal
 
@@ -1034,8 +1035,37 @@ def build_app() -> dash.Dash:
                     _ml_save_path.write_text(_json_ml_save.dumps(_ml_out, indent=2, default=str), encoding="utf-8")
                     _methodology_ranking_full = _ml_out
                     logger.info("Methodology lab: %d strategies saved to %s", len(_auto_results), _ml_save_path.name)
+                    # Also seed the ranking summary
+                    if _methodology_ranking is None:
+                        _methodology_ranking = sorted(
+                            [
+                                {"name": r.name, "sharpe": round(r.sharpe, 4),
+                                 "win_rate": round(r.win_rate, 4),
+                                 "total_pnl": round(r.total_pnl, 6),
+                                 "max_drawdown": round(r.max_drawdown, 6),
+                                 "total_trades": r.total_trades}
+                                for r in _auto_results.values()
+                            ],
+                            key=lambda x: x.get("sharpe", -999),
+                            reverse=True,
+                        )[:8]
+                    # Save ranking file for agents
+                    _ranking_path = _ml_reports_dir / "methodology_ranking.json"
+                    _ranking_path.write_text(
+                        _json_ml_save.dumps(
+                            [{"name": r.name, "sharpe": round(r.sharpe, 4),
+                              "win_rate": round(r.win_rate, 4),
+                              "total_pnl": round(r.total_pnl, 6),
+                              "max_drawdown": round(r.max_drawdown, 6),
+                              "total_trades": r.total_trades}
+                             for r in _auto_results.values()],
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    logger.info("Seeded methodology ranking: %d strategies", len(_auto_results))
         except Exception as _ml_exc:
-            logger.warning("Methodology lab generation failed: %s", _ml_exc)
+            logger.warning("Methodology lab seed failed: %s", _ml_exc)
 
         # ── Paper Portfolio ───────────────────────────────────────
         _paper_portfolio = None
@@ -1053,9 +1083,10 @@ def build_app() -> dash.Dash:
                 if _pp_path2.exists():
                     import json as _json_pp2
                     _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
-                logger.info("Seeded fresh paper portfolio for Portfolio tab")
-        except Exception:
-            pass
+                logger.info("Seeded paper portfolio with $%s",
+                            f"{_seed_trader.portfolio.capital:,.0f}")
+        except Exception as _pp_exc:
+            logger.warning("Paper portfolio seed failed: %s", _pp_exc)
 
         # ── Layer 4: Regime Safety ────────────────────────────────
         _vix = float(master_df["vix_level"].iloc[0]) if "vix_level" in master_df.columns else float("nan")
@@ -1363,6 +1394,7 @@ def build_app() -> dash.Dash:
                     dbc.Tab(label="Portfolio",    tab_id="tab-portfolio"),
                     dbc.Tab(label="Methodology",  tab_id="tab-methodology"),
                     dbc.Tab(label="ML Insights",  tab_id="tab-ml"),
+                    dbc.Tab(label="Agents",       tab_id="tab-agents"),
                 ],
                 className="mt-2",
                 style={"flexWrap": "wrap"},
@@ -1696,6 +1728,39 @@ def build_app() -> dash.Dash:
                             ml_signals=_ml_signals_result,
                             drift_status=_ml_drift_status,
                         ),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
+            )
+
+        if active_tab == "tab-agents":
+            # Load agent registry
+            _agent_reg_data = {}
+            _audit_changes = []
+            try:
+                from agents.shared.agent_registry import AgentRegistry
+                _agent_reg = AgentRegistry()
+                _agent_reg_data = _agent_reg.all_agents()
+            except Exception as _ar_exc:
+                logger.debug("Agent registry load failed: %s", _ar_exc)
+            try:
+                from db.audit import AuditTrail
+                _audit = AuditTrail()
+                _audit_changes = _audit._conn.execute(
+                    "SELECT * FROM audit.param_changes ORDER BY timestamp DESC LIMIT 20"
+                ).fetchdf().to_dict("records")
+            except Exception:
+                pass
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.H5("Agent Monitor — מעקב סוכנים", className="mt-2",
+                                style={"direction": "rtl", "textAlign": "right"}),
+                        html.Div("סטטוס סוכנים, היסטוריית הרצות, ושינויי פרמטרים.",
+                                 className="text-muted small mb-3",
+                                 style={"direction": "rtl", "textAlign": "right"}),
+                        build_agent_monitor_tab(_agent_reg_data, _audit_changes),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},

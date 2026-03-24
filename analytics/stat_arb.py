@@ -1874,10 +1874,36 @@ class QuantEngine:
             conviction = float(stat_score + macro_score + fund_score + vol_score)
             conviction = max(0.0, min(100.0, conviction))
 
+            # ── MR Whitelist boost/penalty (CALIBRATED) ──────────────
+            _mr_whitelist = set(
+                t.strip() for t in getattr(self.settings, "sector_mr_whitelist", "XLC,XLF,XLI,XLU").split(",")
+            )
+            _mr_filter = getattr(self.settings, "sector_mr_filter_enabled", True)
+            if _mr_filter and row["direction"] != "NEUTRAL":
+                if s not in _mr_whitelist:
+                    _penalty = getattr(self.settings, "non_whitelist_penalty", 0.3)
+                    conviction *= _penalty
+
+            # ── Regime-adaptive conviction scaling (CALIBRATED) ──────
+            # Research: CALM Sharpe=+0.66, TENSION=+0.68, CRISIS=-0.78
+            _regime_scale_map = {
+                "CALM":    getattr(self.settings, "regime_conviction_scale_calm", 1.3),
+                "NORMAL":  getattr(self.settings, "regime_conviction_scale_normal", 1.0),
+                "TENSION": getattr(self.settings, "regime_conviction_scale_tension", 0.5),
+                "CRISIS":  getattr(self.settings, "regime_conviction_scale_crisis", 0.0),
+            }
+            _regime_scale = float(_regime_scale_map.get(
+                str(regime.market_state).upper(), 1.0
+            ))
+            conviction *= _regime_scale
+            conviction = max(0.0, min(100.0, conviction))
+
             row["score_stat"] = float(stat_score)
             row["score_macro"] = float(macro_score)
             row["score_fund"] = float(fund_score)
             row["score_vol"] = float(vol_score)
+            row["mr_whitelist_member"] = s in _mr_whitelist
+            row["regime_conviction_scale"] = _regime_scale
             row["conviction_score"] = float(conviction)
 
             # ------------------------------------------------------

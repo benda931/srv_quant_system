@@ -25,6 +25,65 @@ if str(ROOT) not in sys.path:
 from agents.shared.agent_scheduler import AgentScheduler
 
 
+def run_cycle():
+    """Run one full agent cycle: Methodology -> Optimizer -> Math with validation."""
+    import json, shutil, subprocess, sys
+    from pathlib import Path
+
+    ROOT = Path(__file__).resolve().parent.parent  # srv_quant_system/
+    reports_dir = ROOT / "agents" / "methodology" / "reports"
+    settings_file = ROOT / "config" / "settings.py"
+
+    log = logging.getLogger("agent_cycle")
+    log.info("=== AGENT CYCLE START ===")
+
+    # Step 1: Run Methodology Agent
+    log.info("Step 1/3: Running Methodology Agent...")
+    r1 = subprocess.run(
+        [sys.executable, str(ROOT / "agents" / "methodology" / "agent_methodology.py"), "--once"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT)
+    )
+    if r1.returncode != 0:
+        log.error("Methodology agent failed: %s", r1.stderr[-500:])
+        return {"status": "FAILED", "step": "methodology", "error": r1.stderr[-200:]}
+    log.info("Methodology OK")
+
+    # Step 2: Run Optimizer Agent
+    log.info("Step 2/3: Running Optimizer Agent...")
+    # Backup settings first
+    backup = settings_file.with_suffix(".py.cycle_backup")
+    if settings_file.exists():
+        shutil.copy2(settings_file, backup)
+
+    r2 = subprocess.run(
+        [sys.executable, str(ROOT / "agents" / "optimizer" / "agent_optimizer.py"), "--once"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT)
+    )
+    if r2.returncode != 0:
+        log.warning("Optimizer failed (non-fatal): %s", r2.stderr[-200:])
+    else:
+        log.info("Optimizer OK")
+
+    # Step 3: Run Math Agent
+    log.info("Step 3/3: Running Math Agent...")
+    r3 = subprocess.run(
+        [sys.executable, str(ROOT / "agents" / "math" / "agent_math.py"), "--once"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT)
+    )
+    if r3.returncode != 0:
+        log.warning("Math agent failed (non-fatal): %s", r3.stderr[-200:])
+    else:
+        log.info("Math OK")
+
+    log.info("=== AGENT CYCLE COMPLETE ===")
+    return {
+        "status": "OK",
+        "methodology": r1.returncode == 0,
+        "optimizer": r2.returncode == 0,
+        "math": r3.returncode == 0,
+    }
+
+
 def setup_logging(verbose: bool = False) -> None:
     """הגדרת לוגים — קובץ + קונסולה."""
     log_file = ROOT / "logs" / "agent_scheduler.log"
@@ -88,6 +147,11 @@ def parse_args() -> argparse.Namespace:
         help="הצגת לוח הזמנים ויציאה",
     )
     parser.add_argument(
+        "--cycle",
+        action="store_true",
+        help="הרצת מחזור סוכנים מלא: Methodology -> Optimizer -> Math",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="לוגים מפורטים (DEBUG)",
@@ -104,6 +168,13 @@ def main() -> int:
     log.info("ROOT: %s", ROOT)
 
     scheduler = AgentScheduler(dry_run=args.dry_run)
+
+    # ── מחזור סוכנים מלא ────────────────────────────────────────────────
+    if args.cycle:
+        log.info("מריץ מחזור סוכנים מלא (Methodology -> Optimizer -> Math)")
+        result = run_cycle()
+        log.info("תוצאת מחזור: %s", result)
+        return 0 if result.get("status") == "OK" else 1
 
     # ── הצגת לוח זמנים בלבד ────────────────────────────────────────────
     if args.show_schedule:

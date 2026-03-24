@@ -202,6 +202,126 @@ class DriftDetector:
         self._adwin_drift = best_cut is not None
 
     # ------------------------------------------------------------------
+    # PSI (Population Stability Index) — feature distribution drift
+    # ------------------------------------------------------------------
+    def check_feature_drift_psi(
+        self,
+        reference: np.ndarray,
+        current: np.ndarray,
+        n_bins: int = 10,
+        psi_threshold: float = 0.20,
+    ) -> Dict[str, Any]:
+        """
+        Compute PSI between reference (training) and current (live) distributions.
+
+        PSI < 0.10 → no drift
+        0.10 ≤ PSI < 0.20 → moderate drift (monitor)
+        PSI ≥ 0.20 → significant drift (retrain)
+
+        Ref: Yurdakul (2018) — Statistical Properties of PSI
+        """
+        ref = np.asarray(reference, dtype=np.float64)
+        cur = np.asarray(current, dtype=np.float64)
+
+        ref = ref[np.isfinite(ref)]
+        cur = cur[np.isfinite(cur)]
+
+        if len(ref) < 30 or len(cur) < 30:
+            return {"psi": 0.0, "drift": False, "label": "INSUFFICIENT_DATA"}
+
+        # Create bins from reference distribution
+        breakpoints = np.percentile(ref, np.linspace(0, 100, n_bins + 1))
+        breakpoints[0] = -np.inf
+        breakpoints[-1] = np.inf
+
+        ref_counts = np.histogram(ref, bins=breakpoints)[0]
+        cur_counts = np.histogram(cur, bins=breakpoints)[0]
+
+        # Normalize to proportions (add small epsilon to avoid log(0))
+        eps = 1e-6
+        ref_pct = ref_counts / ref_counts.sum() + eps
+        cur_pct = cur_counts / cur_counts.sum() + eps
+
+        # PSI = Σ (cur_i - ref_i) × ln(cur_i / ref_i)
+        psi = float(np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct)))
+
+        if psi >= psi_threshold:
+            label = "SIGNIFICANT_DRIFT"
+        elif psi >= 0.10:
+            label = "MODERATE_DRIFT"
+        else:
+            label = "STABLE"
+
+        return {
+            "psi": round(psi, 4),
+            "drift": psi >= psi_threshold,
+            "label": label,
+            "ref_size": len(ref),
+            "cur_size": len(cur),
+        }
+
+    def check_multi_feature_drift(
+        self,
+        reference_df: pd.DataFrame,
+        current_df: pd.DataFrame,
+        psi_threshold: float = 0.20,
+    ) -> Dict[str, Any]:
+        """
+        Check PSI drift across multiple features.
+        Returns per-feature PSI + aggregate drift decision.
+        """
+        common_cols = list(set(reference_df.columns) & set(current_df.columns))
+        if not common_cols:
+            return {"drifted_features": [], "n_drifted": 0, "total_features": 0}
+
+        results = {}
+        drifted = []
+        for col in common_cols:
+            r = self.check_feature_drift_psi(
+                reference_df[col].values, current_df[col].values,
+                psi_threshold=psi_threshold,
+            )
+            results[col] = r
+            if r["drift"]:
+                drifted.append(col)
+
+        return {
+            "per_feature": results,
+            "drifted_features": drifted,
+            "n_drifted": len(drifted),
+            "total_features": len(common_cols),
+            "aggregate_drift": len(drifted) >= max(1, len(common_cols) // 3),
+        }
+
+    # ------------------------------------------------------------------
+    # KS test — distribution comparison
+    # ------------------------------------------------------------------
+    def check_feature_drift_ks(
+        self,
+        reference: np.ndarray,
+        current: np.ndarray,
+        alpha: float = 0.05,
+    ) -> Dict[str, Any]:
+        """
+        Two-sample Kolmogorov-Smirnov test for feature distribution drift.
+        More sensitive than PSI for small samples.
+        """
+        ref = np.asarray(reference, dtype=np.float64)
+        cur = np.asarray(current, dtype=np.float64)
+        ref = ref[np.isfinite(ref)]
+        cur = cur[np.isfinite(cur)]
+
+        if len(ref) < 20 or len(cur) < 20:
+            return {"ks_stat": 0.0, "p_value": 1.0, "drift": False}
+
+        ks_stat, p_value = sp_stats.ks_2samp(ref, cur)
+        return {
+            "ks_stat": round(float(ks_stat), 4),
+            "p_value": round(float(p_value), 4),
+            "drift": p_value < alpha,
+        }
+
+    # ------------------------------------------------------------------
     def is_drift_detected(self) -> bool:
         """True if any drift signal is active."""
         return self._ic_drift or self._hit_rate_drift or self._adwin_drift
