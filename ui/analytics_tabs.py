@@ -439,6 +439,45 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
         className="g-2 mb-3",
     )
 
+    # ── Walk-Forward Equity Curve ─────────────────────────────────────────────
+    eq_fig = go.Figure()
+    walk_metrics = getattr(br, "walk_metrics", [])
+    if walk_metrics:
+        try:
+            dates_eq = [w.test_start for w in walk_metrics]
+            returns_eq = [w.signal_return for w in walk_metrics]
+            cum_eq = np.cumprod(1 + np.array(returns_eq, dtype=float))
+            eq_fig.add_trace(go.Scatter(
+                x=dates_eq, y=cum_eq,
+                mode="lines", name="Strategy (signal-weighted)",
+                line=dict(color="#0dcaf0", width=2),
+                fill="tozeroy", fillcolor="rgba(13,202,240,0.08)",
+            ))
+            # Drawdown shading
+            running_max = np.maximum.accumulate(cum_eq)
+            dd_eq = (cum_eq - running_max) / running_max
+            eq_fig.add_trace(go.Scatter(
+                x=dates_eq, y=dd_eq,
+                mode="lines", name="Drawdown",
+                line=dict(color="#dc3545", width=1),
+                fill="tozeroy", fillcolor="rgba(220,53,69,0.12)",
+                yaxis="y2",
+            ))
+        except Exception:
+            pass
+    eq_fig.add_hline(y=1.0, line_dash="dot", line_color="#555", opacity=0.5)
+    eq_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+        height=340,
+        title=dict(text="Walk-Forward Equity Curve — עקומת שווי מצטבר", font=dict(size=13)),
+        margin=dict(l=50, r=50, t=45, b=35),
+        yaxis=dict(title="Growth of $1", tickformat=".2f"),
+        yaxis2=dict(title="Drawdown", overlaying="y", side="right", tickformat=".0%",
+                    showgrid=False, range=[-0.5, 0]),
+        legend=dict(orientation="h", y=-0.15, font=dict(size=10)),
+    )
+
     # ── IC time series ───────────────────────────────────────────────────────
     ic_series: pd.Series = getattr(br, "ic_series", pd.Series(dtype=float))
     ic_fig = go.Figure()
@@ -540,6 +579,9 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
     return html.Div(
         [
             kpi_row,
+            dbc.Card(dbc.CardBody(
+                dcc.Graph(figure=eq_fig, config={"displayModeBar": False}),
+            ), className="border-0 bg-transparent mb-3"),
             dbc.Row(
                 [
                     dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(figure=ic_fig,     config={"displayModeBar": False}))), md=7),
@@ -1639,6 +1681,43 @@ def build_dss_tab(
             ]),
         ], className="border-primary mb-3", style={"borderTop": "3px solid var(--bs-primary)"})
         sections.append(signal_table)
+
+        # ── Signal Z-Score Horizontal Bar Chart ──────────────────────────
+        try:
+            z_tickers = [r.ticker for r in signal_results[:15]]
+            z_vals = [r.residual_z for r in signal_results[:15]]
+            z_colors = ['#00bc8c' if z < 0 else '#e74c3c' for z in z_vals]
+            z_fig = go.Figure(go.Bar(
+                x=z_vals, y=z_tickers,
+                orientation='h',
+                marker_color=z_colors,
+                text=[f"{z:+.2f}" for z in z_vals],
+                textposition="outside",
+                textfont=dict(size=10),
+            ))
+            z_fig.add_vline(x=0, line_color="#555", line_width=1)
+            z_fig.add_vline(x=2, line_dash="dash", line_color="#ffc107", opacity=0.6,
+                            annotation_text="+2σ", annotation_position="top")
+            z_fig.add_vline(x=-2, line_dash="dash", line_color="#ffc107", opacity=0.6,
+                            annotation_text="-2σ", annotation_position="top")
+            z_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                height=max(250, 28 * len(z_tickers) + 80),
+                title=dict(text="Sector Z-Scores — PCA Residual", font=dict(size=13)),
+                margin=dict(l=70, r=40, t=45, b=30),
+                xaxis=dict(title="Z-Score (σ)", zeroline=True),
+                yaxis=dict(autorange="reversed"),
+                showlegend=False,
+            )
+            z_chart_card = dbc.Card([
+                dbc.CardHeader(html.H6("📊 Z-Score Map — סטיית תמחור לפי סקטור",
+                                        className="mb-0 text-center")),
+                dbc.CardBody(dcc.Graph(figure=z_fig, config={"displayModeBar": False})),
+            ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"})
+            sections.append(z_chart_card)
+        except Exception:
+            pass  # graceful fallback if z-score data is missing
 
     # ══════════════════════════════════════════════════════════════════════
     # SECTION 3: Trade Book

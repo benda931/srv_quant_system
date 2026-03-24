@@ -464,18 +464,28 @@ def heatmap_fig(mat: Optional[pd.DataFrame], title: str) -> go.Figure:
         fig.update_layout(template="plotly_dark", title=title, height=500)
         return fig
 
+    z_vals = mat.values.round(3)
+    labels = list(mat.columns)
     fig = go.Figure(
         data=go.Heatmap(
-            z=mat.values,
-            x=list(mat.columns),
+            z=z_vals,
+            x=labels,
             y=list(mat.index),
-            colorscale="RdBu",
+            colorscale="RdBu_r",
+            zmin=-1, zmax=1,
             zmid=0,
+            text=[[f"{v:.2f}" for v in row] for row in z_vals],
+            texttemplate="%{text}",
+            textfont=dict(size=9),
+            showscale=True,
+            hovertemplate="%{y} vs %{x}: %{z:.3f}<extra></extra>",
         )
     )
     fig.update_layout(
         template="plotly_dark",
-        title=title,
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
+        title=dict(text=title, font=dict(size=13)),
         height=500,
         margin=dict(l=20, r=20, t=55, b=20),
     )
