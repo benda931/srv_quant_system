@@ -98,6 +98,15 @@ class Settings(BaseSettings):
     )
 
     # =====================================================
+    # Extended Universe (optional — add tickers beyond sector ETFs)
+    # Comma-separated list, fetched alongside sector_tickers
+    # Examples: "AAPL,MSFT,GOOGL" or "EWJ,EWZ,FXI" (country ETFs)
+    # =====================================================
+    extended_tickers: str = Field(default="")
+    # Universe mode: "sectors" = 11 sector ETFs only, "extended" = sectors + extended_tickers
+    universe_mode: str = Field(default="sectors")
+
+    # =====================================================
     # Data engineering
     # =====================================================
     history_years: int = Field(default=10, ge=2, le=25)
@@ -390,9 +399,25 @@ class Settings(BaseSettings):
     def sector_list(self) -> List[str]:
         return list(self.sector_tickers.values())
 
+    def extended_ticker_list(self) -> List[str]:
+        """Parse extended_tickers comma string into list."""
+        if not self.extended_tickers.strip():
+            return []
+        return [t.strip() for t in self.extended_tickers.split(",") if t.strip()]
+
+    def tradeable_universe(self) -> List[str]:
+        """All tickers that the system actively trades/analyzes.
+        In 'sectors' mode: 11 sector ETFs.
+        In 'extended' mode: sectors + extended_tickers.
+        """
+        base = self.sector_list()
+        if self.universe_mode == "extended" and self.extended_tickers.strip():
+            base = base + self.extended_ticker_list()
+        return base
+
     def all_price_tickers(self) -> List[str]:
         return (
-            self.sector_list()
+            self.tradeable_universe()
             + [self.spy_ticker]
             + list(self.macro_tickers.values())
             + list(self.credit_tickers.values())

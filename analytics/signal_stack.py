@@ -414,9 +414,14 @@ def generate_all_rv_spreads(
     prices: pd.DataFrame,
     tickers: List[str],
     hedge_window: int = 60,
+    max_pairs: int = 200,
 ) -> Dict[str, Tuple[pd.Series, float, str, str]]:
     """
-    Generate all pairwise RV spread residuals for a universe.
+    Generate pairwise RV spread residuals for a universe.
+
+    For N tickers, total pairs = N*(N-1)/2.
+    If > max_pairs, randomly samples to keep computation bounded.
+    11 tickers = 55 pairs (fine), 50 tickers = 1225 pairs (capped at 200).
 
     Returns
     -------
@@ -424,20 +429,30 @@ def generate_all_rv_spreads(
     """
     spreads = {}
     n = len(tickers)
-    for i in range(n):
-        for j in range(i + 1, n):
-            a, b = tickers[i], tickers[j]
-            if a not in prices.columns or b not in prices.columns:
-                continue
-            name = f"{a}-{b}"
-            try:
-                spread, h = compute_rv_spread_residual(
-                    prices[a], prices[b], hedge_window=hedge_window
-                )
-                if len(spread.dropna()) >= 60:
-                    spreads[name] = (spread, h, a, b)
-            except Exception as e:
-                log.debug("RV spread %s failed: %s", name, e)
+    total_possible = n * (n - 1) // 2
+
+    # Build pair list
+    pairs = [(tickers[i], tickers[j]) for i in range(n) for j in range(i + 1, n)
+             if tickers[i] in prices.columns and tickers[j] in prices.columns]
+
+    # Sample if too many pairs
+    if len(pairs) > max_pairs:
+        log.info("RV spreads: %d pairs > max %d, sampling", len(pairs), max_pairs)
+        rng = np.random.default_rng(42)
+        pairs = [pairs[i] for i in rng.choice(len(pairs), size=max_pairs, replace=False)]
+
+    for a, b in pairs:
+        name = f"{a}-{b}"
+        try:
+            spread, h = compute_rv_spread_residual(
+                prices[a], prices[b], hedge_window=hedge_window
+            )
+            if len(spread.dropna()) >= 60:
+                spreads[name] = (spread, h, a, b)
+        except Exception as e:
+            log.debug("RV spread %s failed: %s", name, e)
+
+    log.info("RV spreads: %d/%d pairs computed (universe=%d)", len(spreads), len(pairs), n)
     return spreads
 
 
