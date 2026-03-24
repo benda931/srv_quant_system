@@ -120,13 +120,21 @@ def compute_expected_shortfall(
 
     # ── 3. Cornish-Fisher ES ──
     # z_CF = z + (z²-1)·S/6 + (z³-3z)·K/24 - (2z³-5z)·S²/36
+    # Ref: Cornish & Fisher (1937), Favre & Galeano (2002)
     S, K = skew, kurt
     z = z_alpha
     z_cf = z + (z**2 - 1) * S / 6 + (z**3 - 3*z) * K / 24 - (2*z**3 - 5*z) * S**2 / 36
     var_cf = -(mu * horizon_days + z_cf * sigma * scale)
-    # ES via numerical integration of CF-adjusted distribution (simplified)
-    z_cf_es = z_cf - sigma * scale * 0.1  # Approximation
-    es_cf = var_cf * 1.1  # Approx: ES ≈ 1.1 × VaR for fat-tailed distributions
+    # ES via numerical integration over CF-adjusted quantile function
+    # ES = (1/α) ∫₀^α VaR(p) dp — approximate with 100-point quadrature
+    _n_quad = 100
+    _ps = np.linspace(0.001, alpha, _n_quad)
+    _es_sum = 0.0
+    for _p in _ps:
+        _zp = norm.ppf(_p)
+        _zcf_p = _zp + (_zp**2 - 1) * S / 6 + (_zp**3 - 3*_zp) * K / 24 - (2*_zp**3 - 5*_zp) * S**2 / 36
+        _es_sum += -(mu * horizon_days + _zcf_p * sigma * scale)
+    es_cf = _es_sum / _n_quad
 
     # Best estimate: average of historical and CF
     es_best = (es_historical + es_cf) / 2.0
