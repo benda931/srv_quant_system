@@ -144,6 +144,15 @@ class Settings(BaseSettings):
     # Entry/exit thresholds — CALIBRATED: lower threshold captures more opportunities
     signal_entry_threshold: float = Field(default=0.05, ge=0.01, le=1.0)
 
+    # Sector Mean-Reversion Whitelist — CALIBRATED 2026-03-24
+    # Only these sectors show statistically significant mean reversion (Sharpe > 0.1)
+    # XLC=0.12, XLF=0.12, XLI=0.25, XLU=0.40. Others: XLE=-0.28, XLP=-0.01, XLK=-0.02
+    sector_mr_whitelist: str = Field(default="XLC,XLF,XLI,XLU")
+    # Enable whitelist filter (set False to trade all sectors)
+    sector_mr_filter_enabled: bool = Field(default=True)
+    # Optimal hold period (days) — CALIBRATED: lb=60 hold=5 → Sharpe 0.456
+    signal_optimal_hold: int = Field(default=5, ge=1, le=60)
+
     # Layer 3: Mean-Reversion Quality weights
     signal_mr_w_hl: float = Field(default=0.35, ge=0.0, le=1.0)
     signal_mr_w_adf: float = Field(default=0.40, ge=0.0, le=1.0)

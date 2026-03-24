@@ -474,6 +474,11 @@ class SignalStackEngine:
         # Entry threshold
         self.entry_threshold = getattr(settings, "signal_entry_threshold", 0.15) if settings else 0.15
 
+        # Sector MR whitelist — only trade sectors with proven mean reversion
+        self.mr_filter_enabled = getattr(settings, "sector_mr_filter_enabled", True) if settings else True
+        mr_str = getattr(settings, "sector_mr_whitelist", "XLC,XLF,XLI,XLU") if settings else "XLC,XLF,XLI,XLU"
+        self.mr_whitelist = set(t.strip() for t in mr_str.split(",") if t.strip())
+
     def score_sector_candidates(
         self,
         frob_distortion_z: float,
@@ -528,6 +533,9 @@ class SignalStackEngine:
 
         results = []
         for ticker, resid in sector_residuals.items():
+            # MR whitelist filter: penalize non-MR sectors
+            mr_whitelisted = (not self.mr_filter_enabled) or (ticker in self.mr_whitelist)
+
             # Layer 2: Dislocation
             disloc_result = compute_dislocation_score(
                 residual_series=resid,
@@ -548,6 +556,10 @@ class SignalStackEngine:
                 mr_score = 1.0
                 mr_detail = None
 
+            # MR whitelist penalty: non-whitelisted sectors get severely reduced score
+            if not mr_whitelisted:
+                mr_score = mr_score * 0.15  # 85% penalty for non-MR sectors
+
             # Combined conviction: weighted additive with safety gate
             # Changed from multiplicative (one zero kills all) to additive (more robust)
             # Score = w1·S_dist + w2·S_disloc + w3·S_mr, then multiply by S_safe
@@ -560,13 +572,14 @@ class SignalStackEngine:
             # Safety still multiplicative (regime gate must reduce/kill)
             conviction = raw_conviction * safe_score
 
-            # Gates — including Layer 3 & 4 gates
+            # Gates — including Layer 3 & 4 gates + MR whitelist
             gates = {
                 "distortion_above_min": dist_result.distortion_score >= 0.15,
                 "dislocation_nonzero": disloc_result.dislocation_score > 0.05,
                 "mean_reversion_ok": mr_score >= 0.15,
                 "regime_safe": safe_score >= 0.1,
                 "no_hard_kill": not (safe_result.any_hard_kill if safe_result else False),
+                "mr_whitelisted": mr_whitelisted,
             }
             all_gates_pass = all(gates.values())
             passes_entry = conviction >= self.entry_threshold and all_gates_pass
@@ -745,6 +758,9 @@ class SignalStackEngine:
             if not ticker:
                 continue
 
+            # MR whitelist filter
+            mr_whitelisted = (not self.mr_filter_enabled) or (ticker in self.mr_whitelist)
+
             z = float(row.get("pca_residual_z", 0.0))
             resid_val = float(row.get("pca_residual_level", float("nan")))
 
@@ -770,6 +786,10 @@ class SignalStackEngine:
                 else:
                     mr_score = 0.5  # Unknown → neutral
 
+            # MR whitelist penalty: non-whitelisted sectors get severely reduced score
+            if not mr_whitelisted:
+                mr_score = mr_score * 0.15
+
             conviction = (
                 dist_result.distortion_score
                 * disloc_result.dislocation_score
@@ -783,6 +803,7 @@ class SignalStackEngine:
                 "mean_reversion_ok": mr_score >= 0.15,
                 "regime_safe": safe_score >= 0.1,
                 "no_hard_kill": not (safe_result.any_hard_kill if safe_result else False),
+                "mr_whitelisted": mr_whitelisted,
             }
             all_gates_pass = all(gates.values())
             passes_entry = conviction >= self.entry_threshold and all_gates_pass
