@@ -354,7 +354,37 @@ class PaperTrader:
             peak = max(values)
             self.portfolio.max_drawdown = (min(values) - peak) / peak if peak > 0 else 0
 
+        # Auto-journal: publish trades to audit trail + bus
+        self._auto_journal(actions, today)
+
         return actions
+
+    def _auto_journal(self, actions: dict, today: str) -> None:
+        """Auto-publish trades to audit trail and agent bus."""
+        try:
+            from db.audit import AuditTrail
+            audit = AuditTrail()
+            for entry in actions.get("entries", []):
+                audit.log_trade(today, f"PAPER-{entry['ticker']}", "OPEN", entry)
+            for exit_t in actions.get("exits", []):
+                audit.log_trade(today, f"PAPER-{exit_t['ticker']}", "CLOSE", exit_t)
+        except Exception:
+            pass  # Audit trail is optional
+
+        try:
+            from scripts.agent_bus import get_bus
+            bus = get_bus()
+            if actions.get("entries") or actions.get("exits"):
+                bus.publish("paper_trader", {
+                    "date": today,
+                    "entries": len(actions.get("entries", [])),
+                    "exits": len(actions.get("exits", [])),
+                    "n_positions": len(self.portfolio.positions),
+                    "total_pnl_pct": round(self.portfolio.total_pnl_pct, 4),
+                    "win_rate": round(self.portfolio.win_rate, 3),
+                })
+        except Exception:
+            pass  # Bus is optional
 
     # ── Status ───────────────────────────────────────────────────
 

@@ -707,7 +707,7 @@ class RegimeAlertEngine:
     # ── Persistence (alerts to JSON) ─────────────────────────────────────
 
     def save_alerts(self, result: RegimeAlertResult, path: Path) -> None:
-        """Save active alerts to JSON for external consumers."""
+        """Save active alerts to JSON + publish to AgentBus for external consumers."""
         data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "current_regime": result.current_regime,
@@ -719,6 +719,21 @@ class RegimeAlertEngine:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         self._log.info("Alerts saved to %s", path)
+
+        # Publish to AgentBus for real-time consumption by agents + dashboard
+        try:
+            from scripts.agent_bus import get_bus
+            bus = get_bus()
+            bus.publish("regime_alerts", {
+                "regime": result.current_regime,
+                "crisis_prob": data["crisis_probability"],
+                "n_alerts": len(result.active_alerts),
+                "alerts": result.active_alerts[:5],  # Top 5 alerts
+                "transitions": len(result.transitions),
+                "timestamp": data["timestamp"],
+            })
+        except Exception as exc:
+            self._log.debug("Bus publish failed (non-fatal): %s", exc)
 
 
 # ── Module-level convenience ─────────────────────────────────────────────
