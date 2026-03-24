@@ -147,6 +147,7 @@ class PcaZReversal(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר |z| >= z_entry ואין CRISIS. כיוון הפוך ל-z."""
         z = ctx.get("z_score", 0)
         regime = ctx.get("regime", "NORMAL")
         if regime == "CRISIS":
@@ -158,6 +159,7 @@ class PcaZReversal(Methodology):
         return None
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, סטופ, זמן, או שינוי regime ל-CRISIS."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         if days >= self.max_hold:
@@ -171,6 +173,7 @@ class PcaZReversal(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר z_entry, z_exit_ratio, z_stop_ratio, max_hold."""
         return {"z_entry": self.z_entry, "z_exit_ratio": self.z_exit_ratio,
                 "z_stop_ratio": self.z_stop_ratio, "max_hold": self.max_hold}
 
@@ -192,6 +195,7 @@ class MomentumFilter(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר |z| >= z_entry ומומנטום מאשר כיוון contrarian (אם מופעל)."""
         z = ctx.get("z_score", 0)
         mom = ctx.get("momentum", 0)  # 21d return
         regime = ctx.get("regime", "NORMAL")
@@ -210,6 +214,7 @@ class MomentumFilter(Methodology):
         return (ctx["ticker"], direction, weight, {"entry_z": z, "momentum": mom})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z (20%), סטופ (1.8x), או מגבלת זמן."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         if days >= self.max_hold:
@@ -221,6 +226,7 @@ class MomentumFilter(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר z_entry, momentum_window, momentum_confirm, max_hold."""
         return {"z_entry": self.z_entry, "momentum_window": self.momentum_window,
                 "momentum_confirm": self.momentum_confirm, "max_hold": self.max_hold}
 
@@ -241,6 +247,7 @@ class DispersionTiming(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר |z| גבוה AND דיספרסיה מעל סף. נחסם ב-CRISIS/TENSION."""
         z = ctx.get("z_score", 0)
         disp = ctx.get("dispersion", 0)  # Cross-sectional std of returns
         regime = ctx.get("regime", "NORMAL")
@@ -253,6 +260,7 @@ class DispersionTiming(Methodology):
         return (ctx["ticker"], direction, weight, {"entry_z": z, "dispersion": disp})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, קריסת דיספרסיה, סטופ, או מגבלת זמן."""
         days = ctx.get("days_held", 0)
         disp = ctx.get("dispersion", 0)
         z = ctx.get("current_z", trade.entry_z)
@@ -267,6 +275,7 @@ class DispersionTiming(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר z_entry, disp_threshold, max_hold."""
         return {"z_entry": self.z_entry, "disp_threshold": self.disp_threshold,
                 "max_hold": self.max_hold}
 
@@ -286,6 +295,7 @@ class AdaptiveThreshold(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר |z| > סף דינמי לפי regime. סייזינג מותאם לרגים."""
         z = ctx.get("z_score", 0)
         regime = ctx.get("regime", "NORMAL")
         thresh = self.thresholds.get(regime, 0.85)
@@ -297,6 +307,7 @@ class AdaptiveThreshold(Methodology):
         return (ctx["ticker"], direction, weight, {"entry_z": z, "regime_thresh": thresh})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, סטופ, זמן, או CRISIS."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         regime = ctx.get("regime", "NORMAL")
@@ -311,6 +322,7 @@ class AdaptiveThreshold(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר regime thresholds ו-size multipliers."""
         return {"thresholds": self.thresholds, "size_mult": self.size_mult}
 
 
@@ -328,6 +340,7 @@ class MultiFactor(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר ציון מורכב (z + vol + momentum + corr) >= score_threshold."""
         z = ctx.get("z_score", 0)
         vol = ctx.get("vol", 0.20)
         mom = ctx.get("momentum", 0)
@@ -362,6 +375,7 @@ class MultiFactor(Methodology):
                  "mom_comp": mom_comp, "corr_comp": corr_comp})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, סטופ (1.7x), זמן, או CRISIS."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         if days >= self.max_hold:
@@ -375,6 +389,7 @@ class MultiFactor(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר score_threshold ו-max_hold."""
         return {"score_threshold": self.score_threshold, "max_hold": self.max_hold}
 
 
@@ -469,6 +484,7 @@ class ResearchBriefRV(Methodology):
         return 0.0
 
     def should_enter(self, ctx):
+        """כניסה לפי 4-layer signal stack: distortion x dislocation x MR x safety."""
         z = ctx.get("z_score", 0)
         vix = ctx.get("vix", 18)
         avg_corr = ctx.get("avg_corr", 0.3)
@@ -525,6 +541,7 @@ class ResearchBriefRV(Methodology):
         })
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, model invalidation stop, regime kill, או זמן."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         regime = ctx.get("regime", "NORMAL")
@@ -545,6 +562,7 @@ class ResearchBriefRV(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר distortion coefficients, entry threshold, risk params."""
         return {
             "a1_frob": self.a1, "a2_mode": self.a2, "a3_coc": self.a3,
             "z_cap": self.z_cap, "z_entry_min": self.z_entry_min,
@@ -589,6 +607,7 @@ class ResearchBriefDispersion(Methodology):
         self.max_weight = max_weight
 
     def should_enter(self, ctx):
+        """כניסה כאשר דיספרסיה גבוהה AND קורלציה נמוכה. נחסם ב-CRISIS/TENSION."""
         z = ctx.get("z_score", 0)
         disp = ctx.get("dispersion", 0)
         avg_corr = ctx.get("avg_corr", 0.3)

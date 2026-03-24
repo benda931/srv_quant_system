@@ -1323,96 +1323,114 @@ def build_app() -> dash.Dash:
     def render_tab(active_tab: str):
         if active_tab == "tab-dss":
             _banner = _engine_error_banner("dss", "Decision Support System")
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    _banner or html.Div(),
-                    html.Div([
-                        html.H5("🎯 Decision Support System — Short Vol / Dispersion", className="mt-2", style=RTL_STYLE),
-                        html.Div(
-                            "מערכת תומכת החלטה: Signal Stack (4 שכבות), Trade Book עם Greeks, "
-                            "Regime Safety gate, ותנאי כניסה/יציאה.",
-                            className="text-muted small mb-3", style=RTL_STYLE,
-                        ),
-                    ]),
-                    build_dss_tab(_dss_signal_results, _dss_trade_tickets,
-                                  _dss_regime_safety, _dss_corr_snapshot,
-                                  _dss_monitor_summary, _options_surface,
-                                  _tail_risk_es, _methodology_ranking,
-                                  _paper_portfolio),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        _banner or html.Div(),
+                        html.Div([
+                            html.H5("🎯 Decision Support System — Short Vol / Dispersion", className="mt-2", style=RTL_STYLE),
+                            html.Div(
+                                "מערכת תומכת החלטה: Signal Stack (4 שכבות), Trade Book עם Greeks, "
+                                "Regime Safety gate, ותנאי כניסה/יציאה.",
+                                className="text-muted small mb-3", style=RTL_STYLE,
+                            ),
+                        ]),
+                        build_dss_tab(_dss_signal_results, _dss_trade_tickets,
+                                      _dss_regime_safety, _dss_corr_snapshot,
+                                      _dss_monitor_summary, _options_surface,
+                                      _tail_risk_es, _methodology_ranking,
+                                      _paper_portfolio),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-scanner":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    build_scanner_pro(master_df),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        build_scanner_pro(master_df),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-correlation":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    build_correlation_explainer(),
-                    build_correlation_panel(
-                        ui_outputs["corr_fig"],
-                        ui_outputs["delta_corr_fig"],
-                        ui_outputs["corr_ts_fig"],
-                        ui_outputs["contrib_fig"],
-                    ),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        build_correlation_explainer(),
+                        build_correlation_panel(
+                            ui_outputs["corr_fig"],
+                            ui_outputs["delta_corr_fig"],
+                            ui_outputs["corr_ts_fig"],
+                            ui_outputs["contrib_fig"],
+                        ),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-stress":
             _banner = _engine_error_banner("stress", "Stress Engine")
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    _banner or html.Div(),
-                    html.Div(
-                        [
-                            html.H5("⚡ Stress Testing — 10 תרחישים מוסדיים", className="mt-2", style=RTL_STYLE),
-                            html.Div("ניתוח קדימה: השפעת תרחישי קיצון על הספר, P&L מוערך ואמינות האות בכל משטר.", className="text-muted small mb-3", style=RTL_STYLE),
-                        ]
-                    ),
-                    build_stress_tab(_stress_results, master_df),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        _banner or html.Div(),
+                        html.Div(
+                            [
+                                html.H5("⚡ Stress Testing — 10 תרחישים מוסדיים", className="mt-2", style=RTL_STYLE),
+                                html.Div("ניתוח קדימה: השפעת תרחישי קיצון על הספר, P&L מוערך ואמינות האות בכל משטר.", className="text-muted small mb-3", style=RTL_STYLE),
+                            ]
+                        ),
+                        build_stress_tab(_stress_results, master_df),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-risk":
             _banner = _engine_error_banner("risk", "Portfolio Risk Engine")
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    _banner or html.Div(),
-                    html.Div(
-                        [
-                            html.H5("🎯 Portfolio Risk — VaR, CVaR, MCTR", className="mt-2", style=RTL_STYLE),
-                            html.Div("ניתוח סיכונים: תנודתיות, ערך בסיכון, תרומת כל סקטור לסיכון הכולל.", className="text-muted small mb-3", style=RTL_STYLE),
-                        ]
-                    ),
-                    build_risk_tab(_risk_report, master_df),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        _banner or html.Div(),
+                        html.Div(
+                            [
+                                html.H5("🎯 Portfolio Risk — VaR, CVaR, MCTR", className="mt-2", style=RTL_STYLE),
+                                html.Div("ניתוח סיכונים: תנודתיות, ערך בסיכון, תרומת כל סקטור לסיכון הכולל.", className="text-muted small mb-3", style=RTL_STYLE),
+                            ]
+                        ),
+                        build_risk_tab(_risk_report, master_df),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-corrvol":
             _banner = _engine_error_banner("corrvol", "Correlation-Vol Engine")
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    _banner or html.Div(),
-                    html.Div([
-                        html.H5("🔮 Correlation Structure & Volatility Pricing", className="mt-2", style=RTL_STYLE),
-                        html.Div(
-                            "ניתוח מבנה הקורלציות בין הסקטורים, תמחור תנודתיות, "
-                            "ואות לאסטרטגיית Short Vol / Dispersion.",
-                            className="text-muted small mb-3", style=RTL_STYLE,
-                        ),
-                    ]),
-                    build_corr_vol_tab(_corr_vol_analysis),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        _banner or html.Div(),
+                        html.Div([
+                            html.H5("🔮 Correlation Structure & Volatility Pricing", className="mt-2", style=RTL_STYLE),
+                            html.Div(
+                                "ניתוח מבנה הקורלציות בין הסקטורים, תמחור תנודתיות, "
+                                "ואות לאסטרטגיית Short Vol / Dispersion.",
+                                className="text-muted small mb-3", style=RTL_STYLE,
+                            ),
+                        ]),
+                        build_corr_vol_tab(_corr_vol_analysis),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-pnl":
@@ -1428,30 +1446,36 @@ def build_app() -> dash.Dash:
             )
 
         if active_tab == "tab-backtest":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.Div(
-                        [
-                            html.H5("🔬 Walk-Forward Backtest — ולידציה OOS", className="mt-2", style=RTL_STYLE),
-                            html.Div("בדיקת IC, Hit Rate ו-Sharpe של האות על חלונות Out-of-Sample.", className="text-muted small mb-3", style=RTL_STYLE),
-                        ]
-                    ),
-                    build_backtest_tab(None),  # None triggers "Run Backtest" button
-                    dcc.Loading(html.Div(id="backtest-output"), type="dot", color="#0dcaf0"),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.Div(
+                            [
+                                html.H5("🔬 Walk-Forward Backtest — ולידציה OOS", className="mt-2", style=RTL_STYLE),
+                                html.Div("בדיקת IC, Hit Rate ו-Sharpe של האות על חלונות Out-of-Sample.", className="text-muted small mb-3", style=RTL_STYLE),
+                            ]
+                        ),
+                        build_backtest_tab(None),  # None triggers "Run Backtest" button
+                        dcc.Loading(html.Div(id="backtest-output"), type="dot", color="#0dcaf0"),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-decay":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.Div([
-                        html.H5("📉 Signal Decay Analysis — כמה זמן הסיגנל תקף?", className="mt-2", style=RTL_STYLE),
-                        html.Div("עקומת IC לאורך אופקים שונים, אופק מיטבי לכל סקטור, ועלויות turnover.", className="text-muted small mb-3", style=RTL_STYLE),
-                    ]),
-                    build_signal_decay_tab(_decay_result_cached),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.Div([
+                            html.H5("📉 Signal Decay Analysis — כמה זמן הסיגנל תקף?", className="mt-2", style=RTL_STYLE),
+                            html.Div("עקומת IC לאורך אופקים שונים, אופק מיטבי לכל סקטור, ועלויות turnover.", className="text-muted small mb-3", style=RTL_STYLE),
+                        ]),
+                        build_signal_decay_tab(_decay_result_cached),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-regime":
@@ -1473,23 +1497,29 @@ def build_app() -> dash.Dash:
             return build_journal_tab(journal).children
 
         if active_tab == "tab-portfolio":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.H5("💼 Paper Trading Portfolio — תיק מסחר נייר", className="mt-2", style=RTL_STYLE),
-                    html.Div("מעקב ביצועים, פוזיציות פתוחות, עסקאות סגורות וניתוח חשיפה.", className="text-muted small mb-3", style=RTL_STYLE),
-                    build_portfolio_tab(_paper_portfolio, engine.prices if engine else None),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.H5("💼 Paper Trading Portfolio — תיק מסחר נייר", className="mt-2", style=RTL_STYLE),
+                        html.Div("מעקב ביצועים, פוזיציות פתוחות, עסקאות סגורות וניתוח חשיפה.", className="text-muted small mb-3", style=RTL_STYLE),
+                        build_portfolio_tab(_paper_portfolio, engine.prices if engine else None),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-methodology":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
-                    html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
-                    build_methodology_tab(_methodology_ranking_full),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
+                        html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
+                        build_methodology_tab(_methodology_ranking_full),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-tearsheet":

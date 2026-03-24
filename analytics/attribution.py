@@ -6,12 +6,14 @@ from typing import Any, Dict, List
 
 
 def clip01(x: float) -> float:
+    """Clamp x to [0, 1], treating non-finite values as 0."""
     if not math.isfinite(x):
         return 0.0
     return max(0.0, min(1.0, float(x)))
 
 
 def safe_float(x: Any, default: float = float("nan")) -> float:
+    """Convert x to float, returning *default* on any failure."""
     try:
         return float(x)
     except Exception:
@@ -56,6 +58,12 @@ def compute_statistical_dislocation_score(
     z_lo: float = 0.75,
     z_hi: float = 2.75,
 ) -> float:
+    """
+    Statistical Dislocation Score (SDS) in [0, 1].
+
+    Combines PCA residual z-score strength, dispersion z-score, and
+    OU half-life quality into a single dislocation measure.
+    """
     z_abs = abs(z) if math.isfinite(z) else 0.0
     z_strength = clip01((z_abs - z_lo) / max(1e-9, z_hi - z_lo))
 
@@ -83,6 +91,12 @@ def compute_fundamental_justification_score(
     neg_or_missing_weight: float,
     fund_source: str,
 ) -> float:
+    """
+    Fundamental Justification Score (FJS) in [0, 1].
+
+    Measures whether the dislocation is explained by relative valuation
+    (PE / earnings-yield vs SPY), adjusted for data coverage quality.
+    """
     if direction not in {"LONG", "SHORT"}:
         return 0.0
 
@@ -127,6 +141,13 @@ def compute_macro_shift_score(
     beta_delta_norm: float = 0.35,
     corr_delta_norm: float = 0.20,
 ) -> Dict[str, float]:
+    """
+    Macro Shift Score (MSS) in [0, 1] plus diagnostic sub-scores.
+
+    Blends rate/FX beta magnitude, beta/correlation instability,
+    correlation structure shift, credit stress, and VIX level.
+    Returns dict with keys: mss, beta_instability, corr_instability, corr_shift_score.
+    """
     beta_mag = math.sqrt(
         (beta_tnx_60d if math.isfinite(beta_tnx_60d) else 0.0) ** 2
         + (beta_dxy_60d if math.isfinite(beta_dxy_60d) else 0.0) ** 2
@@ -170,6 +191,12 @@ def compute_structural_trend_filter(
     direction: str,
     slope_norm: float = 0.12,
 ) -> float:
+    """
+    Structural Trend Filter (STF) in [0, 1].
+
+    Measures how strongly the trend-ratio slope works *against* the
+    proposed trade direction. High STF means the trend opposes the trade.
+    """
     if direction not in {"LONG", "SHORT"}:
         return 1.0
 
@@ -190,6 +217,12 @@ def compute_mispricing_confidence(
     mss: float,
     stf: float,
 ) -> float:
+    """
+    Mispricing Confidence (MC) in [0, 1].
+
+    High MC = strong dislocation with low fundamental justification,
+    low macro shift risk, and low structural trend opposition.
+    """
     base = clip01(sds)
     decay = (1.0 - clip01(fjs)) * (1.0 - clip01(mss)) * (1.0 - clip01(stf))
     return clip01(base * decay)
@@ -358,6 +391,12 @@ def compute_attribution_row(
     mss_corr_delta_norm: float = 0.20,
     stf_slope_norm: float = 0.12,
 ) -> AttributionResult:
+    """
+    Compute the full DSS attribution for a single sector row.
+
+    Orchestrates SDS, FJS, MSS, STF, and MC scoring, then builds
+    human-readable labels, action bias, and explanation tags.
+    """
     sds = compute_statistical_dislocation_score(
         z=safe_float(row.get("pca_residual_z")),
         disp_z=safe_float(row.get("market_dispersion_z")),

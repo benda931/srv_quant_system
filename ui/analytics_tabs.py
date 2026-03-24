@@ -478,6 +478,68 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
         legend=dict(orientation="h", y=-0.15, font=dict(size=10)),
     )
 
+    # ── Standalone Drawdown Chart ─────────────────────────────────────────────
+    fig_dd = go.Figure()
+    if walk_metrics:
+        try:
+            returns_dd = [w.signal_return for w in walk_metrics]
+            dates_dd = [w.test_start for w in walk_metrics]
+            equity_dd = np.cumprod(1 + np.array(returns_dd, dtype=float))
+            peak_dd = np.maximum.accumulate(equity_dd)
+            drawdown_dd = (equity_dd - peak_dd) / np.where(peak_dd > 0, peak_dd, 1.0) * 100
+            fig_dd.add_trace(go.Scatter(
+                x=dates_dd, y=drawdown_dd,
+                fill="tozeroy", fillcolor="rgba(231,76,60,0.3)",
+                line=dict(color="#e74c3c", width=1),
+                name="Drawdown %",
+            ))
+        except Exception:
+            pass
+    fig_dd.update_layout(
+        template="plotly_dark", height=250,
+        title=dict(text="Strategy Drawdown — שפל מצטבר", font=dict(size=13)),
+        yaxis_title="Drawdown %",
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+        margin=dict(l=50, r=50, t=45, b=35),
+    )
+
+    # ── Regime Performance Heatmap ────────────────────────────────────────────
+    regime_hm_section = html.Div()
+    regime_bd = getattr(br, "regime_breakdown", None)
+    if regime_bd is not None:
+        try:
+            reg_labels, reg_ic, reg_hit, reg_avg_ret = [], [], [], []
+            for reg in ["CALM", "NORMAL", "TENSION", "CRISIS"]:
+                rd = getattr(regime_bd, reg.lower(), None) or (regime_bd.get(reg) if isinstance(regime_bd, dict) else None)
+                if rd is None:
+                    continue
+                reg_labels.append(reg)
+                _get = lambda obj, k, d=0: getattr(obj, k, obj.get(k, d) if isinstance(obj, dict) else d)
+                reg_ic.append(float(_get(rd, "ic_mean", 0)))
+                reg_hit.append(float(_get(rd, "hit_rate", 0)))
+                reg_avg_ret.append(float(_get(rd, "avg_return", _get(rd, "signal_return", 0))))
+            if reg_labels:
+                metric_names = ["IC Mean", "Hit Rate", "Avg Return"]
+                z_data = [reg_ic, reg_hit, reg_avg_ret]
+                fig_regime_hm = go.Figure(go.Heatmap(
+                    z=z_data, x=reg_labels, y=metric_names,
+                    colorscale="RdYlGn", texttemplate="%{z:.3f}",
+                    textfont=dict(size=11),
+                    showscale=True,
+                ))
+                fig_regime_hm.update_layout(
+                    template="plotly_dark", height=220,
+                    title=dict(text="ביצועים לפי משטר — Regime Heatmap", font=dict(size=13)),
+                    paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                    margin=dict(l=80, r=30, t=45, b=30),
+                )
+                regime_hm_section = dbc.Card(
+                    dbc.CardBody(dcc.Graph(figure=fig_regime_hm, config={"displayModeBar": False})),
+                    className="border-0 bg-transparent mb-3",
+                )
+        except Exception:
+            pass
+
     # ── IC time series ───────────────────────────────────────────────────────
     ic_series: pd.Series = getattr(br, "ic_series", pd.Series(dtype=float))
     ic_fig = go.Figure()
@@ -582,6 +644,10 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
             dbc.Card(dbc.CardBody(
                 dcc.Graph(figure=eq_fig, config={"displayModeBar": False}),
             ), className="border-0 bg-transparent mb-3"),
+            dbc.Card(dbc.CardBody(
+                dcc.Graph(figure=fig_dd, config={"displayModeBar": False}),
+            ), className="border-0 bg-transparent mb-3"),
+            regime_hm_section,
             dbc.Row(
                 [
                     dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(figure=ic_fig,     config={"displayModeBar": False}))), md=7),
@@ -859,8 +925,37 @@ def build_corr_vol_tab(analysis: Any) -> html.Div:
         dbc.Card(dbc.CardBody(dcc.Graph(figure=fig_avg, config={"displayModeBar": False})),
                  className="border-0 bg-transparent mb-3"),
 
-        # Heatmaps row
-        html.H6("מטריצות קורלציה", className="text-muted mb-2"),
+        # Heatmaps row — with rolling window selector
+        dbc.Row([
+            dbc.Col(
+                html.H6("מטריצות קורלציה", className="text-muted mb-0 mt-1"),
+                width="auto",
+            ),
+            dbc.Col(
+                dbc.Select(
+                    id="corr-window-select",
+                    options=[
+                        {"label": "30 ימים",  "value": "30"},
+                        {"label": "60 ימים",  "value": "60"},
+                        {"label": "90 ימים",  "value": "90"},
+                        {"label": "120 ימים", "value": "120"},
+                    ],
+                    value="60",
+                    style={"width": "160px", "backgroundColor": "#1a1a2e",
+                           "color": "#fff", "border": "1px solid #333",
+                           "fontSize": "12px"},
+                ),
+                width="auto",
+            ),
+            dbc.Col(
+                html.Small(
+                    "* חלון גלילה — callback wiring נדרש ב-main.py",
+                    className="text-muted",
+                    style={"fontSize": "10px", "lineHeight": "2.2"},
+                ),
+                width="auto",
+            ),
+        ], align="center", className="mb-2 g-2"),
         dbc.Row([
             dbc.Col(dcc.Graph(figure=fig_ct,   config={"displayModeBar": False}), width=4),
             dbc.Col(dcc.Graph(figure=fig_cb,   config={"displayModeBar": False}), width=4),

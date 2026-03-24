@@ -1085,6 +1085,30 @@ def build_correlation_panel(
     return dbc.Container(
         fluid=True,
         children=[
+            # Rolling window selector
+            dbc.Row([
+                dbc.Col(
+                    html.Label("חלון גלילה:", className="text-muted mb-0 mt-1",
+                               style={"fontSize": "12px"}),
+                    width="auto",
+                ),
+                dbc.Col(
+                    dbc.Select(
+                        id="corr-panel-window-select",
+                        options=[
+                            {"label": "30 ימים",  "value": "30"},
+                            {"label": "60 ימים",  "value": "60"},
+                            {"label": "90 ימים",  "value": "90"},
+                            {"label": "120 ימים", "value": "120"},
+                        ],
+                        value="60",
+                        style={"width": "160px", "backgroundColor": "#1a1a2e",
+                               "color": "#fff", "border": "1px solid #333",
+                               "fontSize": "12px"},
+                    ),
+                    width="auto",
+                ),
+            ], align="center", className="mt-3 mb-1 g-2"),
             dbc.Row(
                 [
                     dbc.Col(dbc.Card(dbc.CardBody([dcc.Graph(id="corr-heatmap", figure=corr_fig)])), md=6, className="mt-3"),
