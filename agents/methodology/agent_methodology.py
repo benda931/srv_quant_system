@@ -36,12 +36,17 @@ from config.settings import get_settings, Settings
 _LOG_DIR = ROOT / "logs"
 _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(_LOG_DIR / "agent_methodology.log", encoding="utf-8"),
+        RotatingFileHandler(
+            _LOG_DIR / "agent_methodology.log",
+            maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        ),
     ],
 )
 log = logging.getLogger("agent_methodology")

@@ -89,6 +89,7 @@ APP_CONTAINER_STYLE = {
 # Logging / primitive helpers
 # ==========================================================
 def configure_logging(log_dir: Path) -> None:
+    from logging.handlers import RotatingFileHandler
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "srv_system.log"
 
@@ -97,7 +98,9 @@ def configure_logging(log_dir: Path) -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_path, encoding="utf-8"),
+            RotatingFileHandler(
+                log_path, maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8"
+            ),
         ],
     )
     logging.getLogger("urllib3").setLevel(logging.WARNING)

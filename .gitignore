@@ -51,3 +51,4 @@ reports/output/
 agents/methodology/reports/*.json
 agents/optimizer/optimization_history.json
 agents/math/math_proposals/
+db/audit.duckdb

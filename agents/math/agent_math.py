@@ -40,12 +40,17 @@ sys.path.insert(0, str(ROOT))
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_DIR / "agent_math.log", encoding="utf-8"),
+        RotatingFileHandler(
+            LOG_DIR / "agent_math.log",
+            maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        ),
     ],
 )
 log = logging.getLogger("agent_math")

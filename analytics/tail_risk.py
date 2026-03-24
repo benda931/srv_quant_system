@@ -25,6 +25,8 @@ import pandas as pd
 
 log = logging.getLogger(__name__)
 
+_EPSILON = 1e-15
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Expected Shortfall (ES)
@@ -352,3 +354,257 @@ def tail_correlation_diagnostic(
         "tail_days": int(tail_days.sum()),
         "panic_coupling": ratio > 1.5,  # True if tail corr >> normal corr
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VaR Backtesting — Kupiec POF Test
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class VaRBacktestResult:
+    """Result of VaR model validation backtest."""
+    n_observations: int
+    n_exceptions: int          # Days where loss exceeded VaR
+    expected_exceptions: float  # n * alpha
+    exception_rate: float       # n_exceptions / n
+    expected_rate: float        # alpha (1 - confidence)
+
+    # Kupiec POF
+    kupiec_statistic: float    # Likelihood ratio test statistic (~chi2(1))
+    kupiec_p_value: float       # p-value under H0: exception rate = alpha
+    kupiec_pass: bool           # True if p_value > significance level
+
+    # Christoffersen (if computed)
+    independence_statistic: Optional[float] = None
+    independence_p_value: Optional[float] = None
+    independence_pass: Optional[bool] = None
+
+    # Combined
+    overall_pass: bool = True
+
+
+def kupiec_var_backtest(
+    returns: pd.Series,
+    var_level: pd.Series,
+    confidence: float = 0.95,
+    significance: float = 0.05,
+) -> VaRBacktestResult:
+    """
+    Kupiec Proportion of Failures (POF) test for VaR model validation.
+
+    Tests whether the observed number of VaR exceptions is consistent with
+    the model's confidence level. Under the null hypothesis H0, the exception
+    rate equals alpha = 1 - confidence.
+
+    The test statistic follows chi-squared(1) under H0.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Realized portfolio returns (daily). Losses are negative.
+    var_level : pd.Series
+        VaR estimates for each day (positive values representing loss thresholds).
+        Same index as returns.
+    confidence : float
+        VaR confidence level (e.g., 0.95 for 95% VaR).
+    significance : float
+        Significance level for the test (default 0.05).
+
+    Returns
+    -------
+    VaRBacktestResult
+
+    Ref: Kupiec (1995) — Techniques for Verifying the Accuracy of Risk
+         Measurement Models
+    """
+    from scipy.stats import chi2
+
+    # Align series
+    aligned = pd.DataFrame({"ret": returns, "var": var_level}).dropna()
+    n = len(aligned)
+
+    if n < 50:
+        log.warning("Kupiec test: only %d observations (need >= 50)", n)
+        return VaRBacktestResult(
+            n_observations=n, n_exceptions=0, expected_exceptions=0,
+            exception_rate=0, expected_rate=1 - confidence,
+            kupiec_statistic=0, kupiec_p_value=1.0, kupiec_pass=True,
+        )
+
+    alpha = 1.0 - confidence
+
+    # Exception: realized loss exceeds VaR (returns < -VaR)
+    exceptions = aligned["ret"] < -aligned["var"]
+    x = int(exceptions.sum())
+    expected = n * alpha
+
+    # Exception rate
+    p_hat = x / n if n > 0 else 0.0
+
+    # Kupiec log-likelihood ratio statistic
+    # LR = -2 * ln[ alpha^x * (1-alpha)^(n-x) / p_hat^x * (1-p_hat)^(n-x) ]
+    # Handle edge cases
+    if x == 0:
+        # No exceptions — log(p_hat^x) = 0, but (1-p_hat)^(n-x) = 1
+        lr_num = x * np.log(alpha + _EPSILON) + (n - x) * np.log(1 - alpha + _EPSILON)
+        lr_den = (n - x) * np.log(1.0)  # = 0
+        lr_stat = -2.0 * (lr_num - 0.0)
+    elif x == n:
+        # All exceptions
+        lr_num = x * np.log(alpha + _EPSILON)
+        lr_den = x * np.log(p_hat + _EPSILON)
+        lr_stat = -2.0 * (lr_num - lr_den)
+    else:
+        lr_num = x * np.log(alpha) + (n - x) * np.log(1 - alpha)
+        lr_den = x * np.log(p_hat) + (n - x) * np.log(1 - p_hat)
+        lr_stat = -2.0 * (lr_num - lr_den)
+
+    # Ensure non-negative (numerical issues)
+    lr_stat = max(0.0, lr_stat)
+
+    # p-value from chi-squared(1) distribution
+    p_value = float(1.0 - chi2.cdf(lr_stat, df=1))
+    passes = p_value > significance
+
+    return VaRBacktestResult(
+        n_observations=n,
+        n_exceptions=x,
+        expected_exceptions=round(expected, 2),
+        exception_rate=round(p_hat, 6),
+        expected_rate=round(alpha, 6),
+        kupiec_statistic=round(lr_stat, 4),
+        kupiec_p_value=round(p_value, 4),
+        kupiec_pass=passes,
+        overall_pass=passes,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Christoffersen Independence Test
+# ─────────────────────────────────────────────────────────────────────────────
+
+def christoffersen_independence_test(
+    returns: pd.Series,
+    var_level: pd.Series,
+    confidence: float = 0.95,
+    significance: float = 0.05,
+) -> VaRBacktestResult:
+    """
+    Christoffersen conditional coverage test for VaR exceptions.
+
+    Tests two properties simultaneously:
+      1. Unconditional coverage: exception rate = alpha (Kupiec)
+      2. Independence: exceptions are not clustered (no serial dependence)
+
+    Clustered exceptions indicate the VaR model fails to capture volatility
+    dynamics (e.g., GARCH effects, regime changes).
+
+    The independence test uses a first-order Markov transition matrix of
+    exception indicators. Under H0, P(exception today | exception yesterday)
+    = P(exception today | no exception yesterday) = alpha.
+
+    Parameters
+    ----------
+    returns : pd.Series
+        Realized portfolio returns (daily).
+    var_level : pd.Series
+        VaR estimates (positive values).
+    confidence : float
+        VaR confidence level.
+    significance : float
+        Significance level for the test.
+
+    Returns
+    -------
+    VaRBacktestResult
+        Includes both Kupiec and independence test results.
+
+    Ref: Christoffersen (1998) — Evaluating Interval Forecasts
+    """
+    from scipy.stats import chi2
+
+    # First run Kupiec
+    kupiec_result = kupiec_var_backtest(returns, var_level, confidence, significance)
+
+    # Align and compute exception indicator series
+    aligned = pd.DataFrame({"ret": returns, "var": var_level}).dropna()
+    n = len(aligned)
+
+    if n < 100:
+        log.warning("Christoffersen test: only %d obs (need >= 100 for reliable results)", n)
+        return kupiec_result
+
+    exceptions = (aligned["ret"] < -aligned["var"]).astype(int).values
+
+    # Count transitions: n_ij = count of (I_{t-1} = i, I_t = j)
+    n_00, n_01, n_10, n_11 = 0, 0, 0, 0
+    for t in range(1, len(exceptions)):
+        prev, curr = exceptions[t - 1], exceptions[t]
+        if prev == 0 and curr == 0:
+            n_00 += 1
+        elif prev == 0 and curr == 1:
+            n_01 += 1
+        elif prev == 1 and curr == 0:
+            n_10 += 1
+        else:
+            n_11 += 1
+
+    # Transition probabilities
+    # pi_01 = P(exception | no exception yesterday)
+    # pi_11 = P(exception | exception yesterday)
+    denom_0 = n_00 + n_01
+    denom_1 = n_10 + n_11
+
+    if denom_0 == 0 or denom_1 == 0:
+        # Cannot compute — insufficient transitions
+        return kupiec_result
+
+    pi_01 = n_01 / denom_0
+    pi_11 = n_11 / denom_1
+
+    # Under H0 (independence): pi_01 = pi_11 = pi_hat
+    pi_hat = (n_01 + n_11) / (n_00 + n_01 + n_10 + n_11)
+
+    # Likelihood ratio for independence
+    # LR_ind = -2 * ln[ L(pi_hat) / L(pi_01, pi_11) ]
+    try:
+        log_l0 = (
+            n_00 * np.log(1 - pi_hat + _EPSILON)
+            + n_01 * np.log(pi_hat + _EPSILON)
+            + n_10 * np.log(1 - pi_hat + _EPSILON)
+            + n_11 * np.log(pi_hat + _EPSILON)
+        )
+        log_l1 = (
+            n_00 * np.log(1 - pi_01 + _EPSILON)
+            + n_01 * np.log(pi_01 + _EPSILON)
+            + n_10 * np.log(1 - pi_11 + _EPSILON)
+            + n_11 * np.log(pi_11 + _EPSILON)
+        )
+        lr_ind = -2.0 * (log_l0 - log_l1)
+        lr_ind = max(0.0, lr_ind)
+    except (ValueError, FloatingPointError):
+        lr_ind = 0.0
+
+    ind_p_value = float(1.0 - chi2.cdf(lr_ind, df=1))
+    ind_pass = ind_p_value > significance
+
+    # Combined conditional coverage test (Kupiec + Independence)
+    # LR_cc = LR_kupiec + LR_ind ~ chi2(2)
+    lr_cc = kupiec_result.kupiec_statistic + lr_ind
+    cc_p_value = float(1.0 - chi2.cdf(lr_cc, df=2))
+    overall = kupiec_result.kupiec_pass and ind_pass
+
+    return VaRBacktestResult(
+        n_observations=kupiec_result.n_observations,
+        n_exceptions=kupiec_result.n_exceptions,
+        expected_exceptions=kupiec_result.expected_exceptions,
+        exception_rate=kupiec_result.exception_rate,
+        expected_rate=kupiec_result.expected_rate,
+        kupiec_statistic=kupiec_result.kupiec_statistic,
+        kupiec_p_value=kupiec_result.kupiec_p_value,
+        kupiec_pass=kupiec_result.kupiec_pass,
+        independence_statistic=round(lr_ind, 4),
+        independence_p_value=round(ind_p_value, 4),
+        independence_pass=ind_pass,
+        overall_pass=overall,
+    )
