@@ -656,6 +656,12 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
                 className="mb-3 g-2",
             ),
             summary_section,
+            # Re-run button + placeholder divs required by the backtest callback
+            html.Hr(style={"borderColor": "#333"}),
+            dbc.Button("\u05d4\u05e8\u05e5 Backtest \u05de\u05d7\u05d3\u05e9", id="run-backtest-btn",
+                       color="secondary", size="sm", className="mt-2"),
+            html.Div(id="backtest-status", className="mt-2"),
+            html.Div(id="backtest-output"),
         ],
         className="mt-3",
     )

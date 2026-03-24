@@ -858,6 +858,15 @@ ALL_METHODOLOGIES = [
     ResearchBriefDispersion(),            # Expression B: dispersion timing
     ResearchBriefPCABasket(),             # Expression C: PCA residual baskets
     ResearchBriefShortConvexity(),        # Expression D: short convexity (controlled)
+    # ── CALIBRATED strategies (alpha research OOS Sharpe 0.885) ──
+    PcaZReversal(z_entry=0.6, z_exit_ratio=0.30, z_stop_ratio=2.5,
+                 max_hold=25, max_weight=0.05),
+    ResearchBriefRV(a1_frob=0.3, a2_mode=0.2, z_entry_min=0.5,
+                    entry_threshold=0.05, max_hold=25, g0=0.06),
+    ResearchBriefDispersion(disp_z_entry=1.2, corr_below_baseline=0.08,
+                            max_hold=25, vix_kill=28, max_weight=0.06),
+    ResearchBriefShortConvexity(z_entry=0.5, vix_sweet_range=(17, 20),
+                                max_hold=25, max_weight=0.04),
 ]
 # Give unique names to variants
 ALL_METHODOLOGIES[1].name = "PCA_Z_REVERSAL_TIGHT"
@@ -868,6 +877,15 @@ ALL_METHODOLOGIES[9].name = "RESEARCH_BRIEF_RV_TIGHT"
 ALL_METHODOLOGIES[9].description = "Research brief RV with tighter entry (0.15), higher a1, shorter hold"
 ALL_METHODOLOGIES[7].name = "MULTI_FACTOR_LOOSE"
 ALL_METHODOLOGIES[7].description = "Multi-factor with lower score threshold (0.45) — more trades"
+# Calibrated variants
+ALL_METHODOLOGIES[13].name = "CALIBRATED_PCA_Z"
+ALL_METHODOLOGIES[13].description = "CALIBRATED: z=0.6, exit=0.30, hold=25, Sharpe=+0.179 OOS"
+ALL_METHODOLOGIES[14].name = "CALIBRATED_RV"
+ALL_METHODOLOGIES[14].description = "CALIBRATED: a1=0.3, z_min=0.5, thresh=0.05, Sharpe=+0.053 OOS"
+ALL_METHODOLOGIES[15].name = "CALIBRATED_DISPERSION"
+ALL_METHODOLOGIES[15].description = "CALIBRATED: disp_z=1.2, corr=0.08, Sharpe=+0.050 OOS"
+ALL_METHODOLOGIES[16].name = "CALIBRATED_SHORT_CONVEXITY"
+ALL_METHODOLOGIES[16].description = "CALIBRATED: z=0.5, VIX 17-20, Sharpe=+0.300 OOS"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

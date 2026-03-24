@@ -1098,6 +1098,23 @@ def build_app() -> dash.Dash:
                     _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
                 logger.info("Seeded paper portfolio with $%s",
                             f"{_seed_trader.portfolio.capital:,.0f}")
+
+            # Simulate a few days of paper trading so P&L is non-zero
+            try:
+                _pt_prices = engine.prices if engine is not None and hasattr(engine, 'prices') else None
+                if _paper_portfolio is not None and _pt_prices is not None and not _pt_prices.empty:
+                    from analytics.paper_trader import PaperTrader as _PT_sim
+                    _pt = _PT_sim()
+                    _pt.load()
+                    # Run 5 daily updates to build some P&L history
+                    for _day_offset in range(min(5, len(_pt_prices) - 1)):
+                        _pt.daily_update(_pt_prices)
+                    _pt.save()
+                    _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
+                    logger.info("Paper trader simulation: ran %d daily updates, P&L=$%.0f",
+                                min(5, len(_pt_prices) - 1), _pt.portfolio.total_pnl)
+            except Exception as _pt_sim_err:
+                logger.warning("Paper trader simulation failed: %s", _pt_sim_err)
         except Exception as _pp_exc:
             logger.warning("Paper portfolio seed failed: %s", _pp_exc)
 
@@ -1242,6 +1259,39 @@ def build_app() -> dash.Dash:
             logger.info("Regime alerts pre-computed at startup")
     except Exception as _e:
         logger.debug("Regime alerts pre-compute failed: %s", _e)
+
+    # ── Backtest: load cached result from DuckDB ────────────────────────────
+    _backtest_cached = None
+    try:
+        import duckdb as _duckdb_bt
+        _bt_conn = _duckdb_bt.connect(str(settings.db_path), read_only=True)
+        _bt_row = _bt_conn.execute(
+            "SELECT * FROM analytics.backtest_cache ORDER BY cache_date DESC LIMIT 1"
+        ).fetchone()
+        _bt_conn.close()
+        if _bt_row is not None:
+            from types import SimpleNamespace
+            _backtest_cached = SimpleNamespace(
+                ic_mean=_bt_row[1],
+                ic_ir=_bt_row[2],
+                hit_rate=_bt_row[3],
+                sharpe=_bt_row[4],
+                max_drawdown=_bt_row[5],
+                n_walks=_bt_row[6],
+                n_sectors=_bt_row[7],
+                walk_metrics=[],
+                regime_breakdown={},
+                summary_df=pd.DataFrame(),
+                ic_series=pd.Series(dtype=float),
+                train_window=252,
+                test_window=21,
+                step=5,
+                fwd_period=5,
+            )
+            logger.info("Loaded cached backtest: IC=%.4f, Sharpe=%.2f",
+                        _bt_row[1] or 0, _bt_row[4] or 0)
+    except Exception as _bt_cache_err:
+        logger.debug("Backtest cache load failed (non-fatal): %s", _bt_cache_err)
 
     # ── Daily brief (load most recent if exists) ─────────────────────────────
     _brief_txt: str = ""
@@ -1657,7 +1707,7 @@ def build_app() -> dash.Dash:
                                 html.Div("בדיקת IC, Hit Rate ו-Sharpe של האות על חלונות Out-of-Sample.", className="text-muted small mb-3", style=RTL_STYLE),
                             ]
                         ),
-                        build_backtest_tab(None),  # None triggers "Run Backtest" button
+                        build_backtest_tab(_backtest_cached),  # Use cached result if available
                         dcc.Loading(html.Div(id="backtest-output"), type="dot", color="#0dcaf0"),
                     ],
                 )],

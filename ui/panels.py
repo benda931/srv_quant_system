@@ -64,6 +64,34 @@ _REGIME_EXPLAIN: Dict[str, str] = {
 }
 
 
+def _build_decision_why_panels(
+    direction: str, decision: str, conviction: Any, z_score: Any, row: Dict[str, Any],
+) -> list:
+    """Return 0-or-1 element list explaining WHY the decision is AVOID/NEUTRAL."""
+    reasons: list = []
+    _CONV_THRESHOLD = 30
+    regime = str(row.get("market_state", "")).upper()
+    zf = float(z_score or 0)
+    cf = float(conviction or 0)
+
+    if decision in ("AVOID", "REDUCE") or direction == "NEUTRAL":
+        if regime == "CRISIS":
+            reasons.append("regime CRISIS \u2014 \u05d0\u05d9\u05df \u05de\u05e1\u05d7\u05e8")
+        if direction == "NEUTRAL":
+            reasons.append(f"\u05d0\u05d9\u05df \u05e1\u05d8\u05d9\u05d9\u05d4 \u05de\u05e1\u05e4\u05e7\u05ea (|z|={abs(zf):.2f})")
+        if cf < _CONV_THRESHOLD:
+            reasons.append(f"conviction \u05e0\u05de\u05d5\u05da ({cf:.0f} < {_CONV_THRESHOLD})")
+
+    if not reasons:
+        return []
+
+    return [html.Div(
+        " | ".join(reasons),
+        style={"fontSize": "10px", "color": "#ff9800", "lineHeight": "1.3",
+               "marginBottom": "4px", "direction": "rtl", "textAlign": "right"},
+    )]
+
+
 def _regime_color(state: str) -> str:
     return _REGIME_BADGE.get(str(state).upper(), "secondary")
 
@@ -394,6 +422,9 @@ def build_sector_opportunity_card(row: Dict[str, Any]) -> dbc.Card:
                     dbc.Badge(size_bucket, color="secondary"),
                 ]),
             ], className="mb-2"),
+
+            # WHY explanation for AVOID / NEUTRAL decisions
+            *(_build_decision_why_panels(direction, decision, conviction, z_score, row)),
 
             # PM note
             html.Div(

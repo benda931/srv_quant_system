@@ -74,6 +74,32 @@ def _sf(x: Any) -> float:
         return 0.0
 
 
+def _build_decision_why(
+    direction: str, decision: str, conviction: float, z: float, row: dict,
+) -> list:
+    """Return a list with 0-or-1 html.Div explaining WHY the decision is AVOID / NEUTRAL."""
+    reasons: list = []
+    regime = str(row.get("market_state", "")).upper()
+    _CONV_THRESHOLD = 30  # conviction below this → not actionable
+
+    if decision in ("AVOID", "REDUCE") or direction == "NEUTRAL":
+        if regime == "CRISIS":
+            reasons.append("regime CRISIS \u2014 \u05d0\u05d9\u05df \u05de\u05e1\u05d7\u05e8")
+        if direction == "NEUTRAL":
+            reasons.append(f"\u05d0\u05d9\u05df \u05e1\u05d8\u05d9\u05d9\u05d4 \u05de\u05e1\u05e4\u05e7\u05ea (|z|={abs(z):.2f})")
+        if conviction < _CONV_THRESHOLD:
+            reasons.append(f"conviction \u05e0\u05de\u05d5\u05da ({conviction:.0f} < {_CONV_THRESHOLD})")
+
+    if not reasons:
+        return []
+
+    return [html.Div(
+        " | ".join(reasons),
+        style={"fontSize": "9px", "color": _ACCENT_ORANGE, "lineHeight": "1.3",
+               "marginBottom": "4px", "paddingRight": "2px", **_RTL},
+    )]
+
+
 # ═════════════════════════════════════════════════════════════════════════
 # SECTION 1: MARKET REGIME COMMAND BAR
 # ═════════════════════════════════════════════════════════════════════════
@@ -342,6 +368,9 @@ def _build_sector_card(row: dict, rank: int) -> dbc.Col:
             html.Span(f"HL: {half_life:.0f}d" if math.isfinite(half_life) and half_life > 0 else "",
                       style={"fontSize": "10px", "color": _TEXT_MUTED, "marginRight": "8px"}),
         ], className="d-flex flex-wrap gap-2 align-items-center", style={"marginBottom": "4px"}),
+
+        # ── WHY explanation for AVOID / NEUTRAL decisions ─────────────
+        *(_build_decision_why(direction, decision, conviction, z, row)),
 
         # ── Risk label ───────────────────────────────────────────────────
         html.Div([
