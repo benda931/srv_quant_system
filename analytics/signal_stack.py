@@ -508,6 +508,58 @@ class SignalStackEngine:
             "CRISIS": getattr(settings, "regime_z_crisis", 99.0) if settings else 99.0,
         }
 
+    def load_learned_weights(self, ml_result: Optional[Dict] = None) -> None:
+        """
+        Override hardcoded a1/a2/a3 with data-driven weights from ML feature importances.
+        Blends 70% ML-derived + 30% default (stability prior).
+        """
+        if ml_result is None:
+            return
+        fi = ml_result if isinstance(ml_result, dict) else {}
+
+        # Map ML feature importances to signal stack coefficients
+        z_imp = float(fi.get("z_score", fi.get("pca_residual_z", 0)))
+        vol_imp = float(fi.get("vol_ratio", fi.get("realized_vol_20d", 0)))
+        credit_imp = float(fi.get("credit_z", fi.get("credit_spread_z", 0)))
+
+        total = z_imp + vol_imp + credit_imp
+        if total <= 0:
+            return
+
+        # Scale to typical range (~0-3), blend with defaults
+        ml_a1 = (z_imp / total) * 3.0
+        ml_a2 = (vol_imp / total) * 3.0
+        ml_a3 = (credit_imp / total) * 3.0
+
+        blend = 0.7  # 70% ML, 30% default
+        self.a1_frob = round(blend * ml_a1 + (1 - blend) * self.a1_frob, 4)
+        self.a2_mode = round(blend * ml_a2 + (1 - blend) * self.a2_mode, 4)
+        self.a3_coc = round(blend * ml_a3 + (1 - blend) * self.a3_coc, 4)
+
+        log.info(
+            "Signal weights updated from ML: a1=%.3f, a2=%.3f, a3=%.3f",
+            self.a1_frob, self.a2_mode, self.a3_coc,
+        )
+
+    def load_optuna_weights(self, params_path: Optional[str] = None) -> None:
+        """Load best a1/a2/a3 from Optuna optimization results."""
+        import json as _json
+        path = Path(params_path) if params_path else Path(__file__).parent.parent / "data" / "optuna_best_params.json"
+        if not path.exists():
+            return
+        try:
+            params = _json.loads(path.read_text(encoding="utf-8"))
+            if "signal_a1_frob" in params:
+                self.a1_frob = float(params["signal_a1_frob"])
+            if "signal_a2_mode" in params:
+                self.a2_mode = float(params["signal_a2_mode"])
+            if "signal_a3_coc" in params:
+                self.a3_coc = float(params["signal_a3_coc"])
+            log.info("Signal weights loaded from Optuna: a1=%.3f, a2=%.3f, a3=%.3f",
+                     self.a1_frob, self.a2_mode, self.a3_coc)
+        except Exception as e:
+            log.warning("Failed to load Optuna weights: %s", e)
+
     def get_regime_multiplier(self, regime_label: str = "NORMAL") -> float:
         """Get position size multiplier for current regime."""
         return self.regime_size.get(regime_label.upper(), 1.0)

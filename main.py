@@ -54,6 +54,7 @@ from ui.analytics_tabs import (
     build_signal_decay_tab, build_regime_timeline_tab,
     build_pnl_tracker_tab, build_dss_tab,
     build_portfolio_tab, build_methodology_tab,
+    build_ml_insights_tab,
 )
 from data_ops.journal import PMJournal, open_journal
 
@@ -995,15 +996,46 @@ def build_app() -> dash.Dash:
         # ── Methodology Lab full data (for Methodology tab) ──────
         _methodology_ranking_full = None
         try:
+            _ml_reports_dir = settings.project_root / "agents" / "methodology" / "reports"
+            _ml_reports_dir.mkdir(parents=True, exist_ok=True)
             _ml_files_full = sorted(
-                (settings.project_root / "agents" / "methodology" / "reports").glob("*_methodology_lab.json"),
+                _ml_reports_dir.glob("*_methodology_lab.json"),
                 reverse=True,
             )
             if _ml_files_full:
                 import json as _json_mlf
                 _methodology_ranking_full = _json_mlf.loads(_ml_files_full[0].read_text(encoding="utf-8"))
-        except Exception:
-            pass
+            if _methodology_ranking_full is None and engine is not None:
+                # Auto-generate methodology comparison on first run
+                logger.info("Generating methodology lab report (first run)...")
+                from analytics.methodology_lab import MethodologyLab
+                _auto_lab = MethodologyLab(engine.prices, step=10)
+                _auto_results = _auto_lab.run_all()
+                if _auto_results:
+                    import json as _json_ml_save
+                    from datetime import datetime as _dt_ml
+                    _ml_out = {
+                        "generated": _dt_ml.now().isoformat(),
+                        "results": [
+                            {
+                                "name": r.name,
+                                "sharpe": round(r.sharpe, 4),
+                                "win_rate": round(r.win_rate, 4),
+                                "total_pnl": round(r.total_pnl, 6),
+                                "total_trades": r.total_trades,
+                                "max_drawdown": round(r.max_drawdown, 6),
+                                "avg_holding_days": round(r.avg_holding_days, 1),
+                                "params": r.params if hasattr(r, "params") else {},
+                            }
+                            for r in _auto_results
+                        ],
+                    }
+                    _ml_save_path = _ml_reports_dir / f"{_dt_ml.now().strftime('%Y-%m-%d')}_methodology_lab.json"
+                    _ml_save_path.write_text(_json_ml_save.dumps(_ml_out, indent=2, default=str), encoding="utf-8")
+                    _methodology_ranking_full = _ml_out
+                    logger.info("Methodology lab: %d strategies saved to %s", len(_auto_results), _ml_save_path.name)
+        except Exception as _ml_exc:
+            logger.warning("Methodology lab generation failed: %s", _ml_exc)
 
         # ── Paper Portfolio ───────────────────────────────────────
         _paper_portfolio = None
@@ -1012,6 +1044,16 @@ def build_app() -> dash.Dash:
             if _pp_path.exists():
                 import json as _json_pp
                 _paper_portfolio = _json_pp.loads(_pp_path.read_text(encoding="utf-8"))
+            if _paper_portfolio is None:
+                # Seed a fresh portfolio so the tab renders
+                from analytics.paper_trader import PaperTrader
+                _seed_trader = PaperTrader()
+                _seed_trader.save()
+                _pp_path2 = settings.project_root / "data" / "paper_portfolio.json"
+                if _pp_path2.exists():
+                    import json as _json_pp2
+                    _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
+                logger.info("Seeded fresh paper portfolio for Portfolio tab")
         except Exception:
             pass
 
@@ -1155,6 +1197,88 @@ def build_app() -> dash.Dash:
     journal = open_journal(journal_db)
     logger.info("PM Journal initialised at %s", journal_db)
 
+    # ── ML Models ────────────────────────────────────────────
+    _ml_feature_importances = None
+    _ml_regime_forecast = None
+    _ml_signals_result = None
+    _ml_drift_status = {"is_drifting": False, "current_version": "v1"}
+
+    try:
+        import pickle as _pickle
+        import time as _time
+        _ml_cache_dir = settings.project_root / "data" / "ml_models"
+        _ml_cache_dir.mkdir(parents=True, exist_ok=True)
+        _ml_stale_hours = 24
+
+        # Feature importance from FeatureEngine
+        _fi_cache = _ml_cache_dir / "feature_importances.pkl"
+        if _fi_cache.exists() and (_time.time() - _fi_cache.stat().st_mtime) < _ml_stale_hours * 3600:
+            _ml_feature_importances = _pickle.loads(_fi_cache.read_bytes())
+        else:
+            from analytics.feature_engine import FeatureEngine as _FE
+            _fe = _FE(engine.prices, settings.sector_list())
+            _feat_df = _fe.compute_all_features()
+            if _feat_df is not None and len(_feat_df) > 100:
+                # Build a simple target: next-5d mean sector return
+                _sector_rets = np.log(engine.prices[_fe.sectors] / engine.prices[_fe.sectors].shift(1))
+                _fwd = _sector_rets.shift(-5).rolling(5).mean().mean(axis=1).reindex(_feat_df.index)
+                # Flatten multi-index columns for feature selection
+                if isinstance(_feat_df.columns, pd.MultiIndex):
+                    _feat_flat = _feat_df.copy()
+                    _feat_flat.columns = ["_".join(str(c) for c in col) for col in _feat_df.columns]
+                else:
+                    _feat_flat = _feat_df
+                _common_idx = _feat_flat.dropna().index.intersection(_fwd.dropna().index)
+                if len(_common_idx) > 100:
+                    _X = _feat_flat.loc[_common_idx]
+                    _y = _fwd.loc[_common_idx]
+                    _selected = _fe.select_features(_X, _y, method="permutation", top_k=15)
+                    # Re-derive importances via a quick tree fit
+                    try:
+                        from sklearn.ensemble import GradientBoostingRegressor as _GBR
+                        _mdl = _GBR(n_estimators=100, max_depth=3, random_state=42)
+                        _mdl.fit(_X[_selected].fillna(0), _y)
+                        _ml_feature_importances = dict(zip(_selected, _mdl.feature_importances_.tolist()))
+                    except ImportError:
+                        _ml_feature_importances = {f: 1.0 / (i + 1) for i, f in enumerate(_selected)}
+                    _fi_cache.write_bytes(_pickle.dumps(_ml_feature_importances))
+
+        # Regime forecast
+        _rf_cache = _ml_cache_dir / "regime_forecast.pkl"
+        if _rf_cache.exists() and (_time.time() - _rf_cache.stat().st_mtime) < _ml_stale_hours * 3600:
+            _ml_regime_forecast = _pickle.loads(_rf_cache.read_bytes())
+        else:
+            from analytics.ml_regime_forecast import compute_regime_features as _crf
+            _rf_idx = len(engine.prices) - 1
+            if _rf_idx >= 60:
+                _rf_feats = _crf(engine.prices, _rf_idx, settings.sector_list(), settings)
+                if _rf_feats:
+                    # Map feature values to regime probabilities heuristically
+                    _vix_z = _rf_feats.get("vix_z", 0)
+                    _avg_c = _rf_feats.get("avg_corr", 0.3)
+                    _crisis_p = max(0, min(1, (_vix_z * 0.3 + _avg_c * 0.7)))
+                    _tension_p = max(0, min(1, 0.3 * abs(_vix_z)))
+                    _calm_p = max(0, 1 - _crisis_p - _tension_p - 0.3)
+                    _normal_p = max(0, 1 - _crisis_p - _tension_p - _calm_p)
+                    _ml_regime_forecast = {
+                        "probabilities": {
+                            "CALM": round(_calm_p, 3),
+                            "NORMAL": round(_normal_p, 3),
+                            "TENSION": round(_tension_p, 3),
+                            "CRISIS": round(_crisis_p, 3),
+                        },
+                        "features": _rf_feats,
+                    }
+                    _rf_cache.write_bytes(_pickle.dumps(_ml_regime_forecast))
+
+        logger.info(
+            "ML models loaded: FI=%s, RF=%s",
+            "cached" if _ml_feature_importances else "none",
+            "cached" if _ml_regime_forecast else "none",
+        )
+    except Exception as _ml_exc:
+        logger.warning("ML model loading failed (non-fatal): %s", _ml_exc)
+
     app = dash.Dash(
         __name__,
         external_stylesheets=[dbc.themes.CYBORG],
@@ -1222,6 +1346,7 @@ def build_app() -> dash.Dash:
                     dbc.Tab(label="📝 Journal",          tab_id="tab-journal"),
                     dbc.Tab(label="💼 Portfolio",        tab_id="tab-portfolio"),
                     dbc.Tab(label="🔬 Methodology",      tab_id="tab-methodology"),
+                    dbc.Tab(label="🤖 ML Insights",      tab_id="tab-ml"),
                 ],
                 className="mt-2",
             ),
@@ -1233,6 +1358,7 @@ def build_app() -> dash.Dash:
             dcc.Store(id="master-store", data=master_df.to_dict("records")),
             dcc.Store(id="table-store", data=ui_outputs["table_df"].to_dict("records")),
             dcc.Store(id="backtest-store", data=None),
+            dcc.Interval(id="auto-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
             # Daily brief modal
             dbc.Modal(
                 [
@@ -1444,15 +1570,18 @@ def build_app() -> dash.Dash:
             )
 
         if active_tab == "tab-pnl":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.Div([
-                        html.H5("💰 Live P&L Tracker — מעקב ביצועים בזמן אמת", className="mt-2", style=RTL_STYLE),
-                        html.Div("ביצועי הסיגנל על נתונים אמיתיים: P&L, Sharpe, Drawdown, Hit Rate לפי סקטור ורגים.", className="text-muted small mb-3", style=RTL_STYLE),
-                    ]),
-                    build_pnl_tracker_tab(_pnl_result_cached),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.Div([
+                            html.H5("💰 Live P&L Tracker — מעקב ביצועים בזמן אמת", className="mt-2", style=RTL_STYLE),
+                            html.Div("ביצועי הסיגנל על נתונים אמיתיים: P&L, Sharpe, Drawdown, Hit Rate לפי סקטור ורגים.", className="text-muted small mb-3", style=RTL_STYLE),
+                        ]),
+                        build_pnl_tracker_tab(_pnl_result_cached),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-backtest":
@@ -1489,15 +1618,18 @@ def build_app() -> dash.Dash:
             )
 
         if active_tab == "tab-regime":
-            return dbc.Container(
-                fluid=True,
-                children=[
-                    html.Div([
-                        html.H5("🔔 מעברי רגימים והתראות — Regime Transition Alerts", className="mt-2", style=RTL_STYLE),
-                        html.Div("מעקב שינויי רגים, התראות מעבר, ותחזית הסלמה.", className="text-muted small mb-3", style=RTL_STYLE),
-                    ]),
-                    build_regime_timeline_tab(_regime_result_cached),
-                ],
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.Div([
+                            html.H5("🔔 מעברי רגימים והתראות — Regime Transition Alerts", className="mt-2", style=RTL_STYLE),
+                            html.Div("מעקב שינויי רגים, התראות מעבר, ותחזית הסלמה.", className="text-muted small mb-3", style=RTL_STYLE),
+                        ]),
+                        build_regime_timeline_tab(_regime_result_cached),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
             )
 
         if active_tab == "tab-health":
@@ -1527,6 +1659,26 @@ def build_app() -> dash.Dash:
                         html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
                         html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
                         build_methodology_tab(_methodology_ranking_full),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
+            )
+
+        if active_tab == "tab-ml":
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.Div([
+                            html.H5("🤖 ML Insights — תובנות מודלים", className="mt-2", style=RTL_STYLE),
+                            html.Div("Feature importance, regime forecast, drift detection", className="text-muted small mb-3", style=RTL_STYLE),
+                        ]),
+                        build_ml_insights_tab(
+                            feature_importances=_ml_feature_importances,
+                            regime_forecast=_ml_regime_forecast,
+                            ml_signals=_ml_signals_result,
+                            drift_status=_ml_drift_status,
+                        ),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -2052,6 +2204,38 @@ def build_app() -> dash.Dash:
         except Exception as exc:
             logger.exception("Backtest failed")
             return html.Div(), dbc.Alert(f"שגיאה בבאקטסט: {exc}", color="danger")
+
+    # ======================================================
+    # Correlation heatmap window selector
+    # ======================================================
+    @app.callback(
+        Output("corr-heatmap-current", "figure"),
+        Output("corr-heatmap-baseline", "figure"),
+        Output("corr-heatmap-delta", "figure"),
+        Input("corr-window-select", "value"),
+        prevent_initial_call=True,
+    )
+    def update_corr_heatmaps(window_str):
+        """Recalculate correlation heatmaps with selected rolling window."""
+        try:
+            window = int(window_str) if window_str else 60
+            _sectors = settings.sector_list()
+            _p = engine.prices[_sectors] if engine and engine.prices is not None else None
+            if _p is None or _p.empty:
+                raise dash.exceptions.PreventUpdate
+
+            _rets = _p.pct_change().dropna()
+            _corr_current = _rets.tail(window).corr()
+            _corr_baseline = _rets.tail(252).corr()
+            _corr_delta = _corr_current - _corr_baseline
+
+            from ui.panels import heatmap_fig
+            fig_c = heatmap_fig(_corr_current, f"Rolling {window}d Correlation")
+            fig_b = heatmap_fig(_corr_baseline, "Baseline 252d Correlation")
+            fig_d = heatmap_fig(_corr_delta, f"Delta ({window}d − 252d)")
+            return fig_c, fig_b, fig_d
+        except Exception:
+            raise dash.exceptions.PreventUpdate
 
     logger.info("Dashboard ready. Starting server...")
     return app

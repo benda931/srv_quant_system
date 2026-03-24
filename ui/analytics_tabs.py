@@ -957,9 +957,9 @@ def build_corr_vol_tab(analysis: Any) -> html.Div:
             ),
         ], align="center", className="mb-2 g-2"),
         dbc.Row([
-            dbc.Col(dcc.Graph(figure=fig_ct,   config={"displayModeBar": False}), width=4),
-            dbc.Col(dcc.Graph(figure=fig_cb,   config={"displayModeBar": False}), width=4),
-            dbc.Col(dcc.Graph(figure=fig_cdel, config={"displayModeBar": False}), width=4),
+            dbc.Col(dcc.Graph(id="corr-heatmap-current",  figure=fig_ct,   config={"displayModeBar": False}), width=4),
+            dbc.Col(dcc.Graph(id="corr-heatmap-baseline", figure=fig_cb,   config={"displayModeBar": False}), width=4),
+            dbc.Col(dcc.Graph(id="corr-heatmap-delta",    figure=fig_cdel, config={"displayModeBar": False}), width=4),
         ], className="mb-3"),
 
         # Market mode + anomalous pairs
@@ -2611,3 +2611,218 @@ def build_methodology_tab(lab_data: Optional[Dict] = None) -> html.Div:
         ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"}))
 
     return html.Div(sections, style={"padding": "12px"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ML Insights Tab
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RTL = {"direction": "rtl", "textAlign": "right"}
+
+
+def build_ml_insights_tab(
+    feature_importances: Optional[Dict] = None,
+    regime_forecast: Optional[Dict] = None,
+    ml_signals: Optional[Dict] = None,
+    drift_status: Optional[Dict] = None,
+) -> html.Div:
+    """Build the ML Insights analytics tab.
+
+    Parameters
+    ----------
+    feature_importances : dict | None
+        Mapping of feature name -> importance score.
+    regime_forecast : dict | None
+        Regime probability dict with keys like CALM, NORMAL, TENSION, CRISIS.
+    ml_signals : dict | None
+        Per-sector ML conviction scores and aggregate metrics.
+    drift_status : dict | None
+        Drift detection output: ``is_drifting``, ``current_version``.
+    """
+    drift_status = drift_status or {}
+    ml_signals = ml_signals or {}
+
+    # ── Row 1: KPI cards ──────────────────────────────────────────────────
+    accuracy_val = ml_signals.get("accuracy")
+    accuracy_str = _pct(accuracy_val) if accuracy_val is not None else "N/A"
+
+    ic_val = ml_signals.get("ic")
+    ic_str = _ff(ic_val, "{:.3f}") if ic_val is not None else "N/A"
+
+    is_drifting = drift_status.get("is_drifting", False)
+    drift_label = "DRIFT" if is_drifting else "STABLE"
+    drift_color = "danger" if is_drifting else "success"
+
+    version_str = str(drift_status.get("current_version", "v1"))
+
+    kpi_row = dbc.Row(
+        [
+            _kpi("Model Accuracy — דיוק מודל", accuracy_str, color="info"),
+            _kpi("IC Score — ניקוד IC", ic_str, color="primary"),
+            _kpi("Drift Status — סטטוס סטייה", drift_label, color=drift_color),
+            _kpi("Model Version — גרסת מודל", version_str, color="warning"),
+        ],
+        className="g-3 mb-4",
+    )
+
+    # ── Row 2 col-8: Feature importance bar chart ─────────────────────────
+    if feature_importances and isinstance(feature_importances, dict) and len(feature_importances) > 0:
+        sorted_feats = dict(
+            sorted(feature_importances.items(), key=lambda kv: kv[1])
+        )
+        fi_fig = go.Figure(
+            go.Bar(
+                x=list(sorted_feats.values()),
+                y=list(sorted_feats.keys()),
+                orientation="h",
+                marker_color="#00bc8c",
+            )
+        )
+        fi_fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#1a1a2e",
+            plot_bgcolor="#1a1a2e",
+            title={"text": "Feature Importance — חשיבות פיצ'רים", "x": 0.5},
+            xaxis_title="Importance",
+            yaxis_title="",
+            margin=dict(l=180, r=20, t=50, b=40),
+            height=max(350, len(sorted_feats) * 28),
+        )
+        fi_content = dcc.Graph(figure=fi_fig, config={"displayModeBar": False})
+    else:
+        fi_content = dbc.Alert(
+            "ML models not trained yet — הרצת pipeline נדרשת לחישוב חשיבות פיצ'רים",
+            color="info",
+            className="mt-3",
+            style=_RTL,
+        )
+
+    # ── Row 2 col-4: Regime forecast donut ────────────────────────────────
+    if regime_forecast and isinstance(regime_forecast, dict):
+        probs = regime_forecast.get("probabilities", regime_forecast)
+        # Accept either top-level keys or nested 'probabilities'
+        regime_labels = []
+        regime_values = []
+        regime_colors = {
+            "CALM": "#00bc8c",
+            "NORMAL": "#3498db",
+            "TENSION": "#f39c12",
+            "CRISIS": "#e74c3c",
+        }
+        for k in ["CALM", "NORMAL", "TENSION", "CRISIS"]:
+            v = probs.get(k, probs.get(k.lower(), 0))
+            if v:
+                regime_labels.append(k)
+                regime_values.append(float(v))
+
+        if regime_labels:
+            rf_fig = go.Figure(
+                go.Pie(
+                    labels=regime_labels,
+                    values=regime_values,
+                    hole=0.5,
+                    marker_colors=[regime_colors.get(l, "#888") for l in regime_labels],
+                    textinfo="label+percent",
+                )
+            )
+            rf_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e",
+                plot_bgcolor="#1a1a2e",
+                title={"text": "Regime Forecast — תחזית רגים", "x": 0.5},
+                margin=dict(l=20, r=20, t=50, b=20),
+                height=350,
+                showlegend=False,
+            )
+            rf_content = dcc.Graph(figure=rf_fig, config={"displayModeBar": False})
+        else:
+            rf_content = dbc.Alert(
+                "Regime forecast data incomplete — אין נתוני הסתברויות",
+                color="warning",
+                className="mt-3",
+                style=_RTL,
+            )
+    else:
+        rf_content = dbc.Alert(
+            "Regime forecast not available — תחזית רגים לא זמינה",
+            color="info",
+            className="mt-3",
+            style=_RTL,
+        )
+
+    row2 = dbc.Row(
+        [
+            dbc.Col(fi_content, md=8),
+            dbc.Col(rf_content, md=4),
+        ],
+        className="g-3 mb-4",
+    )
+
+    # ── Row 3: Sector ML conviction table ─────────────────────────────────
+    sector_scores = ml_signals.get("sector_scores", {})
+    if sector_scores and isinstance(sector_scores, dict) and len(sector_scores) > 0:
+        table_header = html.Thead(
+            html.Tr([
+                html.Th("Sector — סקטור", style={"textAlign": "center"}),
+                html.Th("ML Score — ציון ML", style={"textAlign": "center"}),
+                html.Th("Signal — סיגנל", style={"textAlign": "center"}),
+            ]),
+            style={"backgroundColor": "#2d2d44", "color": "#ddd"},
+        )
+        rows = []
+        for sector, score in sorted(sector_scores.items(), key=lambda kv: kv[1], reverse=True):
+            score_val = float(score)
+            if score_val > 0.5:
+                badge_color = "success"
+                signal_text = "LONG"
+            elif score_val < -0.5:
+                badge_color = "danger"
+                signal_text = "SHORT"
+            else:
+                badge_color = "secondary"
+                signal_text = "NEUTRAL"
+            rows.append(html.Tr([
+                html.Td(sector, style={"textAlign": "center"}),
+                html.Td(_ff(score_val, "{:+.3f}"), style={"textAlign": "center"}),
+                html.Td(
+                    dbc.Badge(signal_text, color=badge_color, className="px-2"),
+                    style={"textAlign": "center"},
+                ),
+            ]))
+        table_body = html.Tbody(rows)
+        sector_table = dbc.Table(
+            [table_header, table_body],
+            bordered=True,
+            dark=True,
+            hover=True,
+            striped=True,
+            size="sm",
+            className="mb-0",
+        )
+        table_card = dbc.Card(
+            [
+                dbc.CardHeader(
+                    html.H6("Sector ML Conviction — ציוני ML לפי סקטור", className="mb-0 text-center"),
+                ),
+                dbc.CardBody(sector_table),
+            ],
+            className="border-primary",
+            style={"borderTop": "3px solid var(--bs-primary)"},
+        )
+    else:
+        table_card = dbc.Alert(
+            "Run ML pipeline to see signals — הרצת ML pipeline נדרשת לצפייה בסיגנלים",
+            color="info",
+            className="mt-3",
+            style=_RTL,
+        )
+
+    row3 = dbc.Row(
+        [dbc.Col(table_card, md=12)],
+        className="g-3 mb-4",
+    )
+
+    return html.Div(
+        [kpi_row, row2, row3],
+        style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
+    )
