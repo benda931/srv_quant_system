@@ -292,7 +292,11 @@ class PaperTrader:
                     continue
 
                 current_price = float(prices[ticker].dropna().iloc[-1])
-                notional = self.portfolio.capital * ticket.final_weight
+
+                # Enforce max single position weight (20% cap)
+                max_single_wt = 0.20
+                capped_weight = min(abs(ticket.final_weight), max_single_wt)
+                notional = self.portfolio.capital * capped_weight
 
                 if notional > self.portfolio.cash:
                     continue  # Not enough cash

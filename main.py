@@ -1246,6 +1246,16 @@ def build_app() -> dash.Dash:
                 is_open=False,
             ),
             build_methodology_modal(),
+            # ── Disclaimer footer ──
+            html.Hr(style={"borderColor": "#333", "marginTop": "30px"}),
+            html.Div(
+                "DSS בלבד — אינו מהווה ייעוץ השקעות | Not financial advice | "
+                "ביצועי עבר אינם ערובה לתוצאות עתידיות",
+                style={
+                    "textAlign": "center", "color": "#666",
+                    "fontSize": "11px", "paddingBottom": "15px",
+                },
+            ),
         ],
     )
 

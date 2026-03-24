@@ -632,6 +632,7 @@ class ResearchBriefDispersion(Methodology):
                 {"entry_z": z, "disp": disp, "corr": avg_corr})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, זינוק קורלציה, VIX kill, סטופ, או זמן."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         disp = ctx.get("dispersion", 0)
@@ -651,6 +652,7 @@ class ResearchBriefDispersion(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר disp_z_entry, corr_below, max_hold, vix_kill."""
         return {"disp_z_entry": self.disp_z_entry, "corr_below": self.corr_below,
                 "max_hold": self.max_hold, "vix_kill": self.vix_kill}
 
@@ -691,6 +693,7 @@ class ResearchBriefPCABasket(Methodology):
         self.mode_share_max = mode_share_max  # Skip if market too correlated
 
     def should_enter(self, ctx):
+        """כניסה על PCA residual dislocated כאשר market-mode share לא גבוה מדי."""
         z = ctx.get("z_score", 0)
         avg_corr = ctx.get("avg_corr", 0.3)
         vix = ctx.get("vix", 18)
@@ -713,6 +716,7 @@ class ResearchBriefPCABasket(Methodology):
         return (ctx["ticker"], direction, weight, {"entry_z": z, "vol_adj": vol_adj})
 
     def should_exit(self, trade, ctx):
+        """יציאה על דחיסת z, סטופ, CRISIS, או מגבלת זמן."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         regime = ctx.get("regime", "NORMAL")
@@ -728,6 +732,7 @@ class ResearchBriefPCABasket(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר z_entry, z_stop, max_hold, mode_share_max."""
         return {"z_entry": self.z_entry, "z_stop": self.z_stop,
                 "max_hold": self.max_hold, "mode_share_max": self.mode_share_max}
 
@@ -773,6 +778,7 @@ class ResearchBriefShortConvexity(Methodology):
         self.corr_kill = corr_kill
 
     def should_enter(self, ctx):
+        """כניסה רק בסביבת vol/corr נמוכה (CALM/NORMAL) עם VIX ב-sweet range."""
         z = ctx.get("z_score", 0)
         vix = ctx.get("vix", 18)
         avg_corr = ctx.get("avg_corr", 0.3)
@@ -796,6 +802,7 @@ class ResearchBriefShortConvexity(Methodology):
                 {"entry_z": z, "vix_at_entry": vix, "corr_at_entry": avg_corr})
 
     def should_exit(self, trade, ctx):
+        """יציאה הדוקה: VIX kill, corr kill, regime exit, model invalidation, זמן."""
         days = ctx.get("days_held", 0)
         z = ctx.get("current_z", trade.entry_z)
         vix = ctx.get("vix", 18)
@@ -823,6 +830,7 @@ class ResearchBriefShortConvexity(Methodology):
         return None
 
     def get_params(self):
+        """מחזיר z_entry, vix_range, max_hold, vix_kill, corr_kill."""
         return {"z_entry": self.z_entry, "vix_range": (self.vix_lo, self.vix_hi),
                 "max_hold": self.max_hold, "vix_kill": self.vix_kill, "corr_kill": self.corr_kill}
 

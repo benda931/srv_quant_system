@@ -507,6 +507,46 @@ class PortfolioRiskEngine:
 # Module-level private helpers
 # ---------------------------------------------------------------------------
 
+def enforce_weight_limits(
+    weights: Dict[str, float],
+    max_single: float = 0.20,
+    max_gross: float = 1.0,
+) -> Dict[str, float]:
+    """
+    Enforce portfolio weight constraints by clipping and re-normalizing.
+
+    1. Clip each |w_i| to max_single
+    2. If gross exposure > max_gross, scale down proportionally
+    3. Preserve direction (long/short signs)
+
+    Parameters
+    ----------
+    weights     : {ticker: weight} — can be negative for shorts
+    max_single  : Max absolute weight per position (default 20%)
+    max_gross   : Max sum of |weights| (default 100%)
+
+    Returns
+    -------
+    dict : adjusted weights
+    """
+    if not weights:
+        return weights
+
+    # Step 1: clip each position
+    clipped = {}
+    for k, w in weights.items():
+        sign = 1 if w >= 0 else -1
+        clipped[k] = sign * min(abs(w), max_single)
+
+    # Step 2: scale if gross exposure exceeds limit
+    gross = sum(abs(w) for w in clipped.values())
+    if gross > max_gross and gross > 0:
+        scale = max_gross / gross
+        clipped = {k: w * scale for k, w in clipped.items()}
+
+    return clipped
+
+
 def _to_vec(weights: Dict[str, float]) -> np.ndarray:
     """Convert ordered weight dict to 1-D float array."""
     return np.array(list(weights.values()), dtype=float)
