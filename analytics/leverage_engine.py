@@ -116,8 +116,8 @@ class LeverageEngine:
         max_leverage: float = 5.0,
         target_vol: float = 0.10,
         kelly_frac: float = 0.5,
-        dd_start: float = 0.02,
-        dd_full_stop: float = 0.12,
+        dd_start: float = 0.05,
+        dd_full_stop: float = 0.20,
     ) -> None:
         self.base_capital = base_capital
         self.max_leverage = max_leverage
@@ -272,30 +272,21 @@ class LeverageEngine:
     # ------------------------------------------------------------------
 
     def drawdown_deleverage(self, current_dd_pct: float) -> float:
-        """Progressive deleveraging as drawdown increases.
+        """Smooth parametric deleveraging: linear ramp from 100% to 0%.
 
-        DD < 2%:     100% of target leverage
-        DD 2-5%:     linear reduction to 50%
-        DD 5-8%:     linear reduction to 25%
-        DD > 8%:     emergency delever to 10%
-        DD > 12%:    full stop (0%)
+        DD < dd_start:      100% (no reduction)
+        DD start..full_stop: linear 100% → 0%
+        DD > dd_full_stop:   0% (full stop)
 
+        Uses configurable dd_start (default 5%) and dd_full_stop (default 20%).
         Returns a multiplier in [0, 1].
         """
-        dd = abs(current_dd_pct)  # ensure positive
-
+        dd = abs(current_dd_pct)
+        if dd <= self.dd_start:
+            return 1.0
         if dd >= self.dd_full_stop:
             return 0.0
-        if dd >= 0.08:
-            # 8-12%: 10% of leverage, linear to 0 at full_stop
-            return 0.10 * (1.0 - (dd - 0.08) / (self.dd_full_stop - 0.08))
-        if dd >= 0.05:
-            # 5-8%: linear 50% → 25%
-            return 0.50 - 0.25 * (dd - 0.05) / 0.03
-        if dd >= self.dd_start:
-            # 2-5%: linear 100% → 50%
-            return 1.0 - 0.50 * (dd - self.dd_start) / (0.05 - self.dd_start)
-        return 1.0
+        return 1.0 - (dd - self.dd_start) / (self.dd_full_stop - self.dd_start)
 
     # ------------------------------------------------------------------
     # Volatility targeting

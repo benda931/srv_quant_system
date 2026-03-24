@@ -234,6 +234,121 @@ def _run_backtest() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Parameter bounds validation — verify changes are within settings.py Field bounds
+# ─────────────────────────────────────────────────────────────────────────────
+def _validate_param_bounds(param_name: str, new_value: float) -> dict:
+    """
+    Validate a parameter change against settings.py Field bounds (ge/le constraints).
+    Returns: {"valid": bool, "reason": str, "clamped_value": float}
+    """
+    try:
+        from config.settings import Settings
+        field_info = Settings.model_fields.get(param_name)
+        if field_info is None:
+            return {"valid": False, "reason": f"Unknown parameter: {param_name}", "clamped_value": new_value}
+
+        # Extract bounds from field metadata
+        lower = None
+        upper = None
+        for constraint in field_info.metadata:
+            if hasattr(constraint, "ge"):
+                lower = constraint.ge
+            if hasattr(constraint, "gt"):
+                lower = constraint.gt
+            if hasattr(constraint, "le"):
+                upper = constraint.le
+            if hasattr(constraint, "lt"):
+                upper = constraint.lt
+
+        clamped = new_value
+        reasons = []
+
+        if lower is not None and new_value < lower:
+            clamped = lower
+            reasons.append(f"below min {lower}")
+        if upper is not None and new_value > upper:
+            clamped = upper
+            reasons.append(f"above max {upper}")
+
+        if reasons:
+            return {
+                "valid": False,
+                "reason": f"{param_name}={new_value} out of bounds ({', '.join(reasons)}). Clamped to {clamped}",
+                "clamped_value": clamped,
+            }
+
+        return {"valid": True, "reason": "within bounds", "clamped_value": new_value}
+    except Exception as exc:
+        log.warning("Bounds check failed for %s: %s", param_name, exc)
+        return {"valid": True, "reason": f"bounds check error: {exc}", "clamped_value": new_value}
+
+
+def _validate_suggestion(param_name: str, new_value: float, current_metrics: dict) -> dict:
+    """
+    Test a parameter change via quick backtest before applying.
+    Tests: the suggested value, a halfway value, to find the best option.
+    Returns: {approved, best_value, sharpe_before, sharpe_after, delta}
+    """
+    from config.settings import get_settings
+    settings = get_settings()
+    old_value = getattr(settings, param_name, None)
+
+    if old_value is None:
+        return {"approved": False, "reason": f"Unknown parameter: {param_name}"}
+
+    # Bounds check first
+    bounds = _validate_param_bounds(param_name, new_value)
+    if not bounds["valid"]:
+        log.warning("Bounds violation: %s — clamping", bounds["reason"])
+        new_value = bounds["clamped_value"]
+
+    # Test candidates: suggested value and halfway point
+    candidates = [new_value]
+    halfway = (float(old_value) + float(new_value)) / 2.0
+    if abs(halfway - new_value) > 1e-9:
+        candidates.append(halfway)
+
+    best_sharpe = current_metrics.get("sharpe", 0)
+    best_value = old_value
+
+    for candidate in candidates:
+        try:
+            # Temporarily set parameter
+            setattr(settings, param_name, type(old_value)(candidate))
+
+            # Quick backtest
+            result = _run_backtest()
+            candidate_sharpe = result.get("sharpe", 0)
+
+            log.info(
+                "  Validation: %s=%s -> Sharpe=%.4f (current=%.4f)",
+                param_name, candidate, candidate_sharpe, best_sharpe,
+            )
+
+            if candidate_sharpe > best_sharpe:
+                best_sharpe = candidate_sharpe
+                best_value = candidate
+        except Exception as exc:
+            log.warning("  Validation backtest failed for %s=%s: %s", param_name, candidate, exc)
+
+    # Restore original value
+    setattr(settings, param_name, old_value)
+
+    current_sharpe = current_metrics.get("sharpe", 0)
+    improved = best_sharpe > current_sharpe
+    return {
+        "approved": improved,
+        "best_value": best_value,
+        "original_value": old_value,
+        "suggested_value": new_value,
+        "sharpe_before": current_sharpe,
+        "sharpe_after": best_sharpe,
+        "delta": best_sharpe - current_sharpe,
+        "bounds_check": bounds,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # edit_code — שינוי קוד עם backup, tests, ו-revert
 # ─────────────────────────────────────────────────────────────────────────────
 def _execute_edit_code(action: dict) -> dict:
@@ -383,9 +498,9 @@ def _execute_edit_code(action: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Extended action executor — מרחיב את claude_loop עם edit_code
 # ─────────────────────────────────────────────────────────────────────────────
-def execute_extended_actions(actions: list[dict]) -> list[dict]:
+def execute_extended_actions(actions: list[dict], current_metrics: dict | None = None) -> list[dict]:
     """
-    מרחיב את execute_actions הרגיל עם תמיכה ב-edit_code.
+    מרחיב את execute_actions הרגיל עם תמיכה ב-edit_code + parameter validation.
     כל שאר הפעולות מועברות ל-executor הרגיל.
     """
     results = []
@@ -395,6 +510,46 @@ def execute_extended_actions(actions: list[dict]) -> list[dict]:
         if action.get("type") == "edit_code":
             result = _execute_edit_code(action)
             results.append(result)
+        elif action.get("type") == "edit_param" and current_metrics:
+            # Validate parameter change before applying
+            param_name = action.get("param", "")
+            new_value = action.get("value")
+            if param_name and new_value is not None:
+                # Bounds check
+                bounds = _validate_param_bounds(param_name, float(new_value))
+                if not bounds["valid"]:
+                    log.warning("Bounds violation for %s: %s", param_name, bounds["reason"])
+                    action["value"] = bounds["clamped_value"]
+                    results.append({
+                        "action": "bounds_check",
+                        "param": param_name,
+                        "original_suggestion": new_value,
+                        "clamped_to": bounds["clamped_value"],
+                        "reason": bounds["reason"],
+                    })
+
+                # Quick validation backtest
+                log.info("Validating %s=%s via quick backtest...", param_name, action["value"])
+                validation = _validate_suggestion(param_name, float(action["value"]), current_metrics)
+                results.append({
+                    "action": "validation",
+                    "param": param_name,
+                    "approved": validation["approved"],
+                    "best_value": validation.get("best_value"),
+                    "sharpe_delta": validation.get("delta", 0),
+                })
+
+                if validation["approved"]:
+                    # Use the best value found (might differ from suggestion)
+                    action["value"] = validation["best_value"]
+                    regular_actions.append(action)
+                else:
+                    log.warning(
+                        "Validation REJECTED %s=%s (Sharpe delta=%.4f)",
+                        param_name, action["value"], validation.get("delta", 0),
+                    )
+            else:
+                regular_actions.append(action)
         else:
             regular_actions.append(action)
 
@@ -514,6 +669,17 @@ def _build_system_prompt(
         7. Secondary: improve overall Sharpe
         8. Never break existing interfaces — only modify formulas/values
         9. If math agent proposals exist, evaluate and adopt the best one
+        10. Parameter changes are validated via quick backtest before being applied
+        11. All parameter values must be within the Field bounds defined in settings.py
+        12. Focus on the SINGLE highest-impact change first — don't scatter
+
+        ## Parameter Change Guidelines
+        - When changing a parameter, explain WHY the new value is better (math/data reason)
+        - Prefer small incremental changes (10-20%) over large jumps
+        - If Sharpe < 0.3: focus on IC/signal quality parameters
+        - If Sharpe 0.3-0.8: focus on regime-specific tuning
+        - If HitRate < 50%: tighten entry thresholds or MR whitelist
+        - If MaxDD > 5%: reduce leverage or add deleverage triggers
         """).replace("{math_proposals_block}", proposals_block)
 
 
@@ -524,6 +690,7 @@ def _run_optimizer_loop(
     system_prompt: str,
     initial_message: str,
     max_turns: int = 8,
+    current_metrics: dict | None = None,
 ) -> dict:
     """
     לולאת סוכן מותאמת — כמו run_agent_loop אבל עם execute_extended_actions.
@@ -565,10 +732,10 @@ def _run_optimizer_loop(
         action_block = _extract_json_block(reply)
         if action_block and "actions" in action_block:
             actions = action_block["actions"]
-            log.info("[Turn %d] Executing %d actions (extended)...", turn, len(actions))
+            log.info("[Turn %d] Executing %d actions (extended + validated)...", turn, len(actions))
 
-            # שימוש ב-executor המורחב שתומך ב-edit_code
-            results = execute_extended_actions(actions)
+            # שימוש ב-executor המורחב שתומך ב-edit_code + parameter validation
+            results = execute_extended_actions(actions, current_metrics=current_metrics)
             loop_log[-1]["actions_executed"] = len(actions)
             loop_log[-1]["results"] = results
 
@@ -661,9 +828,41 @@ def _analyze_weaknesses(metrics: dict) -> str:
         for issue in issues:
             lines.append(f"  - {issue}")
 
+    # Dispersion backtest metrics (if available from bus)
+    bus = get_bus()
+    meth_report = bus.latest("agent_methodology")
+    if isinstance(meth_report, dict):
+        disp = meth_report.get("dispersion_backtest", {})
+        if disp:
+            lines.append(f"\n### Dispersion Backtest:")
+            lines.append(f"  Sharpe={disp.get('sharpe', 'N/A')}, "
+                         f"WR={disp.get('win_rate', 'N/A')}, "
+                         f"P&L={disp.get('total_pnl', 'N/A')}")
+
+        # Smart conclusions from methodology agent
+        smart = meth_report.get("smart_conclusions", [])
+        if smart:
+            lines.append("\n### PM-Grade Analysis (from Methodology Agent):")
+            for sc in smart[:3]:
+                lines.append(f"  [{sc.get('priority')}] {sc.get('finding', '')}")
+                if sc.get("action"):
+                    lines.append(f"    -> Action: {sc.get('action')}")
+                if sc.get("expected_impact"):
+                    lines.append(f"    -> Expected: {sc.get('expected_impact')}")
+
+    # Specific parameter guidance based on issues
+    lines.append("\n### Recommended Focus:")
+    if ic < 0.02:
+        lines.append("  IC critically low — prioritize signal_a1_frob, zscore_window, pca_window")
+    if sharpe < 0.3:
+        lines.append("  Sharpe critically low — consider reducing trade_max_holding_days or max_leverage")
+    if hr < 0.50:
+        lines.append("  Hit rate below breakeven — raise signal_entry_threshold")
+
     lines.append("\n---")
     lines.append("**Task:** Propose 1-3 specific changes to improve the weakest regime.")
     lines.append("Start by reading relevant files, then propose edit_param or edit_code actions.")
+    lines.append("Each change will be validated via quick backtest before applying.")
 
     return "\n".join(lines)
 
@@ -742,11 +941,12 @@ def run(once: bool = False) -> None:
             # 7. ניתוח חולשות — הודעה ראשונית
             initial_message = _analyze_weaknesses(metrics)
 
-            # 8. הפעלת לולאת Claude עם executor מורחב
+            # 8. הפעלת לולאת Claude עם executor מורחב + parameter validation
             result = _run_optimizer_loop(
                 system_prompt=system_prompt,
                 initial_message=initial_message,
                 max_turns=8,
+                current_metrics=metrics,
             )
 
             # 9. הרצת backtest אחרי שינויים — השוואה

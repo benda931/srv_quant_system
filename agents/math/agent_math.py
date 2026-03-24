@@ -249,52 +249,127 @@ def _read_function_code(file_rel: str, function_name: str) -> str:
 # בניית prompt מתמטי ל-LLM
 # ─────────────────────────────────────────────────────────────────────────────
 def _build_math_prompt(target: dict, code: str, metrics: dict) -> str:
-    """בונה prompt מובנה לניתוח מתמטי של פונקציה."""
-    return f"""You are a quantitative mathematics expert specializing in financial signal processing.
+    """בונה prompt מובנה לניתוח מתמטי של פונקציה — PM-grade mathematical precision."""
+
+    # Extract specific performance context
+    sharpe = metrics.get("sharpe", metrics.get("ic_mean", "N/A"))
+    ic = metrics.get("ic_mean", "N/A")
+    hit_rate = metrics.get("hit_rate", "N/A")
+
+    # Regime-specific context
+    regime_ctx = ""
+    regime_bd = metrics.get("regime_breakdown", {})
+    if regime_bd:
+        regime_lines = []
+        for reg, rd in regime_bd.items():
+            if isinstance(rd, dict):
+                regime_lines.append(
+                    f"  {reg}: Sharpe={rd.get('sharpe', 'N/A')}, "
+                    f"IC={rd.get('ic_mean', 'N/A')}, "
+                    f"HR={rd.get('hit_rate', 'N/A')}"
+                )
+        if regime_lines:
+            regime_ctx = "\n".join(regime_lines)
+
+    # Academic reference hints per target
+    academic_refs = {
+        "compute_distortion_score": (
+            "Ref: Logistic regression theory (McCullagh & Nelder 1989); "
+            "consider probit link, interaction terms, or adaptive coefficients. "
+            "Key question: should a1,a2,a3 be regime-dependent?"
+        ),
+        "_half_life_quality": (
+            "Ref: Ornstein-Uhlenbeck process (Uhlenbeck & Ornstein 1930); "
+            "half-life = -ln(2)/ln(phi) where phi is AR(1) coefficient. "
+            "Consider: beta(2,5) distribution for ideal shape, "
+            "or asymmetric logistic with slower right-tail decay."
+        ),
+        "_adf_quality": (
+            "Ref: Dickey-Fuller test (1979); p-value CDF is approximately "
+            "chi-squared. Consider: exponential decay exp(-k/p) for convex "
+            "mapping where marginal improvement matters more at low p."
+        ),
+        "_hurst_quality": (
+            "Ref: Hurst exponent via R/S analysis (Hurst 1951, Mandelbrot 1975). "
+            "H < 0.5 = mean-reverting. Consider: logistic sigmoid centered at H=0.5 "
+            "with steep slope: 1/(1+exp(k*(H-0.5))). Should strongly penalize H > 0.6."
+        ),
+        "compute_regime_safety_score": (
+            "Ref: Multiplicative penalty aggregation (Meucci 2009 risk budgeting). "
+            "Consider: geometric mean vs multiplicative product; "
+            "sigmoid ramps vs linear for smoother transitions; "
+            "regime-adaptive weights."
+        ),
+        "compute_statistical_dislocation_score": (
+            "Ref: Statistical arbitrage z-score mapping (Avellaneda & Lee 2010). "
+            "Consider: power transformation z^alpha for convex/concave shaping; "
+            "or regime-dependent thresholds."
+        ),
+    }
+    ref = academic_refs.get(target["function"], "")
+
+    return f"""You are a quantitative mathematician specializing in financial signal processing
+and scoring function optimization. Your task is to review a specific function for
+mathematical optimality and propose a strictly superior alternative.
 
 ## Target Function
 **Name:** {target['function']}
 **File:** {target['file']}
-**Description:** {target['description']}
-**Mathematical Context:** {target.get('math_context', '')}
-**Metric sensitivity:** {target['metric_sensitivity']}
+**Role in system:** {target['description']}
 
 ## Current Implementation
 ```python
 {code}
 ```
 
-## Current System Performance
-{json.dumps(metrics, indent=2, default=str)}
+## Current Performance (this function contributes to these system-level metrics)
+- **Sharpe ratio:** {sharpe}
+- **IC (Information Coefficient):** {ic}
+- **Hit rate:** {hit_rate}
+- **Regime breakdown:**
+{regime_ctx if regime_ctx else '  (not available)'}
 
-## Task
-Analyze the current mathematical formula and propose an improvement. Consider:
-1. Is the functional form optimal? (linear vs sigmoid vs exponential vs polynomial)
-2. Are the coefficients/thresholds well-calibrated?
-3. Could a different parameterization improve regime-conditional performance?
-4. Are there edge cases or numerical stability issues?
-5. Does the function behave well asymptotically?
+## Mathematical Context
+{target.get('math_context', '')}
 
-## Requirements
-- The replacement MUST have the EXACT same function signature
-- Must return the same type
-- Must handle edge cases (NaN, inf, empty input)
-- Include docstring with mathematical formula
-- Use numpy where appropriate for vectorized operations
-- Preserve any logging calls
+## Academic References
+{ref}
 
-Respond with:
-1. A brief mathematical analysis (2-3 sentences)
-2. Your proposed improvement as a complete Python function
-3. Expected impact on performance
+## Mathematical Requirements
+1. Output must be bounded in [0, 1] (or same range as current function)
+2. Must be monotonic where expected (increasing with signal strength)
+3. Must be smooth (C1 continuous — no discontinuities in value or derivative)
+4. Must handle edge cases: z=0, z=+/-inf, z=NaN, empty arrays
+5. Must be numerically stable (no overflow/underflow for reasonable inputs)
+6. Asymptotic behavior: well-defined limits as inputs approach extremes
+
+## What to Propose
+1. A mathematically superior formula with PROOF of why it's better:
+   - Show the derivative properties (monotonicity)
+   - Show boundary behavior (limits at extremes)
+   - Explain why the functional form better captures the relationship
+2. Specific parameter values (not just "tune these")
+3. Expected impact on Sharpe ratio (quantitative estimate)
+
+## Requirements for Code
+- EXACT same function signature as current
+- Same return type
+- Handle edge cases (NaN, inf, empty input)
+- Include docstring with the mathematical formula in LaTeX-like notation
+- Use numpy for vectorized operations where applicable
+- Preserve any logging calls from the original
 
 Format your response as:
 ```json
 {{
-    "analysis": "...",
+    "analysis": "2-3 sentences on why current formula is suboptimal",
+    "mathematical_proof": "Show derivative, limits, and why proposed form is superior",
     "proposed_code": "def function_name(...):\\n    ...",
-    "expected_impact": "...",
-    "confidence": 0.7
+    "parameter_values": {{"param1": value1, "param2": value2}},
+    "expected_sharpe_delta": 0.05,
+    "expected_impact": "description of expected improvement",
+    "confidence": 0.7,
+    "risks": "what could go wrong with this change"
 }}
 ```
 """

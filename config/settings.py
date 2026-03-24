@@ -81,6 +81,8 @@ class Settings(BaseSettings):
         default_factory=lambda: {
             "TNX_10Y": "^TNX",
             "DXY_USD": "DX-Y.NYB",
+            "GLD": "GLD",
+            "TLT": "TLT",
         }
     )
 
@@ -170,8 +172,8 @@ class Settings(BaseSettings):
     # Non-whitelist sector penalty (0.3 = reduce conviction by 70% for non-MR sectors)
     non_whitelist_penalty: float = Field(default=0.3, ge=0.0, le=1.0)
 
-    # Optimal hold period (days) — CALIBRATED: lb=60 hold=5 → Sharpe 0.456
-    signal_optimal_hold: int = Field(default=5, ge=1, le=60)
+    # Optimal hold period (days) — CALIBRATED: alpha research OOS Sharpe 0.885
+    signal_optimal_hold: int = Field(default=20, ge=1, le=60)
 
     # Regime-adaptive sizing — CALIBRATED 2026-03-24
     # CALM: MR Sharpe=0.66 → full size + bonus
@@ -183,10 +185,10 @@ class Settings(BaseSettings):
     regime_size_tension: float = Field(default=0.6, ge=0.0, le=2.0)
     regime_size_crisis: float = Field(default=0.0, ge=0.0, le=2.0)
 
-    # Regime-adaptive z-threshold — tighter in volatile regimes
-    regime_z_calm: float = Field(default=0.6, ge=0.1, le=3.0)
-    regime_z_normal: float = Field(default=0.8, ge=0.1, le=3.0)
-    regime_z_tension: float = Field(default=1.0, ge=0.1, le=3.0)
+    # Regime-adaptive z-threshold — CALIBRATED: uniform 0.7 works best OOS
+    regime_z_calm: float = Field(default=0.7, ge=0.1, le=3.0)
+    regime_z_normal: float = Field(default=0.7, ge=0.1, le=3.0)
+    regime_z_tension: float = Field(default=0.7, ge=0.1, le=3.0)
     regime_z_crisis: float = Field(default=99.0, ge=0.1, le=100.0)  # effectively disabled
 
     # Layer 3: Mean-Reversion Quality weights
@@ -197,7 +199,7 @@ class Settings(BaseSettings):
     # Layer 4: Regime Safety — CALIBRATED from 10yr VIX distribution (2016-2026)
     # VIX soft=75th pctl, hard=95th pctl, kill=99th pctl
     signal_vix_soft: float = Field(default=21.0, ge=10.0, le=30.0)   # Was 18 (75th=21.3)
-    signal_vix_hard: float = Field(default=31.0, ge=20.0, le=50.0)   # Was 30 (95th=30.8)
+    signal_vix_hard: float = Field(default=32.0, ge=20.0, le=50.0)   # CALIBRATED: VIX kill at 32
     signal_vix_kill: float = Field(default=45.0, ge=25.0, le=80.0)   # Was 35 (99th=44.9)
 
     # =====================================================
@@ -207,8 +209,8 @@ class Settings(BaseSettings):
     trade_dte_long_sector: int = Field(default=45, ge=14, le=120)
     trade_max_loss_pct: float = Field(default=0.02, ge=0.005, le=0.10)
     trade_profit_target_pct: float = Field(default=0.015, ge=0.005, le=0.10)
-    # CALIBRATED: shorter hold (25d) + tighter sizing improves Sharpe
-    trade_max_holding_days: int = Field(default=25, ge=7, le=180)
+    # CALIBRATED: hold=20d matches alpha research optimal
+    trade_max_holding_days: int = Field(default=20, ge=7, le=180)
     trade_max_gross_dispersion: float = Field(default=0.40, ge=0.05, le=1.0)
 
     # =====================================================
@@ -319,9 +321,9 @@ class Settings(BaseSettings):
 
     # Direction-dependent Z-score entry thresholds per regime
     # In higher-corr regimes, signals must be stronger to warrant entry
-    zscore_threshold_calm:    float = Field(default=0.75, ge=0.3, le=2.5)
-    zscore_threshold_normal:  float = Field(default=0.90, ge=0.3, le=2.5)
-    zscore_threshold_tension: float = Field(default=1.25, ge=0.5, le=3.0)
+    zscore_threshold_calm:    float = Field(default=0.70, ge=0.3, le=2.5)   # CALIBRATED OOS
+    zscore_threshold_normal:  float = Field(default=0.70, ge=0.3, le=2.5)   # CALIBRATED OOS
+    zscore_threshold_tension: float = Field(default=0.70, ge=0.3, le=3.0)   # CALIBRATED OOS
     zscore_threshold_crisis:  float = Field(default=9.99, ge=1.0, le=10.0)  # effectively disabled
 
     # =====================================================
@@ -330,8 +332,8 @@ class Settings(BaseSettings):
     max_leverage: float = Field(default=5.0, ge=1.0, le=10.0)
     target_vol_annual: float = Field(default=0.10, ge=0.01, le=0.50)
     kelly_fraction: float = Field(default=0.5, ge=0.1, le=1.0)
-    dd_deleverage_start: float = Field(default=0.02)
-    dd_deleverage_full_stop: float = Field(default=0.12)
+    dd_deleverage_start: float = Field(default=0.05)      # CALIBRATED: less aggressive
+    dd_deleverage_full_stop: float = Field(default=0.20)   # CALIBRATED: wider range
 
     # =====================================================
     # UI / dashboard defaults

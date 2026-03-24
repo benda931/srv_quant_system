@@ -1078,7 +1078,20 @@ def build_app() -> dash.Dash:
                 # Seed a fresh portfolio so the tab renders
                 from analytics.paper_trader import PaperTrader
                 _seed_trader = PaperTrader()
-                _seed_trader.save()
+                try:
+                    if engine is not None and hasattr(engine, 'master_df') and engine.master_df is not None:
+                        _seed_trader.daily_update(engine.prices)
+                        _seed_trader.save()
+                        logger.info("Paper trader seeded with %d positions", len(_seed_trader.positions))
+                    elif engine is not None and hasattr(engine, 'prices') and engine.prices is not None:
+                        _seed_trader.daily_update(engine.prices)
+                        _seed_trader.save()
+                        logger.info("Paper trader seeded (prices only) with %d positions", len(_seed_trader.positions))
+                    else:
+                        _seed_trader.save()
+                except Exception as _seed_exc:
+                    logger.warning("Paper trader seed update failed: %s", _seed_exc)
+                    _seed_trader.save()
                 _pp_path2 = settings.project_root / "data" / "paper_portfolio.json"
                 if _pp_path2.exists():
                     import json as _json_pp2
@@ -1738,6 +1751,14 @@ def build_app() -> dash.Dash:
             _agent_reg_data = {}
             _audit_changes = []
             try:
+                from agents.shared.agent_registry import get_registry
+                _reg = get_registry()
+                for _aname in ["methodology", "optimizer", "math", "architect"]:
+                    if not _reg.get_status(_aname):
+                        _reg.register(_aname, role=f"SRV {_aname} agent")
+            except Exception:
+                pass
+            try:
                 from agents.shared.agent_registry import AgentRegistry
                 _agent_reg = AgentRegistry()
                 _agent_reg_data = _agent_reg.all_agents()
@@ -1996,7 +2017,11 @@ def build_app() -> dash.Dash:
             children=[
                 build_market_narrative(master_df),
                 build_health_overview_banner(_health),
-                build_regime_hero(row0),
+                html.Div(
+                    build_regime_hero(row0),
+                    id="overview-regime-container",
+                ),
+                html.Div(id="overview-vix-display"),
                 cards_top,
                 cards_bottom,
                 dss_kpis,
@@ -2066,22 +2091,55 @@ def build_app() -> dash.Dash:
             fig.update_layout(**_dark, title=f"שגיאה בטעינת {sector_ticker}")
             return fig, "—", "—", "—", "—"
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ts.index, y=ts["residual_level"], name="Residual Level", mode="lines"))
-        fig.add_trace(go.Scatter(x=ts.index, y=ts["upper_2s"], name="+2σ", mode="lines"))
-        fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_2s"], name="-2σ", mode="lines"))
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=True,
+            row_heights=[0.45, 0.30, 0.25],
+            vertical_spacing=0.04,
+            subplot_titles=[
+                f"{sector_name} ({sector_ticker}) — OOS PCA Residual X-Ray",
+                "Cumulative Alpha",
+                "Z-Score History",
+            ],
+        )
+
+        # Row 1: Residual level + bands
+        fig.add_trace(go.Scatter(x=ts.index, y=ts["residual_level"], name="Residual Level",
+                                 mode="lines", line=dict(color="#4da6ff")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=ts.index, y=ts["upper_2s"], name="+2\u03c3",
+                                 mode="lines", line=dict(color="#ff6666", dash="dash", width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_2s"], name="-2\u03c3",
+                                 mode="lines", line=dict(color="#ff6666", dash="dash", width=1)), row=1, col=1)
+
+        # Row 2: Cumulative alpha (cumulative sum of residual level changes)
+        if "residual_level" in ts.columns and len(ts) > 1:
+            _resid_diff = ts["residual_level"].diff().fillna(0)
+            _cum_alpha = _resid_diff.cumsum()
+            fig.add_trace(go.Scatter(x=ts.index, y=_cum_alpha, name="Cum. Alpha",
+                                     mode="lines", fill="tozeroy",
+                                     line=dict(color="#20c997", width=1.5),
+                                     fillcolor="rgba(32,201,151,0.15)"), row=2, col=1)
+
+        # Row 3: Z-score history with threshold lines
+        if "zscore" in ts.columns:
+            fig.add_trace(go.Scatter(x=ts.index, y=ts["zscore"], name="Z-Score",
+                                     mode="lines", line=dict(color="#ffc107", width=1.5)), row=3, col=1)
+            fig.add_hline(y=2.0, line_dash="dot", line_color="#ff4444", row=3, col=1)
+            fig.add_hline(y=-2.0, line_dash="dot", line_color="#ff4444", row=3, col=1)
+            fig.add_hline(y=0, line_dash="solid", line_color="#555", row=3, col=1)
+
         fig.update_layout(
             template="plotly_dark",
             paper_bgcolor="#1a1a2e",
             plot_bgcolor="#1a1a2e",
-            height=520,
-            title=f"{sector_name} ({sector_ticker}) — OOS PCA Residual X-Ray",
-            legend=dict(orientation="h"),
+            height=680,
+            legend=dict(orientation="h", y=1.02),
             margin=dict(l=30, r=20, t=60, b=30),
         )
 
         def m0(name: str) -> Any:
-            return full_df[name].iloc[0] if (name in full_df.columns and len(full_df)) else None
+            return row_full[name].iloc[0] if (name in row_full.columns and len(row_full)) else None
 
         macro_card = dbc.Card(
             dbc.CardBody(
@@ -2346,11 +2404,79 @@ def build_app() -> dash.Dash:
             _corr_baseline = _rets.tail(252).corr()
             _corr_delta = _corr_current - _corr_baseline
 
-            from ui.panels import heatmap_fig
-            fig_c = heatmap_fig(_corr_current, f"Rolling {window}d Correlation")
-            fig_b = heatmap_fig(_corr_baseline, "Baseline 252d Correlation")
-            fig_d = heatmap_fig(_corr_delta, f"Delta ({window}d − 252d)")
+            def _hm(df, title, colorscale, zmid=None):
+                if df is None or df.empty:
+                    fig = go.Figure()
+                    fig.add_annotation(text="N/A", xref="paper", yref="paper",
+                                       x=0.5, y=0.5, showarrow=False)
+                    fig.update_layout(template="plotly_dark",
+                                      paper_bgcolor="#1a1a2e", height=280)
+                    return fig
+                z = df.values.round(3).tolist()
+                labels = list(df.columns)
+                kw = dict(zmid=zmid) if zmid is not None else {}
+                fig = go.Figure(go.Heatmap(
+                    z=z, x=labels, y=labels,
+                    colorscale=colorscale, zmin=-1, zmax=1,
+                    text=[[f"{v:.2f}" for v in row] for row in z],
+                    texttemplate="%{text}", textfont=dict(size=9),
+                    showscale=True, **kw,
+                ))
+                fig.update_layout(
+                    template="plotly_dark", paper_bgcolor="#1a1a2e",
+                    plot_bgcolor="#16213e",
+                    margin=dict(l=5, r=5, t=30, b=5), height=280,
+                    title=dict(text=title, font=dict(size=11)),
+                )
+                return fig
+
+            fig_c = _hm(_corr_current, f"C_t — Rolling {window}d", "RdYlGn")
+            fig_b = _hm(_corr_baseline, "C_b — Baseline 252d", "RdYlGn")
+            fig_d = _hm(_corr_delta, f"Delta ({window}d - 252d)", "RdBu", zmid=0)
             return fig_c, fig_b, fig_d
+        except Exception:
+            raise dash.exceptions.PreventUpdate
+
+    # ======================================================
+    # Auto-refresh: regime status + VIX on interval tick
+    # ======================================================
+    @app.callback(
+        Output("overview-regime-container", "children"),
+        Output("overview-vix-display", "children"),
+        Input("auto-refresh-interval", "n_intervals"),
+        State("main-tabs", "active_tab"),
+        prevent_initial_call=True,
+    )
+    def auto_refresh_overview(n_intervals, active_tab):
+        """Refresh regime hero and VIX display every 5 minutes when on overview."""
+        if active_tab != "tab-overview":
+            raise dash.exceptions.PreventUpdate
+        try:
+            # Re-read latest row from master_df (engine already loaded)
+            _row0 = master_df.iloc[0].to_dict() if len(master_df) else {}
+            regime_component = build_regime_hero(_row0)
+
+            # Build a compact VIX status line
+            _vix_val = float(master_df["vix_level"].iloc[0]) if "vix_level" in master_df.columns else float("nan")
+            _vix_pct = float(master_df["vix_percentile"].iloc[0]) if "vix_percentile" in master_df.columns else float("nan")
+            _ms_val = str(master_df["market_state"].iloc[0]) if "market_state" in master_df.columns else "—"
+            import datetime as _dt
+            _ts_now = _dt.datetime.now().strftime("%H:%M:%S")
+            vix_component = dbc.Alert(
+                [
+                    html.Span(f"Auto-refresh {_ts_now} | ", className="text-muted small"),
+                    html.Span(f"Regime: {_ms_val}", className="fw-bold small me-3"),
+                    html.Span(f"VIX: {_vix_val:.1f}" if _vix_val == _vix_val else "VIX: —",
+                              className="small me-2"),
+                    html.Span(f"(Pct: {_vix_pct:.0%})" if _vix_pct == _vix_pct else "",
+                              className="text-muted small"),
+                ],
+                color="dark",
+                className="py-1 px-3 mb-2",
+                style={"fontSize": "11px", "border": "1px solid #333"},
+                dismissable=True,
+            )
+            return regime_component, vix_component
         except Exception:
             raise dash.exceptions.PreventUpdate
 

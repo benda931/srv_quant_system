@@ -1950,6 +1950,25 @@ class QuantEngine:
         master["spy_earnings_yield"] = spy_ey
         master["spy_fund_source"] = spy_val.get("fund_source", "UNKNOWN")
 
+        # GLD / TLT macro momentum signals (60d return)
+        # Positive gold_momentum = risk-off sentiment
+        # Positive bond_momentum = flight to safety
+        _gld_ticker = self.settings.macro_tickers.get("GLD", "GLD")
+        _tlt_ticker = self.settings.macro_tickers.get("TLT", "TLT")
+        _macro_mom_window = 60
+
+        if _gld_ticker in prices.columns:
+            _gld_ret = prices[_gld_ticker].pct_change(_macro_mom_window)
+            master["gold_momentum"] = float(_gld_ret.dropna().iloc[-1]) if len(_gld_ret.dropna()) > 0 else float("nan")
+        else:
+            master["gold_momentum"] = float("nan")
+
+        if _tlt_ticker in prices.columns:
+            _tlt_ret = prices[_tlt_ticker].pct_change(_macro_mom_window)
+            master["bond_momentum"] = float(_tlt_ret.dropna().iloc[-1]) if len(_tlt_ret.dropna()) > 0 else float("nan")
+        else:
+            master["bond_momentum"] = float("nan")
+
         master["avg_corr_t"] = corr_metrics.avg_corr_t
         master["avg_corr_b"] = corr_metrics.avg_corr_b
         master["avg_corr_delta"] = corr_metrics.avg_corr_delta

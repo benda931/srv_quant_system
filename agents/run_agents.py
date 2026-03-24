@@ -26,7 +26,7 @@ from agents.shared.agent_scheduler import AgentScheduler
 
 
 def run_cycle():
-    """Run one full agent cycle: Methodology -> Optimizer -> Math with validation."""
+    """Run one full agent cycle: Methodology -> Optimizer -> Math -> Architect with validation."""
     import json, shutil, subprocess, sys
     from pathlib import Path
 
@@ -38,7 +38,7 @@ def run_cycle():
     log.info("=== AGENT CYCLE START ===")
 
     # Step 1: Run Methodology Agent
-    log.info("Step 1/3: Running Methodology Agent...")
+    log.info("Step 1/4: Running Methodology Agent...")
     r1 = subprocess.run(
         [sys.executable, str(ROOT / "agents" / "methodology" / "agent_methodology.py"), "--once"],
         capture_output=True, text=True, timeout=600, cwd=str(ROOT)
@@ -49,7 +49,7 @@ def run_cycle():
     log.info("Methodology OK")
 
     # Step 2: Run Optimizer Agent
-    log.info("Step 2/3: Running Optimizer Agent...")
+    log.info("Step 2/4: Running Optimizer Agent...")
     # Backup settings first
     backup = settings_file.with_suffix(".py.cycle_backup")
     if settings_file.exists():
@@ -65,7 +65,7 @@ def run_cycle():
         log.info("Optimizer OK")
 
     # Step 3: Run Math Agent
-    log.info("Step 3/3: Running Math Agent...")
+    log.info("Step 3/4: Running Math Agent...")
     r3 = subprocess.run(
         [sys.executable, str(ROOT / "agents" / "math" / "agent_math.py"), "--once"],
         capture_output=True, text=True, timeout=600, cwd=str(ROOT)
@@ -75,12 +75,24 @@ def run_cycle():
     else:
         log.info("Math OK")
 
+    # Step 4: Architect
+    log.info("Step 4/4: Running Architect Agent...")
+    r4 = subprocess.run(
+        [sys.executable, str(ROOT / "agents" / "architect" / "agent_architect.py"), "--once"],
+        capture_output=True, text=True, timeout=600, cwd=str(ROOT)
+    )
+    if r4.returncode != 0:
+        log.warning("Architect failed (non-fatal): %s", r4.stderr[-200:] if r4.stderr else "no output")
+    else:
+        log.info("Architect OK")
+
     log.info("=== AGENT CYCLE COMPLETE ===")
     return {
         "status": "OK",
         "methodology": r1.returncode == 0,
         "optimizer": r2.returncode == 0,
         "math": r3.returncode == 0,
+        "architect": r4.returncode == 0,
     }
 
 
@@ -171,7 +183,7 @@ def main() -> int:
 
     # ── מחזור סוכנים מלא ────────────────────────────────────────────────
     if args.cycle:
-        log.info("מריץ מחזור סוכנים מלא (Methodology -> Optimizer -> Math)")
+        log.info("מריץ מחזור סוכנים מלא (Methodology -> Optimizer -> Math -> Architect)")
         result = run_cycle()
         log.info("תוצאת מחזור: %s", result)
         return 0 if result.get("status") == "OK" else 1

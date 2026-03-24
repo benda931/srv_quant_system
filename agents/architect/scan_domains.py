@@ -431,7 +431,37 @@ def scan_domain(domain: ScanDomain) -> ScanResult:
             health_status[check.description] = False
             findings.append(f"MISSING: {check.description} — metric '{check.metric}' not available")
 
-    # 4. Domain-specific extra checks
+    # 4. Domain-specific extra checks with concrete quantitative thresholds
+    if domain.name == "signal_quality":
+        # Concrete signal quality checks
+        ic = metrics.get("ic_mean", metrics.get("backtest_ic"))
+        if ic is not None:
+            ic_f = float(ic)
+            if ic_f < 0.01:
+                findings.append(f"CRITICAL: IC={ic_f:.4f} barely predictive (need >0.02)")
+            elif ic_f < 0.02:
+                findings.append(f"WARNING: IC={ic_f:.4f} below target (0.02)")
+        sharpe = metrics.get("sharpe", metrics.get("backtest_sharpe"))
+        if sharpe is not None:
+            s_f = float(sharpe)
+            if s_f < 0.3:
+                findings.append(f"CRITICAL: Sharpe={s_f:.3f} below minimum viable (0.3)")
+        # Regime-specific checks
+        regime_bd = metrics.get("regime_breakdown", {})
+        for reg, rd in regime_bd.items():
+            if isinstance(rd, dict):
+                reg_sharpe = rd.get("sharpe", 0)
+                if isinstance(reg_sharpe, (int, float)) and float(reg_sharpe) < 0:
+                    findings.append(f"NEGATIVE SHARPE in {reg} regime: {float(reg_sharpe):.3f}")
+
+    if domain.name == "risk_management":
+        max_dd = metrics.get("max_dd", metrics.get("max_drawdown"))
+        if max_dd is not None and abs(float(max_dd)) > 0.05:
+            findings.append(f"DRAWDOWN ALERT: MaxDD={float(max_dd):.1%} exceeds 5% limit")
+        es_var = metrics.get("es_var_ratio")
+        if es_var is not None and float(es_var) > 1.8:
+            findings.append(f"FAT TAILS: ES/VaR={float(es_var):.2f} (>1.8 = heavy tails)")
+
     if domain.name == "agent_health":
         failed = metrics.get("failed_agents", [])
         if failed:
@@ -445,6 +475,17 @@ def scan_domain(domain: ScanDomain) -> ScanResult:
     if domain.name == "data_quality":
         if metrics.get("nan_pct", 0) > 0.05:
             findings.append(f"HIGH NaN: {metrics['nan_pct']:.1%} of data is NaN")
+        staleness = metrics.get("data_staleness_days")
+        if staleness is not None and int(staleness) > 3:
+            findings.append(f"DATA STALE: {staleness} days since last update")
+
+    if domain.name == "trade_execution":
+        disp_wr = metrics.get("disp_win_rate")
+        if disp_wr is not None and float(disp_wr) < 0.5:
+            findings.append(f"DISPERSION WR below 50%: {float(disp_wr):.1%}")
+        disp_sharpe = metrics.get("disp_sharpe")
+        if disp_sharpe is not None and float(disp_sharpe) < 0.5:
+            findings.append(f"DISPERSION Sharpe low: {float(disp_sharpe):.2f}")
 
     if not findings:
         findings.append(f"All health checks passed for {domain.name}")

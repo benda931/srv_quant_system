@@ -949,7 +949,7 @@ def build_corr_vol_tab(analysis: Any) -> html.Div:
             ),
             dbc.Col(
                 html.Small(
-                    "* חלון גלילה — callback wiring נדרש ב-main.py",
+                    "* בחר חלון גלילה לעדכון מטריצות",
                     className="text-muted",
                     style={"fontSize": "10px", "lineHeight": "2.2"},
                 ),

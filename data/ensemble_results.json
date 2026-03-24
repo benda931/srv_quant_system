@@ -1,0 +1,48 @@
+{
+  "best": {
+    "sharpe": 0.6907,
+    "max_dd": 0.143128,
+    "annual_return": 0.0662,
+    "n_periods": 473,
+    "config_name": "MR only (no leverage)"
+  },
+  "all_configs": {
+    "MR only (no leverage)": {
+      "sharpe": 0.6907,
+      "max_dd": 0.143128,
+      "annual_return": 0.0662,
+      "n_periods": 473,
+      "config_name": "MR only (no leverage)"
+    },
+    "MR + leverage": {
+      "sharpe": 0.2201,
+      "max_dd": 0.092725,
+      "annual_return": 0.0121,
+      "n_periods": 473
+    },
+    "Ensemble (no leverage)": {
+      "sharpe": 0.659,
+      "max_dd": 0.133613,
+      "annual_return": 0.0618,
+      "n_periods": 473,
+      "total_trades": 2122,
+      "strategy_sharpes": {
+        "MR": 0.6906873770869605,
+        "Dispersion": -0.01515743115369718,
+        "MomentumMR": 0.01589899988468807
+      }
+    },
+    "Ensemble + leverage": {
+      "sharpe": 0.2682,
+      "max_dd": 0.088343,
+      "annual_return": 0.0146,
+      "n_periods": 473,
+      "total_trades": 2122,
+      "strategy_sharpes": {
+        "MR": 0.6906873770869605,
+        "Dispersion": -0.01515743115369718,
+        "MomentumMR": 0.01589899988468807
+      }
+    }
+  }
+}

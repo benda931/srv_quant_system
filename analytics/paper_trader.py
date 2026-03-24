@@ -34,6 +34,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from analytics.leverage_engine import LeverageEngine
+
 log = logging.getLogger("paper_trader")
 
 PORTFOLIO_PATH = ROOT / "data" / "paper_portfolio.json"
@@ -121,8 +123,13 @@ class PaperTrader:
         print(trader.status())
     """
 
-    def __init__(self):
+    def __init__(self, settings=None):
         self.portfolio = PaperPortfolio()
+        self._leverage_engine = LeverageEngine(
+            base_capital=INITIAL_CAPITAL,
+            max_leverage=getattr(settings, 'max_leverage', 5.0) if settings else 5.0,
+        )
+        self._current_leverage = 1.0
 
     # ── Persistence ──────────────────────────────────────────────
 
@@ -276,6 +283,27 @@ class PaperTrader:
                      pos["direction"], pos["ticker"], pos["unrealized_pnl"],
                      pos["unrealized_pnl_pct"] * 100, reason)
 
+        # 2b. Compute leverage target
+        regime_state = safety_label if safety_label else "NORMAL"
+        vix_level = float("nan")
+        if prices is not None and "^VIX" in prices.columns:
+            vix_series = prices["^VIX"].dropna()
+            if len(vix_series) > 0:
+                vix_level = float(vix_series.iloc[-1])
+
+        leverage_result = self._leverage_engine.compute_target_leverage(
+            regime=regime_state,
+            vix=vix_level if math.isfinite(vix_level) else 20.0,
+            current_dd_pct=abs(self.portfolio.max_drawdown),
+            strategy_sharpe=0.885,  # calibrated OOS Sharpe
+        )
+        target_lev = leverage_result.target_leverage
+        prev_lev = self._current_leverage
+        self._current_leverage = target_lev if target_lev > 0 else 1.0
+        leverage_scale = self._current_leverage / max(prev_lev, 0.01)
+        log.info("Leverage: target=%.2fx (prev=%.2fx, scale=%.2f) | %s",
+                 target_lev, prev_lev, leverage_scale, leverage_result.reasoning)
+
         # 3. Open new positions from signal results
         if trade_tickets:
             existing_tickers = {p["ticker"] for p in self.portfolio.positions}
@@ -293,10 +321,10 @@ class PaperTrader:
 
                 current_price = float(prices[ticker].dropna().iloc[-1])
 
-                # Enforce max single position weight (20% cap)
+                # Enforce max single position weight (20% cap), scaled by leverage
                 max_single_wt = 0.20
                 capped_weight = min(abs(ticket.final_weight), max_single_wt)
-                notional = self.portfolio.capital * capped_weight
+                notional = self.portfolio.capital * capped_weight * self._current_leverage
 
                 if notional > self.portfolio.cash:
                     continue  # Not enough cash
@@ -461,6 +489,8 @@ def main():
         from analytics.trade_structure import TradeStructureEngine, PositionSizingEngine
 
         settings = get_settings()
+        trader = PaperTrader(settings=settings)  # re-init with settings for leverage
+        trader.load()
         engine = QuantEngine(settings)
         engine.load()
         master_df = engine.calculate_conviction_score()

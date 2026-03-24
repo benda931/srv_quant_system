@@ -491,16 +491,51 @@ def run(once: bool = False) -> dict:
     # ── GPT consultation — focused multi-step analysis ────────────────────────
     try:
         from agents.shared.gpt_conversation import GPTConversation
-        gpt = GPTConversation(system_role="quantitative strategy analyst")
+
+        # Build a PM-grade system prompt with actual numbers
+        _m = report.get("metrics", {})
+        _prev_runs = portfolio.get_history(1)
+        _prev_sharpe = "N/A"
+        if _prev_runs:
+            _prev_sharpe = _prev_runs[-1].get("metrics", {}).get("sharpe", "N/A")
+
+        _regime_label = report.get("parameters_snapshot", {}).get("regime", "UNKNOWN")
+        _smart = report.get("smart_conclusions", [])
+        _top_issue = _smart[0].get("finding", "none") if _smart else "none"
+        _top_action = _smart[0].get("action", "none") if _smart else "none"
+
+        gpt_system = (
+            f"You are a senior quant PM reviewing daily strategy performance.\n"
+            f"Current metrics: Sharpe={_m.get('sharpe', 'N/A')}, "
+            f"IC={_m.get('ic_mean', 'N/A')}, IC_IR={_m.get('ic_ir', 'N/A')}, "
+            f"HitRate={_m.get('hit_rate', 'N/A')}, MaxDD={_m.get('max_dd', 'N/A')}.\n"
+            f"Previous Sharpe={_prev_sharpe}. Current regime={_regime_label}.\n"
+            f"Top issue: {_top_issue}\n"
+            f"Suggested action: {_top_action}\n\n"
+            f"Focus: What is the SINGLE most impactful change to improve Sharpe by 0.1+?\n"
+            f"Be specific: name the parameter, the direction of change, and the exact value.\n"
+            f"Max 150 words per response."
+        )
+
+        gpt = GPTConversation(system_role="senior quant PM")
+        gpt.system_prompt = gpt_system  # Override default with enriched prompt
+
         if gpt.available and report.get("metrics"):
-            log.info("Consulting GPT for focused analysis...")
+            log.info("Consulting GPT for focused PM-grade analysis...")
             gpt_results = gpt.full_analysis(
                 metrics={
-                    "sharpe": report["metrics"].get("sharpe", 0),
-                    "win_rate": report["metrics"].get("hit_rate", 0),
-                    "max_dd": report["metrics"].get("max_drawdown", 0),
-                    "trades": report["metrics"].get("n_walks", 0),
+                    "sharpe": _m.get("sharpe", 0),
+                    "ic": _m.get("ic_mean", 0),
+                    "ic_ir": _m.get("ic_ir", 0),
+                    "win_rate": _m.get("hit_rate", 0),
+                    "max_dd": _m.get("max_dd", 0),
+                    "trades": _m.get("n_walks", 0),
                     "regime_breakdown": report.get("regime_breakdown", {}),
+                    "smart_conclusions": [
+                        {"priority": sc.get("priority"), "finding": sc.get("finding"),
+                         "action": sc.get("action")}
+                        for sc in _smart[:3]
+                    ],
                 },
                 params={
                     "pca_window": settings.pca_window,
@@ -508,6 +543,9 @@ def run(once: bool = False) -> dict:
                     "signal_entry_threshold": settings.signal_entry_threshold,
                     "signal_a1_frob": settings.signal_a1_frob,
                     "trade_max_holding_days": settings.trade_max_holding_days,
+                    "mr_weight_half_life": getattr(settings, "mr_weight_half_life", "N/A"),
+                    "mr_weight_adf": getattr(settings, "mr_weight_adf", "N/A"),
+                    "mr_weight_hurst": getattr(settings, "mr_weight_hurst", "N/A"),
                 },
             )
             report["gpt_analysis"] = gpt_results
@@ -577,12 +615,32 @@ def _generate_conclusions(report: dict, portfolio: MethodologyPortfolio) -> None
     """
     מייצר מסקנות אוטומטיות מהשוואת ריצה נוכחית מול היסטוריה.
 
-    מוסיף ל-report["conclusions"] ו-report["recommendations"].
+    מוסיף ל-report["conclusions"], report["recommendations"],
+    ו-report["smart_conclusions"] (PM-grade structured conclusions).
     """
     conclusions: List[str] = []
     recommendations: List[str] = []
 
     metrics = report.get("metrics", {})
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PM-grade smart conclusions — structured, actionable, prioritized
+    # ══════════════════════════════════════════════════════════════════════════
+    smart_conclusions = _generate_smart_conclusions(metrics, report, portfolio)
+    report["smart_conclusions"] = smart_conclusions
+
+    # Merge smart conclusions into the text-based conclusions/recommendations
+    for sc in smart_conclusions:
+        priority = sc.get("priority", "INFO")
+        finding = sc.get("finding", "")
+        action = sc.get("action", "")
+        conclusions.append(f"[{priority}] {finding}")
+        if action:
+            expected = sc.get("expected_impact", "")
+            rec = f"{action}"
+            if expected:
+                rec += f" (expected: {expected})"
+            recommendations.append(rec)
 
     # ── השוואה מול ריצה קודמת ────────────────────────────────────────────────
     comparison = portfolio.compare_vs_previous(report)
@@ -707,12 +765,204 @@ def _generate_conclusions(report: dict, portfolio: MethodologyPortfolio) -> None
         )
         recommendations.append("Stress loss exceeds 5% — review tail hedging or position sizing")
 
+    # ── Dispersion backtest conclusions ───────────────────────────────────────
+    disp = report.get("dispersion_backtest", {})
+    if disp:
+        disp_sharpe = disp.get("sharpe", 0)
+        disp_wr = disp.get("win_rate", 0)
+        if disp_sharpe < 0.5:
+            conclusions.append(
+                f"Dispersion Sharpe={disp_sharpe:.2f} below target (0.5)"
+            )
+        if disp_wr < 0.5:
+            conclusions.append(
+                f"Dispersion win rate={disp_wr:.1%} below breakeven"
+            )
+        # Regime-specific P&L from dispersion
+        pnl_by_regime = disp.get("pnl_by_regime", {})
+        for reg, pnl in pnl_by_regime.items():
+            if isinstance(pnl, (int, float)) and pnl < 0:
+                conclusions.append(
+                    f"Dispersion loses money in {reg} regime (P&L={pnl:+.2%})"
+                )
+
     # ── כתיבה לדוח ───────────────────────────────────────────────────────────
     if not conclusions:
         conclusions.append("No significant changes detected — methodology performing within norms")
 
     report["conclusions"] = conclusions
     report["recommendations"] = recommendations
+
+
+def _generate_smart_conclusions(
+    metrics: dict, report: dict, portfolio: MethodologyPortfolio
+) -> List[dict]:
+    """
+    Generate PM-grade conclusions with root cause analysis, specific actions,
+    and expected impact. Returns structured list sorted by priority.
+
+    Each conclusion has: priority, finding, root_cause, action, expected_impact.
+    """
+    conclusions: List[dict] = []
+
+    sharpe = _sf(metrics.get("sharpe", 0))
+    ic = _sf(metrics.get("ic_mean", 0))
+    hit_rate = _sf(metrics.get("hit_rate", 0))
+    max_dd = _sf(metrics.get("max_dd", 0))
+    ic_ir = _sf(metrics.get("ic_ir", 0))
+
+    # ── 1. Sharpe decomposition ──────────────────────────────────────────────
+    if sharpe < 0.3:
+        if ic < 0.02:
+            root = f"IC={ic:.4f} too low — signals barely predictive"
+            action = "Run Bayesian optimizer on z-thresholds; consider expanding MR whitelist"
+        elif hit_rate < 0.5:
+            root = f"Hit rate={hit_rate:.1%} below breakeven — directional calls wrong too often"
+            action = "Tighten MR whitelist; raise signal_entry_threshold by 0.05"
+        elif abs(max_dd) > 0.08:
+            root = f"MaxDD={max_dd:.1%} — gains wiped by drawdowns"
+            action = "Reduce max_leverage by 20%; activate dd_deleverage at 2%"
+        else:
+            root = "Low return per unit risk from multiple small inefficiencies"
+            action = "Focus on improving IC in weakest regime first"
+        conclusions.append({
+            "priority": "CRITICAL",
+            "finding": f"Sharpe {sharpe:.3f} below minimum viable threshold (0.3)",
+            "root_cause": root,
+            "action": action,
+            "expected_impact": "Sharpe +0.1 to +0.3",
+        })
+    elif sharpe < 0.8:
+        conclusions.append({
+            "priority": "WARNING",
+            "finding": f"Sharpe {sharpe:.3f} acceptable but below target (0.8)",
+            "root_cause": "Room for alpha improvement",
+            "action": "Optimize weakest regime parameters; review signal weights",
+            "expected_impact": "Sharpe +0.05 to +0.15",
+        })
+
+    # ── 2. Regime-specific analysis ──────────────────────────────────────────
+    regime_breakdown = report.get("regime_breakdown", {})
+    for regime, rm in regime_breakdown.items():
+        if not isinstance(rm, dict):
+            continue
+        reg_sharpe = _sf(rm.get("sharpe", 0))
+        reg_ic = _sf(rm.get("ic_mean", 0))
+        reg_hr = _sf(rm.get("hit_rate", 0))
+
+        if reg_sharpe < 0:
+            conclusions.append({
+                "priority": "HIGH",
+                "finding": f"Negative Sharpe in {regime} regime ({reg_sharpe:.3f})",
+                "root_cause": f"IC={reg_ic:.4f}, HR={reg_hr:.1%} in {regime}",
+                "action": (
+                    f"Reduce regime_conviction_scale for {regime.lower()}; "
+                    f"raise z-threshold; consider disabling entries in {regime}"
+                ),
+                "expected_impact": f"Eliminate {regime} losses; improve overall Sharpe",
+            })
+        elif reg_hr < 0.48:
+            conclusions.append({
+                "priority": "HIGH",
+                "finding": f"{regime} hit rate={reg_hr:.1%} below breakeven",
+                "root_cause": f"Signals not predictive in {regime} conditions",
+                "action": f"Add regime-specific entry filter for {regime}",
+                "expected_impact": f"Improve {regime} hit rate to 52%+",
+            })
+
+    # ── 3. Signal quality (IC) ───────────────────────────────────────────────
+    if ic < 0.01:
+        conclusions.append({
+            "priority": "HIGH",
+            "finding": f"IC={ic:.4f} — signals barely predictive (need >0.02)",
+            "root_cause": "Scoring function may not capture true alpha signal",
+            "action": "Add momentum filter or expand MR whitelist; review distortion weights",
+            "expected_impact": "IC improvement to 0.02-0.03",
+        })
+    elif ic > 0 and ic_ir < 0.3:
+        conclusions.append({
+            "priority": "WARNING",
+            "finding": f"IC={ic:.4f} but IC_IR={ic_ir:.4f} — signal unstable across time",
+            "root_cause": "IC varies significantly between walks; not reliably predictive",
+            "action": "Increase zscore_window to smooth signal; review walk-forward stability",
+            "expected_impact": "IC_IR improvement to 0.3+",
+        })
+
+    # ── 4. Drawdown analysis ─────────────────────────────────────────────────
+    if abs(max_dd) > 0.05:
+        conclusions.append({
+            "priority": "HIGH",
+            "finding": f"Max drawdown {max_dd:.1%} exceeds 5% limit",
+            "root_cause": "Insufficient deleveraging or position sizing too aggressive",
+            "action": "Activate dd_deleverage at 2% drawdown; reduce max_leverage",
+            "expected_impact": "Cap drawdowns at 3-5%",
+        })
+
+    # ── 5. Comparison with previous run ──────────────────────────────────────
+    prev_runs = portfolio.get_history(1)
+    if prev_runs:
+        prev_metrics = prev_runs[-1].get("metrics", {})
+        prev_sharpe = _sf(prev_metrics.get("sharpe", 0))
+        delta = sharpe - prev_sharpe
+        if delta < -0.1:
+            conclusions.append({
+                "priority": "WARNING",
+                "finding": f"Sharpe declined {delta:+.3f} vs previous run ({prev_sharpe:.3f} -> {sharpe:.3f})",
+                "root_cause": "Possible parameter drift, data quality issue, or regime shift",
+                "action": "Check for data staleness; compare parameters vs best_run snapshot",
+                "expected_impact": "Restore Sharpe to previous level",
+            })
+        elif delta > 0.15:
+            conclusions.append({
+                "priority": "INFO",
+                "finding": f"Sharpe improved {delta:+.3f} vs previous run",
+                "root_cause": "Recent optimization or favorable regime shift",
+                "action": "Snapshot current parameters as new baseline",
+                "expected_impact": "Preserve gains",
+            })
+
+    # ── 6. Dispersion backtest cross-check ───────────────────────────────────
+    disp = report.get("dispersion_backtest", {})
+    if disp:
+        disp_sharpe = _sf(disp.get("sharpe", 0))
+        if disp_sharpe > 2.0 and sharpe < 0.5:
+            conclusions.append({
+                "priority": "HIGH",
+                "finding": (
+                    f"Dispersion Sharpe={disp_sharpe:.2f} but WF Sharpe={sharpe:.2f} — "
+                    "signal stack not translating dispersion alpha"
+                ),
+                "root_cause": "Signal stack layers may be filtering out good dispersion trades",
+                "action": "Review Layer 4 regime safety gating; lower safety thresholds",
+                "expected_impact": "Better pass-through of dispersion alpha",
+            })
+
+    # ── 7. Tail risk concerns ────────────────────────────────────────────────
+    tail = report.get("tail_risk", {})
+    if tail:
+        es_var = _sf(tail.get("es_var_ratio", 1.0))
+        if es_var > 1.8:
+            conclusions.append({
+                "priority": "WARNING",
+                "finding": f"ES/VaR ratio={es_var:.2f} — fat tails detected",
+                "root_cause": "Return distribution has heavier tails than normal",
+                "action": "Increase stress buffer; use ES instead of VaR for sizing",
+                "expected_impact": "Better tail risk protection",
+            })
+        if tail.get("panic_coupling", False):
+            conclusions.append({
+                "priority": "HIGH",
+                "finding": "Panic coupling detected — correlations spike in stress",
+                "root_cause": "Diversification fails when most needed",
+                "action": "Reduce max_positions during high-vol regime; add correlation stress overlay",
+                "expected_impact": "Lower tail losses by 20-40%",
+            })
+
+    # ── Sort by priority ─────────────────────────────────────────────────────
+    priority_order = {"CRITICAL": 0, "HIGH": 1, "WARNING": 2, "INFO": 3}
+    conclusions.sort(key=lambda c: priority_order.get(c.get("priority", "INFO"), 9))
+
+    return conclusions
 
 
 # =============================================================================

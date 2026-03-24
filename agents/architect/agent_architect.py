@@ -154,8 +154,102 @@ class ArchitectAgent:
     # ── Step 2: Scan domain ──────────────────────────────────────
 
     def _scan(self, domain: ScanDomain) -> ScanResult:
-        """Scan the domain — read files, collect metrics, run health checks."""
-        return scan_domain(domain)
+        """Scan the domain — read files, collect metrics, run health checks.
+        Enriches the result with concrete quantitative metrics."""
+        result = scan_domain(domain)
+
+        # Enrich with concrete metrics from actual system state
+        extra_metrics = self._collect_concrete_metrics(domain)
+        if extra_metrics:
+            result.metrics.update(extra_metrics)
+
+        return result
+
+    def _collect_concrete_metrics(self, domain: ScanDomain) -> Dict[str, Any]:
+        """Collect actual quantitative metrics for a domain — not just file lists."""
+        metrics: Dict[str, Any] = {}
+
+        try:
+            if domain.name == "signal_quality":
+                # Get actual backtest numbers
+                cache_path = ROOT / "logs" / "last_backtest.json"
+                if cache_path.exists():
+                    bt = json.loads(cache_path.read_text(encoding="utf-8"))
+                    metrics["backtest_sharpe"] = bt.get("sharpe", 0)
+                    metrics["backtest_ic"] = bt.get("ic_mean", 0)
+                    metrics["backtest_hit_rate"] = bt.get("hit_rate", 0)
+                    metrics["backtest_max_dd"] = bt.get("max_drawdown", bt.get("max_dd", 0))
+                    metrics["regime_breakdown"] = bt.get("regime_breakdown", {})
+
+                # Methodology agent smart conclusions
+                if self.bus:
+                    meth = self.bus.latest("agent_methodology")
+                    if isinstance(meth, dict):
+                        smart = meth.get("smart_conclusions", [])
+                        if smart:
+                            metrics["top_issue"] = smart[0].get("finding", "")
+                            metrics["top_action"] = smart[0].get("action", "")
+                            metrics["n_critical_issues"] = sum(
+                                1 for s in smart if s.get("priority") in ("CRITICAL", "HIGH")
+                            )
+
+            elif domain.name == "risk_management":
+                # Get actual risk metrics from tail_risk
+                if self.bus:
+                    meth = self.bus.latest("agent_methodology")
+                    if isinstance(meth, dict):
+                        tail = meth.get("tail_risk", {})
+                        if tail:
+                            metrics["es_97_5"] = tail.get("es_97_5_1d", 0)
+                            metrics["var_97_5"] = tail.get("var_97_5_1d", 0)
+                            metrics["es_var_ratio"] = tail.get("es_var_ratio", 0)
+                            metrics["panic_coupling"] = tail.get("panic_coupling", False)
+                        stress = meth.get("stress_summary", {})
+                        if stress:
+                            metrics["worst_stress_pnl"] = stress.get("worst_pnl_pct", 0)
+                            metrics["worst_stress_scenario"] = stress.get("worst_scenario", "N/A")
+
+            elif domain.name == "trade_execution":
+                # Dispersion backtest results
+                if self.bus:
+                    meth = self.bus.latest("agent_methodology")
+                    if isinstance(meth, dict):
+                        disp = meth.get("dispersion_backtest", {})
+                        if disp:
+                            metrics["disp_sharpe"] = disp.get("sharpe", 0)
+                            metrics["disp_win_rate"] = disp.get("win_rate", 0)
+                            metrics["disp_total_trades"] = disp.get("total_trades", 0)
+                            metrics["disp_max_dd"] = disp.get("max_drawdown", 0)
+
+            elif domain.name == "agent_health":
+                # Get optimizer and math agent results
+                if self.bus:
+                    opt = self.bus.latest("agent_optimizer")
+                    if isinstance(opt, dict):
+                        metrics["optimizer_outcome"] = opt.get("outcome", "unknown")
+                        metrics["optimizer_delta_sharpe"] = opt.get("delta_sharpe", 0)
+                    math_r = self.bus.latest("agent_math")
+                    if isinstance(math_r, dict):
+                        metrics["math_proposals_count"] = math_r.get("proposals_count", 0)
+
+            elif domain.name == "data_quality":
+                # Check parquet file freshness + completeness
+                import pandas as pd
+                prices_path = ROOT / "data_lake" / "parquet" / "prices.parquet"
+                if prices_path.exists():
+                    prices = pd.read_parquet(prices_path)
+                    from datetime import date
+                    last_date = prices.index[-1]
+                    days_stale = (pd.Timestamp(date.today()) - last_date).days
+                    metrics["data_staleness_days"] = int(days_stale)
+                    metrics["n_sectors"] = len(prices.columns)
+                    metrics["nan_pct"] = round(float(prices.isna().mean().mean()), 4)
+                    metrics["date_range"] = f"{prices.index[0].date()} to {last_date.date()}"
+
+        except Exception as e:
+            logger.debug("Error collecting concrete metrics for %s: %s", domain.name, e)
+
+        return metrics
 
     # ── Step 3: GPT analysis ─────────────────────────────────────
 
@@ -182,35 +276,56 @@ class ArchitectAgent:
         metrics_str = json.dumps(scan.metrics, indent=2, default=str)[:800]
         findings_str = "\n".join(f"- {f}" for f in scan.findings)
 
-        # ── Turn 1: Diagnosis ────────────────────────────────────
+        # ── Turn 1: Diagnosis with concrete numbers ─────────────
+        # Build a focused metrics summary with actual numbers
+        concrete_nums = ""
+        m = scan.metrics
+        if m.get("backtest_sharpe") is not None:
+            concrete_nums += f"Sharpe={m['backtest_sharpe']}, IC={m.get('backtest_ic', 'N/A')}, "
+            concrete_nums += f"HR={m.get('backtest_hit_rate', 'N/A')}, MaxDD={m.get('backtest_max_dd', 'N/A')}. "
+        if m.get("top_issue"):
+            concrete_nums += f"Top issue from PM analysis: {m['top_issue']}. "
+        if m.get("disp_sharpe") is not None:
+            concrete_nums += f"Dispersion Sharpe={m['disp_sharpe']}, WR={m.get('disp_win_rate', 'N/A')}. "
+        if m.get("data_staleness_days") is not None:
+            concrete_nums += f"Data staleness: {m['data_staleness_days']} days. "
+        if m.get("worst_stress_pnl") is not None:
+            concrete_nums += f"Worst stress: {m['worst_stress_pnl']}% ({m.get('worst_stress_scenario', '?')}). "
+
         turn1 = (
             f"Domain: {domain.name} — {domain.description}\n\n"
-            f"Current metrics:\n{metrics_str}\n\n"
+            f"CONCRETE METRICS:\n{concrete_nums if concrete_nums else metrics_str}\n\n"
             f"Health check findings:\n{findings_str}\n\n"
             f"Key code:\n{code_summary}\n\n"
-            f"What is the SINGLE most impactful improvement for this domain? "
-            f"Be specific — name the function, the metric, and the problem."
+            f"Given these SPECIFIC NUMBERS, what is the SINGLE most impactful improvement? "
+            f"Name the function, the metric it affects, and the expected improvement in Sharpe/IC."
         )
         diagnosis = self.gpt._query(turn1)
         logger.info("GPT Turn 1 (diagnosis): %s", diagnosis[:200])
 
-        # ── Turn 2: Specifics ────────────────────────────────────
+        # ── Turn 2: Specifics with parameter guidance ─────────
         turn2 = (
             f"You identified: {diagnosis[:300]}\n\n"
-            f"What EXACT code change or parameter adjustment fixes this? "
-            f"Give me: file path, function name, and the specific change. "
-            f"If it's a parameter, give the new value. "
-            f"If it's code, describe the change in 2-3 sentences."
+            f"What EXACT code change or parameter adjustment fixes this?\n"
+            f"Give me:\n"
+            f"1. File path and function name\n"
+            f"2. The specific change (if parameter: name, current value, new value)\n"
+            f"3. Mathematical justification (one sentence)\n"
+            f"4. Expected quantitative impact (Sharpe delta or IC delta)\n"
+            f"If code: describe the change in 2-3 sentences with the mathematical formula."
         )
         suggestion = self.gpt._query(turn2)
         logger.info("GPT Turn 2 (suggestion): %s", suggestion[:200])
 
-        # ── Turn 3: Validation ───────────────────────────────────
+        # ── Turn 3: Validation with specific criteria ─────────
+        top_action = m.get("top_action", "")
         turn3 = (
             f"You suggest: {suggestion[:300]}\n\n"
-            f"What test or metric would confirm this worked? "
-            f"What could go wrong? "
-            f"Give me a specific validation criterion."
+            f"PM analysis suggests: {top_action[:200]}\n\n"
+            f"1. What specific metric threshold confirms success? (e.g., 'Sharpe > 0.5')\n"
+            f"2. What could go WRONG? Name the specific risk.\n"
+            f"3. Should this change be applied unconditionally or only in certain regimes?\n"
+            f"Give me a pass/fail criterion in one sentence."
         )
         validation = self.gpt._query(turn3)
         logger.info("GPT Turn 3 (validation): %s", validation[:200])
@@ -250,16 +365,21 @@ class ArchitectAgent:
         if "no changes needed" in suggestion.lower() or "no issues" in diagnosis.lower():
             return None
 
+        validation_criteria = gpt_analysis.get("validation", "tests must pass")
+
         system_prompt = (
             f"You are a quantitative systems engineer improving the SRV Quant System.\n\n"
             f"DOMAIN: {domain.name} — {domain.description}\n\n"
             f"DIAGNOSIS: {diagnosis[:500]}\n\n"
             f"RECOMMENDATION: {suggestion[:500]}\n\n"
+            f"VALIDATION CRITERION: {validation_criteria[:300]}\n\n"
             f"RULES:\n"
             f"- Make MAXIMUM {MAX_CHANGES_PER_CYCLE} changes\n"
             f"- Each change must be testable\n"
             f"- Do NOT change unrelated code\n"
             f"- Focus on the specific recommendation above\n"
+            f"- Parameter changes: use exact values, stay within settings.py Field bounds\n"
+            f"- Prefer small incremental changes (10-20%) over large jumps\n"
             f"- After changes, respond with a JSON action list\n\n"
             f"Respond with a JSON block containing your actions:\n"
             f'{{"actions": [{{"type": "edit_param", "file": "...", "param": "...", "value": ...}}, '

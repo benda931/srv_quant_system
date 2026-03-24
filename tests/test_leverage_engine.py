@@ -90,30 +90,31 @@ class TestDrawdownDeleverage:
     def test_at_start_boundary(self, engine):
         assert engine.drawdown_deleverage(0.02) == pytest.approx(1.0)
 
-    def test_midrange_2_to_5(self, engine):
-        """3.5% DD → halfway between 2% and 5%, should be ~75%."""
+    def test_below_start(self, engine):
+        """3.5% DD → below dd_start(5%), full leverage."""
         mult = engine.drawdown_deleverage(0.035)
-        assert 0.70 < mult < 0.80
+        assert mult == 1.0
 
-    def test_at_5pct(self, engine):
+    def test_at_start(self, engine):
+        """At dd_start (5%), leverage is still 100%."""
         mult = engine.drawdown_deleverage(0.05)
-        assert mult == pytest.approx(0.50, abs=1e-6)
+        assert mult == pytest.approx(1.0, abs=1e-6)
 
-    def test_at_8pct(self, engine):
-        """At 8% DD, we enter emergency zone → 10% of leverage."""
-        mult = engine.drawdown_deleverage(0.08)
-        assert mult == pytest.approx(0.10, abs=1e-6)
+    def test_midrange(self, engine):
+        """12.5% DD → midpoint of 5-20% range → ~50%."""
+        mult = engine.drawdown_deleverage(0.125)
+        assert mult == pytest.approx(0.50, abs=0.01)
 
-    def test_emergency_zone(self, engine):
-        """10% DD → between 8-12%, should be small but > 0."""
-        mult = engine.drawdown_deleverage(0.10)
-        assert 0.0 < mult < 0.10
+    def test_three_quarters(self, engine):
+        """16.25% DD → 75% through range → ~25%."""
+        mult = engine.drawdown_deleverage(0.1625)
+        assert mult == pytest.approx(0.25, abs=0.01)
 
     def test_full_stop(self, engine):
-        assert engine.drawdown_deleverage(0.12) == 0.0
+        assert engine.drawdown_deleverage(0.20) == 0.0
 
     def test_beyond_full_stop(self, engine):
-        assert engine.drawdown_deleverage(0.20) == 0.0
+        assert engine.drawdown_deleverage(0.30) == 0.0
 
 
 # ---------------------------------------------------------------------------
