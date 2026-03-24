@@ -40,7 +40,8 @@
       "Bash(find C:/Users/omrib/OneDrive/Desktop/srv_quant_system -name *.parquet -type f)",
       "Bash(ls -la data/paper_portfolio.json agents/methodology/reports/*.json)",
       "Bash(curl -s http://localhost:8050)",
-      "mcp__Claude_Preview__preview_start"
+      "mcp__Claude_Preview__preview_start",
+      "Bash(ls -la data/*method*)"
     ]
   }
 }

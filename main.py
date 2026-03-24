@@ -1028,7 +1028,7 @@ def build_app() -> dash.Dash:
                                 "avg_holding_days": round(r.avg_holding_days, 1),
                                 "params": r.params if hasattr(r, "params") else {},
                             }
-                            for r in _auto_results
+                            for r in _auto_results.values()
                         ],
                     }
                     _ml_save_path = _ml_reports_dir / f"{_dt_ml.now().strftime('%Y-%m-%d')}_methodology_lab.json"
