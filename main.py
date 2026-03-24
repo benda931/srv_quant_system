@@ -1753,15 +1753,28 @@ def build_app() -> dash.Dash:
         Output("card-attrib", "children"),
         Output("card-exec", "children"),
         Input("tearsheet-sector-dropdown", "value"),
+        Input("main-tabs", "active_tab"),
         State("master-store", "data"),
         prevent_initial_call=False,
     )
     def update_tearsheet(
         sector_ticker: Optional[str],
+        active_tab: Optional[str],
         master_store: Optional[List[Dict[str, Any]]],
     ):
         _dark = dict(template="plotly_dark", paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e", height=520)
-        if not master_store or not sector_ticker:
+        _empty = go.Figure().update_layout(**_dark, title="בחר סקטור")
+        _empty_ret = (_empty, "—", "—", "—", "—")
+
+        # Only render when tear sheet tab is active
+        if active_tab != "tab-tearsheet":
+            return _empty_ret
+
+        # Default to XLK if dropdown hasn't loaded yet
+        if not sector_ticker:
+            sector_ticker = "XLK"
+
+        if not master_store:
             fig = go.Figure()
             fig.update_layout(**_dark, title="בחר סקטור")
             return fig, "—", "—", "—", "—"
