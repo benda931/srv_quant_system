@@ -186,7 +186,17 @@ class AuditTrail:
             from pathlib import Path
             if db_path is None:
                 db_path = str(Path(__file__).resolve().parent / "audit.duckdb")
-            self._conn = duckdb.connect(db_path)
+            try:
+                self._conn = duckdb.connect(db_path)
+            except Exception:
+                # DuckDB file locked by another process — use dedicated audit file
+                alt_path = str(Path(db_path).parent / "audit_standalone.duckdb")
+                try:
+                    self._conn = duckdb.connect(alt_path)
+                    logger.info("Audit trail using alternate DB: %s", alt_path)
+                except Exception:
+                    self._conn = duckdb.connect(":memory:")
+                    logger.warning("Audit trail using in-memory DB (chain will not persist)")
             self._owns_conn = True
 
         self._ensure_schema()

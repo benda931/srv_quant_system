@@ -325,8 +325,11 @@ def compute_mean_reversion_score(
     adf_stat, adf_p = _adf_test(x, maxlag=adf_maxlag)
     adf_q = _adf_quality(adf_p)
 
-    # (c) Hurst exponent
-    hurst = _hurst_exponent(x)
+    # (c) Hurst exponent — applied to RETURNS (differences), not levels.
+    # R/S on levels gives H≈0.9 (false trending) because levels are non-stationary.
+    # R/S on returns correctly detects mean-reversion (H<0.5) in the residual process.
+    x_returns = x.diff().dropna()
+    hurst = _hurst_exponent(x_returns) if len(x_returns) >= 60 else float("nan")
     hurst_q = _hurst_quality(hurst)
 
     # Weighted combination

@@ -1153,6 +1153,22 @@ def build_app() -> dash.Dash:
         logger.warning("DSS engine failed (non-fatal): %s", _e)
         _engine_errors["dss"] = str(_e)
 
+    # ── Dispersion Backtest ──────────────────────────────────────────────────
+    _dispersion_result = None
+    try:
+        from analytics.dispersion_backtest import DispersionBacktester
+        _disp_bt = DispersionBacktester(
+            engine.prices,
+            hold_period=15, z_entry=0.6, z_exit=0.2,
+            max_positions=3, lookback=30,
+        )
+        _dispersion_result = _disp_bt.run()
+        logger.info("Dispersion backtest: Sharpe=%.2f, WR=%.1f%%, P&L=%.2f%%, N=%d",
+                     _dispersion_result.sharpe, _dispersion_result.win_rate * 100,
+                     _dispersion_result.total_pnl * 100, _dispersion_result.total_trades)
+    except Exception as _disp_exc:
+        logger.warning("Dispersion backtest failed (non-fatal): %s", _disp_exc)
+
     # ── Pre-compute lazy tabs (P&L, Signal Decay, Regime) at startup ─────────
     _pnl_result_cached = None
     _decay_result_cached = None
@@ -1477,7 +1493,7 @@ def build_app() -> dash.Dash:
                                       _dss_regime_safety, _dss_corr_snapshot,
                                       _dss_monitor_summary, _options_surface,
                                       _tail_risk_es, _methodology_ranking,
-                                      _paper_portfolio),
+                                      _paper_portfolio, _dispersion_result),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -1812,6 +1828,40 @@ def build_app() -> dash.Dash:
                 className=f"mb-3 border-{_safety_color}", style={"borderWidth": "1px"},
             )
 
+        # ── Dispersion Backtest snapshot card ─────────────────────
+        dispersion_kpis: Any = html.Div()
+        if _dispersion_result is not None and _dispersion_result.total_trades > 0:
+            dispersion_kpis = dbc.Card(
+                dbc.CardBody(
+                    dbc.Row([
+                        dbc.Col(html.Div("Dispersion Backtest", className="fw-bold"), width="auto"),
+                        dbc.Col([
+                            html.Span("Sharpe: ", className="text-muted small"),
+                            html.Span(
+                                f"{_dispersion_result.sharpe:.1f}",
+                                className="small fw-bold me-3 text-success",
+                            ),
+                            html.Span("Win Rate: ", className="text-muted small"),
+                            html.Span(
+                                f"{_dispersion_result.win_rate:.0%}",
+                                className="small fw-bold me-3",
+                            ),
+                            html.Span("P&L: ", className="text-muted small"),
+                            html.Span(
+                                f"{_dispersion_result.total_pnl:.1%}",
+                                className=f"small fw-bold me-3 text-{'success' if _dispersion_result.total_pnl > 0 else 'danger'}",
+                            ),
+                            html.Span("Trades: ", className="text-muted small"),
+                            html.Span(
+                                f"{_dispersion_result.total_trades}",
+                                className="small fw-bold",
+                            ),
+                        ]),
+                    ], align="center"),
+                ),
+                className="mb-3 border-success", style={"borderWidth": "1px"},
+            )
+
         # ── Paper Portfolio snapshot card ─────────────────────────
         paper_kpis: Any = html.Div()
         if _paper_portfolio:
@@ -1885,6 +1935,7 @@ def build_app() -> dash.Dash:
                 cards_top,
                 cards_bottom,
                 dss_kpis,
+                dispersion_kpis,
                 paper_kpis,
                 agent_kpis,
                 stress_kpis,

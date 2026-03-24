@@ -1628,6 +1628,7 @@ def build_dss_tab(
     tail_risk_es: Any = None,
     methodology_ranking: Optional[List[Dict]] = None,
     paper_portfolio: Optional[Dict] = None,
+    dispersion_result: Any = None,
 ) -> html.Div:
     """
     Build the Decision Support System tab:
@@ -2221,6 +2222,71 @@ def build_dss_tab(
         ], className=f"border-{pnl_color} mb-3",
            style={"borderTop": f"3px solid var(--bs-{pnl_color})"})
         sections.append(pp_section)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 6: Dispersion Backtest Performance
+    # ══════════════════════════════════════════════════════════════════════
+    if dispersion_result is not None:
+        _rtl = {"direction": "rtl", "textAlign": "right"}
+
+        # Build equity curve figure
+        _eq = dispersion_result.equity_curve
+        if _eq is not None and len(_eq) > 0:
+            _eq_fig = go.Figure()
+            _eq_fig.add_trace(go.Scatter(
+                x=_eq.index, y=_eq.values,
+                mode="lines", fill="tozeroy",
+                line=dict(color="#00bc8c", width=1.5),
+                fillcolor="rgba(0,188,140,0.15)",
+                name="Equity",
+            ))
+            _eq_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e",
+                plot_bgcolor="#1a1a2e",
+                margin=dict(l=40, r=20, t=30, b=30),
+                height=220,
+                title=dict(text="Equity Curve — Dispersion Strategy", font=dict(size=12)),
+                xaxis=dict(showgrid=False),
+                yaxis=dict(title="Cumulative P&L", showgrid=True, gridcolor="#333"),
+            )
+        else:
+            _eq_fig = go.Figure()
+            _eq_fig.update_layout(
+                template="plotly_dark",
+                paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                height=120,
+                annotations=[dict(text="No equity data", showarrow=False,
+                                  font=dict(color="#888", size=14), xref="paper", yref="paper", x=0.5, y=0.5)],
+            )
+
+        _disp_section = dbc.Card([
+            dbc.CardBody([
+                html.H6("Dispersion Trade Backtest", className="mb-3", style=_rtl),
+                dbc.Row([
+                    _kpi("Sharpe (OOS)", f"{dispersion_result.sharpe:.2f}", "success", small=True),
+                    _kpi("Win Rate", f"{dispersion_result.win_rate:.0%}", "success", small=True),
+                    _kpi("Total P&L", f"{dispersion_result.total_pnl:.1%}",
+                         "success" if dispersion_result.total_pnl > 0 else "danger", small=True),
+                    _kpi("Max DD", f"{dispersion_result.max_drawdown:.2%}", "danger", small=True),
+                ], className="g-2 mb-3"),
+                dcc.Graph(figure=_eq_fig, config={"displayModeBar": False}),
+                html.Hr(style={"borderColor": "#444"}),
+                html.Div("P&L Decomposition", className="text-muted small mb-2 text-center"),
+                dbc.Row([
+                    _kpi("Vega P&L", f"{dispersion_result.total_vega_pnl:.2%}", "info", small=True),
+                    _kpi("Theta P&L", f"{dispersion_result.total_theta_pnl:.2%}", "secondary", small=True),
+                    _kpi("Gamma P&L", f"{dispersion_result.total_gamma_pnl:.2%}", "warning", small=True),
+                ], className="g-2"),
+                html.Div(
+                    f"{dispersion_result.total_trades} trades | "
+                    f"Avg hold {dispersion_result.avg_holding_days:.0f}d | "
+                    f"Calmar {dispersion_result.calmar:.1f}",
+                    className="text-muted small mt-2 text-center",
+                ),
+            ])
+        ], className="mb-3", style={"backgroundColor": "#2d2d44"})
+        sections.append(_disp_section)
 
     if not sections:
         return html.Div(dbc.Alert("DSS: אין נתונים זמינים.", color="secondary"),
