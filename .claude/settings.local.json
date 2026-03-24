@@ -38,7 +38,9 @@
       "Bash(ls -la data/*.parquet)",
       "Bash(find C:/Users/omrib/OneDrive/Desktop/srv_quant_system/data -type f -name *.parquet -o -name *.csv -o -name *.db)",
       "Bash(find C:/Users/omrib/OneDrive/Desktop/srv_quant_system -name *.parquet -type f)",
-      "Bash(ls -la data/paper_portfolio.json agents/methodology/reports/*.json)"
+      "Bash(ls -la data/paper_portfolio.json agents/methodology/reports/*.json)",
+      "Bash(curl -s http://localhost:8050)",
+      "mcp__Claude_Preview__preview_start"
     ]
   }
 }
