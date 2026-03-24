@@ -2892,3 +2892,242 @@ def build_ml_insights_tab(
         [kpi_row, row2, row3],
         style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT STATUS TAB
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_agent_status_tab(
+    registry_data: Optional[Dict] = None,
+    last_reports: Optional[Dict] = None,
+) -> html.Div:
+    """
+    Build the Agent Status monitoring tab.
+
+    Parameters
+    ----------
+    registry_data : dict | None
+        Output of AgentRegistry.all_agents() — keyed by agent name.
+    last_reports : dict | None
+        Optional dict of {agent_name: last_report_dict} with key metrics
+        and GPT conversation snippets.
+    """
+    _RTL = {"direction": "rtl", "textAlign": "right"}
+
+    if registry_data is None:
+        registry_data = {}
+    if last_reports is None:
+        last_reports = {}
+
+    # ── Status color mapping ─────────────────────────────────────────────
+    status_colors = {
+        "IDLE": "secondary",
+        "RUNNING": "primary",
+        "COMPLETED": "success",
+        "FAILED": "danger",
+        "STALE": "warning",
+    }
+    status_icons = {
+        "IDLE": "⏸",
+        "RUNNING": "▶",
+        "COMPLETED": "✓",
+        "FAILED": "✗",
+        "STALE": "⚠",
+    }
+
+    # ── Agent definitions (display order) ────────────────────────────────
+    agent_defs = [
+        ("agent_methodology", "Methodology Agent", "methodology evaluation & benchmarking"),
+        ("agent_optimizer", "Optimizer Agent", "parameter & code optimization"),
+        ("agent_math", "Math Agent", "mathematical research & proposals"),
+    ]
+
+    # ── Build agent cards ────────────────────────────────────────────────
+    agent_cards = []
+    timeline_items = []
+
+    for agent_key, agent_label, default_role in agent_defs:
+        rec = registry_data.get(agent_key, {})
+        report = last_reports.get(agent_key, {})
+
+        status = rec.get("status", "IDLE")
+        role = rec.get("role", default_role)
+        last_hb = rec.get("last_heartbeat", None)
+        last_run = rec.get("last_run", None)
+        run_count = rec.get("run_count", 0)
+        last_error = rec.get("last_error", None)
+        color = status_colors.get(status, "secondary")
+        icon = status_icons.get(status, "?")
+
+        # Format timestamps
+        hb_display = last_hb[:19].replace("T", " ") if last_hb else "Never"
+        run_display = last_run[:19].replace("T", " ") if last_run else "Never"
+
+        # Key metrics from last report
+        metrics_items = []
+        if report.get("metrics"):
+            m = report["metrics"]
+            for k, v in list(m.items())[:4]:
+                metrics_items.append(
+                    html.Span(
+                        f"{k}: {_ff(v, '{:.4f}')}",
+                        className="badge bg-dark me-1",
+                    )
+                )
+
+        # GPT conversation snippet
+        gpt_snippet = ""
+        if report.get("gpt_conversation"):
+            conv = report["gpt_conversation"]
+            if isinstance(conv, list) and conv:
+                last_msg = conv[-1]
+                content = last_msg.get("content", "") if isinstance(last_msg, dict) else str(last_msg)
+                gpt_snippet = content[:150] + "..." if len(content) > 150 else content
+            elif isinstance(conv, str):
+                gpt_snippet = conv[:150] + "..." if len(conv) > 150 else conv
+
+        # Error display
+        error_badge = html.Span()
+        if last_error and status == "FAILED":
+            error_badge = dbc.Alert(
+                f"Error: {last_error[:200]}",
+                color="danger",
+                className="mt-2 mb-0 py-1 px-2",
+                style={"fontSize": "0.8rem"},
+            )
+
+        card = dbc.Col(
+            dbc.Card([
+                dbc.CardHeader([
+                    html.Span(f"{icon} ", style={"fontSize": "1.2rem"}),
+                    html.Strong(agent_label),
+                    dbc.Badge(status, color=color, className="ms-2"),
+                ], style={"backgroundColor": "#16213e"}),
+                dbc.CardBody([
+                    html.Div([
+                        html.Small(role, className="text-muted d-block mb-2"),
+                        html.Div([
+                            html.Span("Last heartbeat: ", className="text-muted"),
+                            html.Span(hb_display),
+                        ], className="mb-1", style={"fontSize": "0.85rem"}),
+                        html.Div([
+                            html.Span("Last run: ", className="text-muted"),
+                            html.Span(run_display),
+                        ], className="mb-1", style={"fontSize": "0.85rem"}),
+                        html.Div([
+                            html.Span("Total runs: ", className="text-muted"),
+                            html.Span(str(run_count)),
+                        ], className="mb-2", style={"fontSize": "0.85rem"}),
+                        html.Div(metrics_items, className="mb-2") if metrics_items else html.Div(),
+                        html.Div([
+                            html.Small("GPT: ", className="text-muted"),
+                            html.Small(gpt_snippet, className="text-info"),
+                        ], style={"fontSize": "0.8rem"}) if gpt_snippet else html.Div(),
+                        error_badge,
+                    ]),
+                ], style={"backgroundColor": "#1a1a2e"}),
+            ], className="h-100", style={"border": "1px solid #2a2a4a"}),
+            md=4,
+            className="mb-3",
+        )
+        agent_cards.append(card)
+
+        # Timeline entry
+        if last_run:
+            timeline_items.append({
+                "agent": agent_label,
+                "time": run_display,
+                "status": status,
+                "color": color,
+            })
+
+    # ── Agent cards row ──────────────────────────────────────────────────
+    cards_row = dbc.Row(agent_cards, className="g-3 mb-4")
+
+    # ── Timeline section ─────────────────────────────────────────────────
+    timeline_items.sort(key=lambda x: x["time"], reverse=True)
+    timeline_rows = []
+    for item in timeline_items[:10]:
+        timeline_rows.append(
+            html.Tr([
+                html.Td(item["agent"], style={"fontSize": "0.85rem"}),
+                html.Td(item["time"], style={"fontSize": "0.85rem"}),
+                html.Td(
+                    dbc.Badge(item["status"], color=item["color"]),
+                ),
+            ])
+        )
+
+    timeline_table = dbc.Card([
+        dbc.CardHeader(
+            html.Strong("Agent Orchestration Timeline"),
+            style={"backgroundColor": "#16213e"},
+        ),
+        dbc.CardBody(
+            dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Agent"), html.Th("Last Run"), html.Th("Status"),
+                ]))] + [html.Tbody(timeline_rows)] if timeline_rows else [
+                    html.Div("No agent runs recorded yet.", className="text-muted p-3"),
+                ],
+                bordered=True,
+                dark=True,
+                hover=True,
+                size="sm",
+                className="mb-0",
+            ) if timeline_rows else html.Div(
+                "No agent runs recorded yet.",
+                className="text-muted p-3",
+            ),
+            style={"backgroundColor": "#1a1a2e", "padding": "0"},
+        ),
+    ], className="mb-4", style={"border": "1px solid #2a2a4a"})
+
+    # ── Error log section ────────────────────────────────────────────────
+    error_items = []
+    for agent_key, _, _ in agent_defs:
+        rec = registry_data.get(agent_key, {})
+        err = rec.get("last_error")
+        if err:
+            agent_label_short = agent_key.replace("agent_", "").title()
+            error_items.append(
+                dbc.ListGroupItem(
+                    [
+                        dbc.Badge(agent_label_short, color="danger", className="me-2"),
+                        html.Span(err[:300]),
+                    ],
+                    style={"backgroundColor": "#1a1a2e", "border": "1px solid #2a2a4a",
+                            "fontSize": "0.85rem"},
+                )
+            )
+
+    error_card = dbc.Card([
+        dbc.CardHeader(
+            html.Strong("Error Log"),
+            style={"backgroundColor": "#16213e"},
+        ),
+        dbc.CardBody(
+            dbc.ListGroup(error_items, flush=True) if error_items else html.Div(
+                "No errors — all agents healthy.",
+                className="text-success p-2",
+            ),
+            style={"backgroundColor": "#1a1a2e", "padding": "8px"},
+        ),
+    ], style={"border": "1px solid #2a2a4a"})
+
+    return html.Div(
+        [
+            html.H4("Agent Status Monitor", className="text-info mb-3"),
+            html.P(
+                "Real-time status of the three SRV agents: Methodology, Optimizer, and Math.",
+                className="text-muted mb-3",
+            ),
+            cards_row,
+            dbc.Row([
+                dbc.Col(timeline_table, md=7),
+                dbc.Col(error_card, md=5),
+            ], className="g-3"),
+        ],
+        style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
+    )

@@ -158,44 +158,79 @@ def _load_math_proposals() -> list[dict]:
 
 
 def _run_backtest() -> dict:
-    """מריץ backtest ומחזיר תוצאות."""
+    """Run backtest with timeout — prefer dispersion backtest (faster, more relevant)."""
+    # ── Primary: Dispersion Backtest (fast, strategy-relevant) ────────────
     try:
-        from config.settings import get_settings
-        from data_ops.orchestrator import DataOrchestrator
-        from analytics.backtest import WalkForwardBacktester
-
-        settings = get_settings()
-        orchestrator = DataOrchestrator(settings)
-        data_state = orchestrator.run(force_refresh=False)
-        prices_df = data_state.artifacts.prices
-
-        bt = WalkForwardBacktester(settings)
-        result = bt.run_backtest(prices_df, prices_df, prices_df)
-
-        regime_bd = result.regime_breakdown
-        regime_dict: dict = {}
-        for reg in ["calm", "normal", "tension", "crisis"]:
-            rd = getattr(regime_bd, reg, None)
-            if rd:
-                regime_dict[reg.upper()] = {
-                    "ic_mean": round(float(rd.ic_mean or 0), 4),
-                    "hit_rate": round(float(rd.hit_rate or 0), 4),
-                    "sharpe": round(float(rd.sharpe or 0), 4),
-                    "n_walks": int(rd.n_walks or 0),
-                }
-
+        import pandas as pd
+        from analytics.dispersion_backtest import DispersionBacktester
+        prices = pd.read_parquet(str(ROOT / "data_lake" / "parquet" / "prices.parquet"))
+        bt = DispersionBacktester(
+            prices, hold_period=15, z_entry=0.6, z_exit=0.2,
+            max_positions=3, lookback=30,
+        )
+        result = bt.run()
         return {
-            "ic_mean": round(float(result.ic_mean or 0), 4),
-            "ic_ir": round(float(result.ic_ir or 0), 4),
-            "hit_rate": round(float(result.hit_rate or 0), 4),
-            "sharpe": round(float(result.sharpe or 0), 4),
-            "max_drawdown": round(float(result.max_drawdown or 0), 4),
-            "n_walks": int(result.n_walks or 0),
-            "regime_breakdown": regime_dict,
+            "sharpe": result.sharpe,
+            "win_rate": result.win_rate,
+            "total_pnl": result.total_pnl,
+            "max_drawdown": result.max_drawdown,
+            "total_trades": result.total_trades,
+            "avg_hold": result.avg_holding_days,
+            "source": "dispersion_backtest",
         }
+    except Exception as e:
+        log.warning("Dispersion backtest failed: %s, trying walk-forward...", e)
+
+    # ── Fallback: Walk-Forward Backtest with 60s timeout ──────────────────
+    try:
+        import concurrent.futures
+
+        def _walk_forward_backtest() -> dict:
+            from config.settings import get_settings
+            from data_ops.orchestrator import DataOrchestrator
+            from analytics.backtest import WalkForwardBacktester
+
+            settings = get_settings()
+            orchestrator = DataOrchestrator(settings)
+            data_state = orchestrator.run(force_refresh=False)
+            prices_df = data_state.artifacts.prices
+
+            bt = WalkForwardBacktester(settings)
+            result = bt.run_backtest(prices_df, prices_df, prices_df)
+
+            regime_bd = result.regime_breakdown
+            regime_dict: dict = {}
+            for reg in ["calm", "normal", "tension", "crisis"]:
+                rd = getattr(regime_bd, reg, None)
+                if rd:
+                    regime_dict[reg.upper()] = {
+                        "ic_mean": round(float(rd.ic_mean or 0), 4),
+                        "hit_rate": round(float(rd.hit_rate or 0), 4),
+                        "sharpe": round(float(rd.sharpe or 0), 4),
+                        "n_walks": int(rd.n_walks or 0),
+                    }
+
+            return {
+                "ic_mean": round(float(result.ic_mean or 0), 4),
+                "ic_ir": round(float(result.ic_ir or 0), 4),
+                "hit_rate": round(float(result.hit_rate or 0), 4),
+                "sharpe": round(float(result.sharpe or 0), 4),
+                "max_drawdown": round(float(result.max_drawdown or 0), 4),
+                "n_walks": int(result.n_walks or 0),
+                "regime_breakdown": regime_dict,
+                "source": "walk_forward",
+            }
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_walk_forward_backtest)
+            try:
+                return future.result(timeout=60)
+            except concurrent.futures.TimeoutError:
+                log.error("Walk-forward backtest timed out (60s limit)")
+                return {"sharpe": 0, "error": "walk_forward_timeout"}
     except Exception as exc:
         log.error("Backtest failed: %s", exc)
-        return {}
+        return {"sharpe": 0, "error": str(exc)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

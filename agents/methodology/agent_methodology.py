@@ -318,6 +318,36 @@ def run(once: bool = False) -> dict:
         if not _IMPORTS_OK.get("backtest"):
             report["errors"].append("backtest import failed")
 
+    # ── שלב 3.5: Dispersion Backtest (primary strategy metric) ─────────────
+    if engine is not None and getattr(engine, "prices", None) is not None:
+        log.info("[3.5/8] Running dispersion backtest...")
+        try:
+            from analytics.dispersion_backtest import DispersionBacktester
+            disp_bt = DispersionBacktester(
+                engine.prices, hold_period=15, z_entry=0.6, z_exit=0.2,
+                max_positions=3, lookback=30,
+            )
+            disp_result = disp_bt.run()
+            report["dispersion_backtest"] = {
+                "sharpe": disp_result.sharpe,
+                "win_rate": disp_result.win_rate,
+                "total_pnl": disp_result.total_pnl,
+                "max_drawdown": disp_result.max_drawdown,
+                "total_trades": disp_result.total_trades,
+                "pnl_by_regime": disp_result.pnl_by_regime,
+            }
+            log.info(
+                "  Dispersion: Sharpe=%.2f, WR=%.1f%%, P&L=%.2f%%",
+                disp_result.sharpe,
+                disp_result.win_rate * 100,
+                disp_result.total_pnl * 100,
+            )
+        except Exception as e:
+            log.warning("  Dispersion backtest failed: %s", e)
+            report["errors"].append(f"Dispersion Backtest: {e}")
+    else:
+        log.warning("[3.5/8] Dispersion backtest skipped — no engine/prices available")
+
     # ── שלב 4: Signal Stack ─────────────────────────────────────────────────
     signals: List[Any] = []
     if _IMPORTS_OK.get("signal_stack") and master_df is not None:

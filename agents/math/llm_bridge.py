@@ -103,15 +103,22 @@ class DualLLMBridge:
         """
         שולח prompt ל-Claude API ומחזיר תשובה.
         מחזיר מחרוזת ריקה אם Claude לא זמין.
+
+        Handles Hebrew/non-ASCII text safely: first tries with full UTF-8 prompt,
+        falls back to ASCII-only if encoding errors occur.
         """
         if not self.claude_client:
             log.warning("Claude client not available — skipping")
             return ""
 
-        # Strip Hebrew/non-ASCII from prompt to avoid encoding errors
         full_prompt = f"{context}\n\n{prompt}" if context else prompt
-        # Ensure clean ASCII for API transport (Hebrew in prompts causes encoding issues)
-        full_prompt = full_prompt.encode("utf-8", errors="replace").decode("utf-8")
+
+        # Normalize Unicode — NFC form prevents decomposed character issues
+        import unicodedata
+        full_prompt = unicodedata.normalize("NFC", full_prompt)
+
+        # Ensure valid UTF-8 roundtrip (strips lone surrogates / invalid sequences)
+        full_prompt = full_prompt.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
         try:
             response = self.claude_client.messages.create(
@@ -122,8 +129,8 @@ class DualLLMBridge:
             text = response.content[0].text
             log.info("Claude response received (%d chars)", len(text))
             return text
-        except UnicodeEncodeError as exc:
-            # Fallback: strip non-ASCII and retry
+        except (UnicodeEncodeError, UnicodeDecodeError) as exc:
+            # Fallback: strip non-ASCII (Hebrew etc.) and retry
             log.warning("Claude encoding error, retrying with ASCII-only: %s", exc)
             ascii_prompt = full_prompt.encode("ascii", errors="ignore").decode("ascii")
             try:
