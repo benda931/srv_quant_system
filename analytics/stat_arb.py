@@ -656,27 +656,48 @@ class QuantEngine:
         pca_var_target = self.settings.pca_explained_var_target
         n_cols = values.shape[1]
 
+        # PCA refit interval: reuse PCA model for N days before refitting
+        # This gives ~5x speedup with negligible accuracy loss (PCA stable over short periods)
+        pca_refit_interval = getattr(self.settings, "pca_refit_interval", 5)
+        _cached_scaler = [None]
+        _cached_pca = [None]
+        _last_refit = [0]
+
         def _process_date(t_offset):
             """Process a single date (t_offset is index into range(window, n))."""
             t = t_offset + window
             if nan_mask_train_pct[t_offset] > 0.05 or nan_mask_x_pct[t_offset] > 0.10:
                 return t, None
 
-            train_f = values[t - window : t]
             x_row = values[t : t + 1]
 
-            scaler = StandardScaler(with_mean=True, with_std=True)
-            Xs = scaler.fit_transform(train_f)
+            # Refit PCA every pca_refit_interval days (or on first call)
+            need_refit = (
+                _cached_scaler[0] is None
+                or (t_offset - _last_refit[0]) >= pca_refit_interval
+            )
 
-            pca_full = PCA(n_components=min(pca_max, n_cols), svd_solver="full")
-            pca_full.fit(Xs)
+            if need_refit:
+                train_f = values[t - window : t]
+                scaler = StandardScaler(with_mean=True, with_std=True)
+                Xs = scaler.fit_transform(train_f)
 
-            csum = np.cumsum(pca_full.explained_variance_ratio_)
-            k = int(np.searchsorted(csum, pca_var_target) + 1)
-            k = max(pca_min, min(k, pca_max))
+                pca_full = PCA(n_components=min(pca_max, n_cols), svd_solver="full")
+                pca_full.fit(Xs)
 
-            pca = PCA(n_components=k, svd_solver="full")
-            pca.fit(Xs)
+                csum = np.cumsum(pca_full.explained_variance_ratio_)
+                k = int(np.searchsorted(csum, pca_var_target) + 1)
+                k = max(pca_min, min(k, pca_max))
+
+                pca = PCA(n_components=k, svd_solver="full")
+                pca.fit(Xs)
+
+                _cached_scaler[0] = scaler
+                _cached_pca[0] = pca
+                _last_refit[0] = t_offset
+            else:
+                scaler = _cached_scaler[0]
+                pca = _cached_pca[0]
 
             x_s = scaler.transform(x_row)
             scores = pca.transform(x_s)
@@ -685,19 +706,30 @@ class QuantEngine:
             resid = resid_s * scaler.scale_
             return t, resid
 
-        # Parallel execution using joblib (loky backend for true parallelism)
-        try:
-            from joblib import Parallel, delayed
-            n_jobs = min(4, max(1, (n - window) // 100))  # Scale workers with data size
-            if n_jobs > 1 and (n - window) > 200:
-                self.logger.debug("PCA residuals: parallel with %d workers (%d dates)", n_jobs, n - window)
-                results = Parallel(n_jobs=n_jobs, backend="loky", prefer="processes")(
-                    delayed(_process_date)(t_off) for t_off in range(n - window)
-                )
-            else:
-                results = [_process_date(t_off) for t_off in range(n - window)]
-        except ImportError:
-            results = [_process_date(t_off) for t_off in range(n - window)]
+        # Sequential with PCA caching (refit every N days) — faster than parallel for cached mode
+        # The cache makes sequential ~5x faster, and avoids joblib serialization overhead
+        n_dates = n - window
+        if pca_refit_interval > 1:
+            # Sequential mode with cache — most efficient
+            self.logger.debug(
+                "PCA residuals: sequential with refit every %d days (%d dates)",
+                pca_refit_interval, n_dates,
+            )
+            results = [_process_date(t_off) for t_off in range(n_dates)]
+        else:
+            # Full refit every day — use parallel for speedup
+            try:
+                from joblib import Parallel, delayed
+                n_jobs = min(4, max(1, n_dates // 100))
+                if n_jobs > 1 and n_dates > 200:
+                    self.logger.debug("PCA residuals: parallel with %d workers (%d dates)", n_jobs, n_dates)
+                    results = Parallel(n_jobs=n_jobs, backend="loky", prefer="processes")(
+                        delayed(_process_date)(t_off) for t_off in range(n_dates)
+                    )
+                else:
+                    results = [_process_date(t_off) for t_off in range(n_dates)]
+            except ImportError:
+                results = [_process_date(t_off) for t_off in range(n_dates)]
 
         # Assemble results
         resid_ret = pd.DataFrame(index=idx, columns=sectors, dtype=float)

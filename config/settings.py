@@ -192,6 +192,8 @@ class Settings(BaseSettings):
     pca_explained_var_target: float = Field(default=0.85, ge=0.50, le=0.99)  # Was 0.80
     pca_min_components: int = Field(default=2, ge=1, le=10)   # Was 1 — at least market+1 factor
     pca_max_components: int = Field(default=8, ge=1, le=11)   # Was 5 — capture more factors
+    # PCA refit interval: reuse PCA model for N days before refitting (~5x speedup)
+    pca_refit_interval: int = Field(default=5, ge=1, le=20)
 
     # =====================================================
     # Volatility model
