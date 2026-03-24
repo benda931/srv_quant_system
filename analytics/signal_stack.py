@@ -479,6 +479,28 @@ class SignalStackEngine:
         mr_str = getattr(settings, "sector_mr_whitelist", "XLC,XLF,XLI,XLU") if settings else "XLC,XLF,XLI,XLU"
         self.mr_whitelist = set(t.strip() for t in mr_str.split(",") if t.strip())
 
+        # Regime-adaptive sizing & z-thresholds
+        self.regime_size = {
+            "CALM": getattr(settings, "regime_size_calm", 1.3) if settings else 1.3,
+            "NORMAL": getattr(settings, "regime_size_normal", 1.0) if settings else 1.0,
+            "TENSION": getattr(settings, "regime_size_tension", 0.6) if settings else 0.6,
+            "CRISIS": getattr(settings, "regime_size_crisis", 0.0) if settings else 0.0,
+        }
+        self.regime_z_thresh = {
+            "CALM": getattr(settings, "regime_z_calm", 0.6) if settings else 0.6,
+            "NORMAL": getattr(settings, "regime_z_normal", 0.8) if settings else 0.8,
+            "TENSION": getattr(settings, "regime_z_tension", 1.0) if settings else 1.0,
+            "CRISIS": getattr(settings, "regime_z_crisis", 99.0) if settings else 99.0,
+        }
+
+    def get_regime_multiplier(self, regime_label: str = "NORMAL") -> float:
+        """Get position size multiplier for current regime."""
+        return self.regime_size.get(regime_label.upper(), 1.0)
+
+    def get_regime_z_threshold(self, regime_label: str = "NORMAL") -> float:
+        """Get minimum z-score threshold for current regime."""
+        return self.regime_z_thresh.get(regime_label.upper(), 0.8)
+
     def score_sector_candidates(
         self,
         frob_distortion_z: float,

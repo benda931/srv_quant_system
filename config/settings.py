@@ -153,6 +153,22 @@ class Settings(BaseSettings):
     # Optimal hold period (days) — CALIBRATED: lb=60 hold=5 → Sharpe 0.456
     signal_optimal_hold: int = Field(default=5, ge=1, le=60)
 
+    # Regime-adaptive sizing — CALIBRATED 2026-03-24
+    # CALM: MR Sharpe=0.66 → full size + bonus
+    # NORMAL: MR Sharpe=0.23 → full size
+    # TENSION: MR Sharpe=0.68 → reduced but active (surprise: MR works in TENSION!)
+    # CRISIS: MR Sharpe=-0.78 → KILL (no trading)
+    regime_size_calm: float = Field(default=1.3, ge=0.0, le=2.0)
+    regime_size_normal: float = Field(default=1.0, ge=0.0, le=2.0)
+    regime_size_tension: float = Field(default=0.6, ge=0.0, le=2.0)
+    regime_size_crisis: float = Field(default=0.0, ge=0.0, le=2.0)
+
+    # Regime-adaptive z-threshold — tighter in volatile regimes
+    regime_z_calm: float = Field(default=0.6, ge=0.1, le=3.0)
+    regime_z_normal: float = Field(default=0.8, ge=0.1, le=3.0)
+    regime_z_tension: float = Field(default=1.0, ge=0.1, le=3.0)
+    regime_z_crisis: float = Field(default=99.0, ge=0.1, le=100.0)  # effectively disabled
+
     # Layer 3: Mean-Reversion Quality weights
     signal_mr_w_hl: float = Field(default=0.35, ge=0.0, le=1.0)
     signal_mr_w_adf: float = Field(default=0.40, ge=0.0, le=1.0)
