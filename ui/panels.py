@@ -1157,15 +1157,20 @@ def build_tearsheet_panel() -> dbc.Container:
                                 dbc.Col(dbc.Card(dbc.CardBody(id="card-attrib")), md=3),
                                 dbc.Col(dbc.Card(dbc.CardBody(id="card-exec")), md=3),
                             ], className="mb-3"),
-                            dcc.Graph(
-                                id="residual-xray",
-                                figure=go.Figure().update_layout(
-                                    template="plotly_dark",
-                                    paper_bgcolor="#1a1a2e",
-                                    plot_bgcolor="#1a1a2e",
-                                    height=520,
-                                    title="בחר סקטור מהרשימה למעלה",
+                            dcc.Loading(
+                                dcc.Graph(
+                                    id="residual-xray",
+                                    config={"displayModeBar": True},
+                                    style={"backgroundColor": "#1a1a2e"},
+                                    figure=go.Figure().update_layout(
+                                        template="plotly_dark",
+                                        paper_bgcolor="#1a1a2e",
+                                        plot_bgcolor="#1a1a2e",
+                                        height=520,
+                                        title="טוען נתוני סקטור...",
+                                    ),
                                 ),
+                                type="circle", color="#00bc8c",
                             ),
                         ])
                     ),

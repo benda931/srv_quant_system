@@ -1776,11 +1776,16 @@ def build_app() -> dash.Dash:
         row = row_full.iloc[0].to_dict()
         sector_name = row.get("sector_name", sector_ticker)
 
-        ts = engine.get_sector_tearsheet_series(sector_ticker)
+        try:
+            ts = engine.get_sector_tearsheet_series(sector_ticker)
+        except Exception as _ts_err:
+            logger.warning("Tear sheet data failed for %s: %s", sector_ticker, _ts_err)
+            fig = go.Figure()
+            fig.update_layout(**_dark, title=f"שגיאה בטעינת {sector_ticker}")
+            return fig, "—", "—", "—", "—"
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=ts.index, y=ts["residual_level"], name="Residual Level", mode="lines"))
-        fig.add_trace(go.Scatter(x=ts.index, y=ts["mean"], name="Rolling Mean", mode="lines"))
         fig.add_trace(go.Scatter(x=ts.index, y=ts["upper_2s"], name="+2σ", mode="lines"))
         fig.add_trace(go.Scatter(x=ts.index, y=ts["lower_2s"], name="-2σ", mode="lines"))
         fig.update_layout(
