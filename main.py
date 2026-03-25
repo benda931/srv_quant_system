@@ -1518,37 +1518,34 @@ def build_app() -> dash.Dash:
                 ]
             ),
             build_global_explanation_banner(),
-            dbc.Tabs(
+            dcc.Tabs(
                 id="main-tabs",
-                active_tab="tab-overview",
+                value="tab-overview",
                 children=[
-                    dbc.Tab(label="Overview",     tab_id="tab-overview"),
-                    dbc.Tab(label="DSS",          tab_id="tab-dss"),
-                    dbc.Tab(label="Scanner",      tab_id="tab-scanner"),
-                    dbc.Tab(label="Correlation",  tab_id="tab-correlation"),
-                    dbc.Tab(label="Tear Sheet",   tab_id="tab-tearsheet"),
-                    dbc.Tab(label="Stress",       tab_id="tab-stress"),
-                    dbc.Tab(label="Risk",         tab_id="tab-risk"),
-                    dbc.Tab(label="Corr&Vol",     tab_id="tab-corrvol"),
-                    dbc.Tab(label="P&L",          tab_id="tab-pnl"),
-                    dbc.Tab(label="Backtest",     tab_id="tab-backtest"),
-                    dbc.Tab(label="Decay",        tab_id="tab-decay"),
-                    dbc.Tab(label="Regime",       tab_id="tab-regime"),
-                    dbc.Tab(label="Health",       tab_id="tab-health"),
-                    dbc.Tab(label="Journal",      tab_id="tab-journal"),
-                    dbc.Tab(label="Portfolio",    tab_id="tab-portfolio"),
-                    dbc.Tab(label="Methodology",  tab_id="tab-methodology"),
-                    dbc.Tab(label="ML Insights",  tab_id="tab-ml"),
-                    dbc.Tab(label="Agents",       tab_id="tab-agents"),
+                    dcc.Tab(label="Overview",     value="tab-overview"),
+                    dcc.Tab(label="DSS",          value="tab-dss"),
+                    dcc.Tab(label="Scanner",      value="tab-scanner"),
+                    dcc.Tab(label="Correlation",  value="tab-correlation"),
+                    dcc.Tab(label="Tear Sheet",   value="tab-tearsheet"),
+                    dcc.Tab(label="Stress",       value="tab-stress"),
+                    dcc.Tab(label="Risk",         value="tab-risk"),
+                    dcc.Tab(label="Corr&Vol",     value="tab-corrvol"),
+                    dcc.Tab(label="P&L",          value="tab-pnl"),
+                    dcc.Tab(label="Backtest",     value="tab-backtest"),
+                    dcc.Tab(label="Decay",        value="tab-decay"),
+                    dcc.Tab(label="Regime",       value="tab-regime"),
+                    dcc.Tab(label="Health",       value="tab-health"),
+                    dcc.Tab(label="Journal",      value="tab-journal"),
+                    dcc.Tab(label="Portfolio",    value="tab-portfolio"),
+                    dcc.Tab(label="Methodology",  value="tab-methodology"),
+                    dcc.Tab(label="ML Insights",  value="tab-ml"),
+                    dcc.Tab(label="Agents",       value="tab-agents"),
                 ],
                 className="mt-2",
                 style={"flexWrap": "wrap"},
+                colors={"border": "#333", "primary": "#00bc8c", "background": "#1a1a2e"},
             ),
-            dcc.Loading(
-                html.Div(id="tab-content", className="mt-3"),
-                type="dot",
-                color="#0dcaf0",
-            ),
+            html.Div(id="tab-content", className="mt-3"),
             dcc.Store(id="master-store", data=master_df.to_dict("records")),
             dcc.Store(id="table-store", data=ui_outputs["table_df"].to_dict("records")),
             dcc.Store(id="backtest-store", data=None),
@@ -1648,9 +1645,10 @@ def build_app() -> dash.Dash:
     # ======================================================
     @app.callback(
         Output("tab-content", "children"),
-        Input("main-tabs", "active_tab"),
+        Input("main-tabs", "value"),
     )
     def render_tab(active_tab: str):
+        logger.info("render_tab called with active_tab=%r", active_tab)
         if active_tab == "tab-dss":
             _banner = _engine_error_banner("dss", "Decision Support System")
             return dcc.Loading(
@@ -1790,7 +1788,6 @@ def build_app() -> dash.Dash:
                             ]
                         ),
                         build_backtest_tab(_backtest_cached),  # Use cached result if available
-                        dcc.Loading(html.Div(id="backtest-output"), type="dot", color="#0dcaf0"),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -2179,7 +2176,7 @@ def build_app() -> dash.Dash:
         Output("card-attrib", "children"),
         Output("card-exec", "children"),
         Input("tearsheet-sector-dropdown", "value"),
-        Input("main-tabs", "active_tab"),
+        Input("main-tabs", "value"),
         State("master-store", "data"),
         prevent_initial_call=False,
     )
@@ -2622,6 +2619,6 @@ def build_app() -> dash.Dash:
 if __name__ == "__main__":
     app = build_app()
     try:
-        app.run(debug=False, host="0.0.0.0", port=8050)
+        app.run(debug=True, host="0.0.0.0", port=8050)
     except Exception:
-        app.run_server(debug=False, host="0.0.0.0", port=8050)
+        app.run_server(debug=True, host="0.0.0.0", port=8050)

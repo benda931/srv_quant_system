@@ -41,7 +41,12 @@
       "Bash(ls -la data/paper_portfolio.json agents/methodology/reports/*.json)",
       "Bash(curl -s http://localhost:8050)",
       "mcp__Claude_Preview__preview_start",
-      "Bash(ls -la data/*method*)"
+      "Bash(ls -la data/*method*)",
+      "Bash(taskkill //F //PID 35856)",
+      "Bash(taskkill //F //PID 5396)",
+      "Bash(taskkill //F //PID 9516)",
+      "Bash(netstat -ano)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8050)"
     ]
   }
 }
