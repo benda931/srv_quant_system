@@ -26,7 +26,7 @@ from agents.shared.agent_scheduler import AgentScheduler
 
 
 def run_cycle():
-    """Run one full agent cycle: Methodology -> Optimizer -> Math -> Architect with validation."""
+    """Run one full agent cycle: Methodology -> AutoImprove -> Optimizer -> Math -> Architect."""
     import json, shutil, subprocess, sys
     from pathlib import Path
 
@@ -38,7 +38,7 @@ def run_cycle():
     log.info("=== AGENT CYCLE START ===")
 
     # Step 1: Run Methodology Agent
-    log.info("Step 1/4: Running Methodology Agent...")
+    log.info("Step 1/5: Running Methodology Agent...")
     r1 = subprocess.run(
         [sys.executable, str(ROOT / "agents" / "methodology" / "agent_methodology.py"), "--once"],
         capture_output=True, text=True, timeout=600, cwd=str(ROOT)
@@ -48,8 +48,19 @@ def run_cycle():
         return {"status": "FAILED", "step": "methodology", "error": r1.stderr[-200:]}
     log.info("Methodology OK")
 
-    # Step 2: Run Optimizer Agent
-    log.info("Step 2/4: Running Optimizer Agent...")
+    # Step 2: Run Auto-Improve feedback loop
+    log.info("Step 2/5: Running Auto-Improve feedback loop...")
+    r_ai = subprocess.run(
+        [sys.executable, "-m", "agents.auto_improve", "--cycle"],
+        capture_output=True, text=True, timeout=900, cwd=str(ROOT)
+    )
+    if r_ai.returncode != 0:
+        log.warning("Auto-Improve failed (non-fatal): %s", r_ai.stderr[-200:] if r_ai.stderr else "no output")
+    else:
+        log.info("Auto-Improve OK")
+
+    # Step 3: Run Optimizer Agent
+    log.info("Step 3/5: Running Optimizer Agent...")
     # Backup settings first
     backup = settings_file.with_suffix(".py.cycle_backup")
     if settings_file.exists():
@@ -64,8 +75,8 @@ def run_cycle():
     else:
         log.info("Optimizer OK")
 
-    # Step 3: Run Math Agent
-    log.info("Step 3/4: Running Math Agent...")
+    # Step 4: Run Math Agent
+    log.info("Step 4/5: Running Math Agent...")
     r3 = subprocess.run(
         [sys.executable, str(ROOT / "agents" / "math" / "agent_math.py"), "--once"],
         capture_output=True, text=True, timeout=600, cwd=str(ROOT)
@@ -75,8 +86,8 @@ def run_cycle():
     else:
         log.info("Math OK")
 
-    # Step 4: Architect
-    log.info("Step 4/4: Running Architect Agent...")
+    # Step 5: Architect
+    log.info("Step 5/5: Running Architect Agent...")
     r4 = subprocess.run(
         [sys.executable, str(ROOT / "agents" / "architect" / "agent_architect.py"), "--once"],
         capture_output=True, text=True, timeout=600, cwd=str(ROOT)
@@ -90,6 +101,7 @@ def run_cycle():
     return {
         "status": "OK",
         "methodology": r1.returncode == 0,
+        "auto_improve": r_ai.returncode == 0,
         "optimizer": r2.returncode == 0,
         "math": r3.returncode == 0,
         "architect": r4.returncode == 0,
@@ -183,7 +195,7 @@ def main() -> int:
 
     # ── מחזור סוכנים מלא ────────────────────────────────────────────────
     if args.cycle:
-        log.info("מריץ מחזור סוכנים מלא (Methodology -> Optimizer -> Math -> Architect)")
+        log.info("Running full agent cycle (Methodology -> AutoImprove -> Optimizer -> Math -> Architect)")
         result = run_cycle()
         log.info("תוצאת מחזור: %s", result)
         return 0 if result.get("status") == "OK" else 1

@@ -101,12 +101,15 @@ class FeatureEngine:
         Returns a DataFrame with MultiIndex columns: (sector, feature_name).
         Rows are dates. NaN values are forward-filled then zero-filled.
 
-        Feature categories (~26 per sector):
+        Feature categories (~38 per sector):
           - Momentum: 5d/10d/21d/63d/126d relative returns (5)
           - Volatility: realized 10d/20d/60d + vol_ratio + vol_rank (5)
           - Mean-reversion: z-score 20d/60d/120d (3)
-          - Cross-sectional: rank within sectors, distance from median (2)
-          - Macro: VIX z, credit z (HYG-IEF), yield curve, DXY mom (4)
+          - Statistical: hurst, adf, skew, kurtosis, autocorr, max_dd (6)
+          - Capture: upside/downside capture vs SPY (2)
+          - Cross-sectional: rank, dist_median, z_cross_sector_rank, momentum_breadth (4)
+          - Macro: VIX z, credit z, yield curve, DXY mom (4)
+          - Macro interaction: vix_x_zscore, credit_x_vol (2)
           - Correlation: rolling corr vs SPY, sector dispersion, avg corr (3)
           - Technical: RSI-14, Bollinger Band width (2)
           - Calendar: month, day_of_week (2)
@@ -177,6 +180,42 @@ class FeatureEngine:
             else:
                 feat["corr_spy_60d"] = np.nan
 
+            # ----- Statistical features (6 features) -----
+            # Hurst exponent (rolling 120d) via R/S analysis
+            feat["hurst_exp"] = self._rolling_hurst(self.log_returns[s], window=120)
+
+            # ADF test statistic (rolling 120d) — simplified OLS version
+            feat["adf_stat"] = self._rolling_adf(self.log_returns[s].cumsum(), window=120)
+
+            # Rolling 60d skewness and kurtosis
+            feat["skew_60d"] = self.log_returns[s].rolling(60).skew()
+            feat["kurt_60d"] = self.log_returns[s].rolling(60).kurt()
+
+            # 5-day return autocorrelation (rolling 120d)
+            ret_5d = self.log_returns[s].rolling(5).sum()
+            feat["autocorr_5d"] = ret_5d.rolling(120).apply(
+                lambda x: pd.Series(x).autocorr(lag=1)
+                if len(x) > 5 else np.nan,
+                raw=False,
+            )
+
+            # Maximum drawdown over last 60 days
+            feat["max_dd_60d"] = self._rolling_max_drawdown(self.prices[s], window=60)
+
+            # ----- Capture ratios (2 features) -----
+            if self.spy_ticker in self.log_returns.columns:
+                feat["upside_capture"] = self._rolling_capture(
+                    self.log_returns[s], self.log_returns[self.spy_ticker],
+                    window=60, side="up"
+                )
+                feat["downside_capture"] = self._rolling_capture(
+                    self.log_returns[s], self.log_returns[self.spy_ticker],
+                    window=60, side="down"
+                )
+            else:
+                feat["upside_capture"] = np.nan
+                feat["downside_capture"] = np.nan
+
             features[s] = feat
 
         # ----- Cross-Sectional features (computed across all sectors) -----
@@ -193,6 +232,17 @@ class FeatureEngine:
             # Distance from cross-sectional median
             cs_median = mom_21d.median(axis=1)
             features[s]["cs_dist_median"] = mom_21d[s] - cs_median
+
+        # ----- Cross-Sectional: z_cross_sector_rank (1 feature per sector) -----
+        zscore_60d_all = pd.DataFrame(index=self.log_returns.index)
+        for s in self.sectors:
+            zscore_60d_all[s] = features[s]["zscore_60d"]
+        zscore_60d_rank = zscore_60d_all.rank(axis=1, pct=True)
+        for s in self.sectors:
+            features[s]["z_cross_sector_rank"] = zscore_60d_rank[s]
+
+        # ----- Cross-Sectional: momentum_breadth (same for all sectors) -----
+        momentum_breadth = (mom_21d > 0).sum(axis=1) / max(len(self.sectors), 1)
 
         # ----- Sector Dispersion (1 feature, same for all sectors) -----
         sector_disp = self.log_returns[self.sectors].rolling(20).std().mean(axis=1)
@@ -225,10 +275,19 @@ class FeatureEngine:
         for s in self.sectors:
             features[s]["sector_dispersion"] = sector_disp
             features[s]["avg_corr"] = avg_corr
+            features[s]["momentum_breadth"] = momentum_breadth
             features[s]["month"] = cal_month
             features[s]["day_of_week"] = cal_dow
             for col in macro_feat.columns:
                 features[s][col] = macro_feat[col]
+
+            # ----- Macro interaction features (2 features) -----
+            features[s]["vix_x_zscore"] = (
+                macro_feat["vix_z"] * features[s]["zscore_60d"]
+            )
+            features[s]["credit_x_vol"] = (
+                macro_feat["credit_z"] * features[s]["vol_ratio"]
+            )
 
         # Build final MultiIndex DataFrame
         panels = {}
@@ -252,6 +311,134 @@ class FeatureEngine:
             result.shape[1] // max(len(self.sectors), 1),
         )
 
+        return result
+
+    # ---------------------------------------------------------------------------
+    # Statistical feature helpers
+    # ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _rolling_hurst(series: pd.Series, window: int = 120) -> pd.Series:
+        """
+        Rolling Hurst exponent via R/S analysis.
+        H < 0.5 → mean-reverting, H = 0.5 → random walk, H > 0.5 → trending.
+        """
+        def _hurst_rs(x):
+            """Compute Hurst exponent for a single window using R/S analysis."""
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            n = len(x)
+            if n < 20:
+                return np.nan
+            # Use sub-series lengths
+            max_k = min(n // 2, 64)
+            if max_k < 8:
+                return np.nan
+            log_rs = []
+            log_n = []
+            for k in [8, 16, 32, 64]:
+                if k > max_k:
+                    break
+                n_sub = n // k
+                if n_sub < 1:
+                    continue
+                rs_vals = []
+                for i in range(n_sub):
+                    sub = x[i * k:(i + 1) * k]
+                    m = np.mean(sub)
+                    y = np.cumsum(sub - m)
+                    r = np.max(y) - np.min(y)
+                    s = np.std(sub, ddof=1)
+                    if s > 0:
+                        rs_vals.append(r / s)
+                if rs_vals:
+                    log_rs.append(np.log(np.mean(rs_vals)))
+                    log_n.append(np.log(k))
+            if len(log_rs) < 2:
+                return np.nan
+            # OLS fit: log(R/S) = H * log(n) + c
+            log_n = np.array(log_n)
+            log_rs = np.array(log_rs)
+            slope = np.polyfit(log_n, log_rs, 1)[0]
+            return np.clip(slope, 0.0, 1.0)
+
+        return series.rolling(window).apply(_hurst_rs, raw=True)
+
+    @staticmethod
+    def _rolling_adf(series: pd.Series, window: int = 120) -> pd.Series:
+        """
+        Simplified rolling ADF test statistic.
+        OLS regression: diff(x) = alpha + beta * lag(x) + epsilon.
+        Returns t-stat on beta. More negative → more stationary.
+        """
+        def _adf_simple(x):
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            n = len(x)
+            if n < 20:
+                return np.nan
+            dx = np.diff(x)
+            lag_x = x[:-1]
+            n_obs = len(dx)
+            # OLS: dx = a + b * lag_x
+            X = np.column_stack([np.ones(n_obs), lag_x])
+            try:
+                beta = np.linalg.lstsq(X, dx, rcond=None)[0]
+                resid = dx - X @ beta
+                sse = np.sum(resid ** 2)
+                mse = sse / max(n_obs - 2, 1)
+                var_beta = mse * np.linalg.inv(X.T @ X)
+                se_b = np.sqrt(max(var_beta[1, 1], 1e-16))
+                return beta[1] / se_b
+            except (np.linalg.LinAlgError, ValueError):
+                return np.nan
+
+        return series.rolling(window).apply(_adf_simple, raw=True)
+
+    @staticmethod
+    def _rolling_max_drawdown(price_series: pd.Series, window: int = 60) -> pd.Series:
+        """Rolling maximum drawdown (negative value, 0 = no drawdown)."""
+        def _max_dd(x):
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            if len(x) < 2 or x[0] <= 0:
+                return np.nan
+            cummax = np.maximum.accumulate(x)
+            dd = (x - cummax) / np.where(cummax > 0, cummax, 1.0)
+            return float(np.min(dd))
+
+        return price_series.rolling(window).apply(_max_dd, raw=True)
+
+    @staticmethod
+    def _rolling_capture(
+        sector_ret: pd.Series,
+        bench_ret: pd.Series,
+        window: int = 60,
+        side: str = "up",
+    ) -> pd.Series:
+        """
+        Rolling upside or downside capture ratio vs benchmark.
+        upside_capture = mean(sector_ret | bench_ret > 0) / mean(bench_ret | bench_ret > 0)
+        """
+        result = pd.Series(np.nan, index=sector_ret.index)
+        s_vals = sector_ret.values
+        b_vals = bench_ret.values
+        for i in range(window, len(s_vals)):
+            s_w = s_vals[i - window:i]
+            b_w = b_vals[i - window:i]
+            mask = np.isfinite(s_w) & np.isfinite(b_w)
+            s_w = s_w[mask]
+            b_w = b_w[mask]
+            if side == "up":
+                filt = b_w > 0
+            else:
+                filt = b_w < 0
+            if np.sum(filt) < 5:
+                continue
+            bench_mean = np.mean(b_w[filt])
+            if abs(bench_mean) < 1e-10:
+                continue
+            result.iloc[i] = np.mean(s_w[filt]) / bench_mean
         return result
 
     def _compute_macro_features(self) -> pd.DataFrame:
