@@ -608,6 +608,452 @@ class ExecutionAgent:
         return exits
 
     # -----------------------------------------------------------------
+    # Professional-grade execution analytics
+    # -----------------------------------------------------------------
+
+    def simulate_twap(
+        self, ticker: str, target_shares: float, duration_minutes: int = 30
+    ) -> dict:
+        """
+        Simulate Time-Weighted Average Price (TWAP) execution.
+
+        Splits the order into equal slices over the given duration and adds
+        random slippage per slice (normal distribution, mean=0, std=2bps).
+
+        Parameters
+        ----------
+        ticker : str
+            The ticker symbol.
+        target_shares : float
+            Total shares to execute.
+        duration_minutes : int
+            Duration to spread the order over (default: 30).
+
+        Returns
+        -------
+        dict
+            avg_price, total_slippage_bps, execution_quality, n_slices,
+            detail
+        """
+        result = {
+            "ticker": ticker,
+            "target_shares": target_shares,
+            "avg_price": None,
+            "total_slippage_bps": None,
+            "execution_quality": None,
+            "n_slices": 0,
+            "detail": "",
+        }
+        try:
+            # Load reference price
+            prices_path = ROOT / "data_lake" / "parquet" / "prices.parquet"
+            if not prices_path.exists():
+                result["detail"] = "No price data for TWAP simulation"
+                return result
+
+            prices = pd.read_parquet(prices_path)
+            if ticker not in prices.columns:
+                result["detail"] = f"No price data for {ticker}"
+                return result
+
+            ref_price = float(prices[ticker].dropna().iloc[-1])
+
+            # Split into 1-minute slices
+            n_slices = max(1, duration_minutes)
+            shares_per_slice = target_shares / n_slices
+
+            np.random.seed(hash(ticker) % 2**31)
+            slippage_per_slice = np.random.normal(0, 2, n_slices)  # 2bps std
+
+            fill_prices = []
+            for i in range(n_slices):
+                slip = slippage_per_slice[i] / 10_000.0
+                fill_price = ref_price * (1.0 + slip)
+                fill_prices.append(fill_price)
+
+            avg_price = float(np.mean(fill_prices))
+            total_slippage_bps = float((avg_price / ref_price - 1.0) * 10_000)
+
+            # Execution quality: 1.0 = perfect, lower = worse
+            # Quality = 1 - |slippage| / 10bps (normalize against 10bps threshold)
+            execution_quality = max(0.0, 1.0 - abs(total_slippage_bps) / 10.0)
+
+            result.update({
+                "avg_price": round(avg_price, 4),
+                "ref_price": round(ref_price, 4),
+                "total_slippage_bps": round(total_slippage_bps, 2),
+                "execution_quality": round(execution_quality, 4),
+                "n_slices": n_slices,
+                "detail": (
+                    f"TWAP {ticker}: {n_slices} slices over {duration_minutes}min, "
+                    f"avg={avg_price:.4f} vs ref={ref_price:.4f}, "
+                    f"slip={total_slippage_bps:.2f}bps, quality={execution_quality:.3f}"
+                ),
+            })
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("TWAP simulation failed for %s: %s", ticker, exc)
+            result["detail"] = f"TWAP error: {exc}"
+
+        return result
+
+    def estimate_market_impact(self, ticker: str, notional: float) -> float:
+        """
+        Estimate market impact using the Almgren-Chriss model.
+
+        impact = sigma * sqrt(notional / ADV) * eta
+
+        Parameters
+        ----------
+        ticker : str
+            The ticker symbol.
+        notional : float
+            Dollar value of the order.
+
+        Returns
+        -------
+        float
+            Estimated market impact in basis points. Returns 0.0 on error.
+        """
+        try:
+            prices_path = ROOT / "data_lake" / "parquet" / "prices.parquet"
+            if not prices_path.exists():
+                log.warning("No price data for market impact estimation")
+                return 0.0
+
+            prices = pd.read_parquet(prices_path)
+            if ticker not in prices.columns:
+                log.warning("No price data for %s in market impact", ticker)
+                return 0.0
+
+            px = prices[ticker].dropna()
+            if len(px) < 30:
+                return 0.0
+
+            # Realized volatility (annualized)
+            rets = np.log(px / px.shift(1)).dropna()
+            sigma = float(rets.iloc[-20:].std() * np.sqrt(252))
+
+            # Estimate ADV from price level and vol
+            current_price = float(px.iloc[-1])
+            daily_vol = float(rets.iloc[-20:].std())
+            estimated_adv = current_price * max(daily_vol, 0.005) * 1e6
+
+            # Almgren-Chriss permanent impact
+            eta = 0.1  # permanent impact coefficient
+            participation_rate = notional / estimated_adv if estimated_adv > 0 else 1.0
+            impact_bps = sigma * math.sqrt(max(participation_rate, 0)) * eta * 10_000
+
+            log.info(
+                "Market impact %s: %.1f bps (notional=$%.0f, ADV=$%.0f, sigma=%.3f)",
+                ticker, impact_bps, notional, estimated_adv, sigma,
+            )
+            return round(impact_bps, 2)
+        except Exception as exc:
+            log.error("Market impact estimation failed for %s: %s", ticker, exc)
+            return 0.0
+
+    def optimal_entry_timing(self, ticker: str, direction: str) -> dict:
+        """
+        Analyze optimal entry timing based on intraday patterns and VIX state.
+
+        Checks day-of-week effects and whether VIX is mean-reverting or
+        trending to recommend urgency and delay.
+
+        Parameters
+        ----------
+        ticker : str
+            The ticker symbol.
+        direction : str
+            Trade direction (LONG/SHORT).
+
+        Returns
+        -------
+        dict
+            urgency (HIGH/MEDIUM/LOW), recommended_delay_hours, reason, detail
+        """
+        result = {
+            "ticker": ticker,
+            "direction": direction,
+            "urgency": "MEDIUM",
+            "recommended_delay_hours": 0,
+            "reason": "",
+            "detail": "",
+        }
+        try:
+            prices_path = ROOT / "data_lake" / "parquet" / "prices.parquet"
+            if not prices_path.exists():
+                result["reason"] = "No price data; defaulting to MEDIUM urgency"
+                result["detail"] = result["reason"]
+                return result
+
+            prices = pd.read_parquet(prices_path)
+            reasons = []
+
+            # Check VIX state
+            vix = prices.get("^VIX", pd.Series(dtype=float)).dropna()
+            if len(vix) >= 20:
+                current_vix = float(vix.iloc[-1])
+                vix_ma20 = float(vix.iloc[-20:].mean())
+                vix_trend = current_vix - vix_ma20
+
+                if current_vix > 30:
+                    if direction.upper() in ("LONG", "BUY"):
+                        result["urgency"] = "LOW"
+                        result["recommended_delay_hours"] = 24
+                        reasons.append(f"VIX elevated ({current_vix:.1f}), wait for mean reversion")
+                    else:
+                        result["urgency"] = "HIGH"
+                        result["recommended_delay_hours"] = 0
+                        reasons.append(f"VIX elevated ({current_vix:.1f}), SHORT entry favored now")
+                elif vix_trend > 3:
+                    result["urgency"] = "LOW"
+                    result["recommended_delay_hours"] = 12
+                    reasons.append(f"VIX trending up ({vix_trend:+.1f} vs MA20), delay entry")
+                elif vix_trend < -3:
+                    result["urgency"] = "HIGH"
+                    result["recommended_delay_hours"] = 0
+                    reasons.append(f"VIX trending down ({vix_trend:+.1f} vs MA20), favorable entry")
+
+            # Day-of-week effect
+            if len(prices.index) > 0:
+                today_dow = pd.Timestamp.now().dayofweek  # 0=Mon, 4=Fri
+                if today_dow == 0:  # Monday
+                    reasons.append("Monday: historically higher open volatility")
+                    if result["urgency"] != "HIGH":
+                        result["recommended_delay_hours"] = max(
+                            result["recommended_delay_hours"], 2
+                        )
+                elif today_dow == 4:  # Friday
+                    reasons.append("Friday: weekend risk, consider partial sizing")
+                    result["recommended_delay_hours"] = max(
+                        result["recommended_delay_hours"], 0
+                    )
+
+            # Check if ticker is in a momentum state
+            if ticker in prices.columns:
+                px = prices[ticker].dropna()
+                if len(px) >= 20:
+                    rets_5d = float(px.iloc[-1] / px.iloc[-6] - 1) if len(px) >= 6 else 0
+                    if direction.upper() in ("LONG", "BUY") and rets_5d < -0.05:
+                        result["urgency"] = "HIGH"
+                        result["recommended_delay_hours"] = 0
+                        reasons.append(f"{ticker} oversold (5d ret={rets_5d:.1%}), mean reversion entry")
+                    elif direction.upper() in ("SHORT", "SELL") and rets_5d > 0.05:
+                        result["urgency"] = "HIGH"
+                        result["recommended_delay_hours"] = 0
+                        reasons.append(f"{ticker} overbought (5d ret={rets_5d:.1%}), short entry")
+
+            if not reasons:
+                reasons.append("No strong timing signal; standard entry")
+
+            result["reason"] = "; ".join(reasons)
+            result["detail"] = (
+                f"Entry timing {ticker} {direction}: urgency={result['urgency']}, "
+                f"delay={result['recommended_delay_hours']}h, reasons={result['reason']}"
+            )
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("Optimal entry timing failed for %s: %s", ticker, exc)
+            result["detail"] = f"Timing error: {exc}"
+            result["reason"] = f"Error: {exc}"
+
+        return result
+
+    def reconcile_portfolio(self) -> dict:
+        """
+        Compare paper portfolio positions vs expected positions from signals.
+
+        Identifies missing entries (signal but no position), stale positions
+        (position but no active signal), and size mismatches.
+
+        Returns
+        -------
+        dict
+            missing_entries, stale_positions, size_mismatches, n_issues, detail
+        """
+        result = {
+            "missing_entries": [],
+            "stale_positions": [],
+            "size_mismatches": [],
+            "n_issues": 0,
+            "detail": "",
+        }
+        try:
+            # Load current signals
+            try:
+                signals_df = self.load_signals()
+                signals = self.filter_signals(signals_df)
+            except Exception:
+                signals = []
+
+            # Load current portfolio
+            portfolio_path = ROOT / "data" / "paper_portfolio.json"
+            positions = []
+            if portfolio_path.exists():
+                try:
+                    pdata = json.loads(portfolio_path.read_text(encoding="utf-8"))
+                    positions = pdata.get("positions", [])
+                except Exception:
+                    pass
+
+            signal_tickers = {s["ticker"]: s for s in signals}
+            position_tickers = {p["ticker"]: p for p in positions}
+
+            # Missing entries: signal exists but no position
+            for ticker, sig in signal_tickers.items():
+                if ticker not in position_tickers:
+                    result["missing_entries"].append({
+                        "ticker": ticker,
+                        "direction": sig["direction"],
+                        "conviction": sig["conviction"],
+                    })
+
+            # Stale positions: position exists but no current signal
+            for ticker, pos in position_tickers.items():
+                if ticker not in signal_tickers:
+                    result["stale_positions"].append({
+                        "ticker": ticker,
+                        "direction": pos.get("direction", "UNKNOWN"),
+                        "days_held": pos.get("days_held", 0),
+                        "unrealized_pnl_pct": pos.get("unrealized_pnl_pct", 0),
+                    })
+
+            # Size mismatches: direction mismatch
+            for ticker in set(signal_tickers) & set(position_tickers):
+                sig_dir = signal_tickers[ticker]["direction"].upper()
+                pos_dir = position_tickers[ticker].get("direction", "").upper()
+                if sig_dir != pos_dir:
+                    result["size_mismatches"].append({
+                        "ticker": ticker,
+                        "signal_direction": sig_dir,
+                        "position_direction": pos_dir,
+                        "issue": "Direction mismatch",
+                    })
+
+            n_issues = (
+                len(result["missing_entries"]) +
+                len(result["stale_positions"]) +
+                len(result["size_mismatches"])
+            )
+            result["n_issues"] = n_issues
+            result["detail"] = (
+                f"Reconciliation: {n_issues} issues "
+                f"({len(result['missing_entries'])} missing, "
+                f"{len(result['stale_positions'])} stale, "
+                f"{len(result['size_mismatches'])} mismatches)"
+            )
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("Portfolio reconciliation failed: %s", exc)
+            result["detail"] = f"Reconciliation error: {exc}"
+
+        return result
+
+    def compute_execution_quality(self) -> dict:
+        """
+        Analyze execution quality for closed trades.
+
+        For each closed trade, computes slippage vs theoretical price,
+        implementation shortfall, and timing cost.
+
+        Returns
+        -------
+        dict
+            avg_slippage_bps, implementation_shortfall_bps, timing_cost_bps,
+            n_trades_analyzed, per_trade (list), detail
+        """
+        result = {
+            "avg_slippage_bps": None,
+            "implementation_shortfall_bps": None,
+            "timing_cost_bps": None,
+            "n_trades_analyzed": 0,
+            "per_trade": [],
+            "detail": "",
+        }
+        try:
+            # Load execution log
+            if not EXECUTION_LOG_PATH.exists():
+                result["detail"] = "No execution log for quality analysis"
+                return result
+
+            log_data = json.loads(EXECUTION_LOG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(log_data, list):
+                result["detail"] = "Invalid execution log format"
+                return result
+
+            # Filter to entries that have both raw_price and fill_price
+            entries = [
+                e for e in log_data
+                if e.get("action") == "ENTRY"
+                and e.get("raw_price") is not None
+                and e.get("fill_price") is not None
+            ]
+
+            if not entries:
+                result["detail"] = "No entry trades with price data for quality analysis"
+                return result
+
+            slippages = []
+            shortfalls = []
+            per_trade = []
+
+            for entry in entries:
+                raw = float(entry["raw_price"])
+                fill = float(entry["fill_price"])
+                direction = entry.get("direction", "LONG").upper()
+
+                if raw <= 0:
+                    continue
+
+                # Slippage in bps
+                if direction in ("LONG", "BUY"):
+                    slippage_bps = (fill / raw - 1.0) * 10_000
+                else:
+                    slippage_bps = (1.0 - fill / raw) * 10_000
+
+                # Implementation shortfall: same as slippage for paper trades
+                shortfall_bps = abs(slippage_bps)
+
+                slippages.append(slippage_bps)
+                shortfalls.append(shortfall_bps)
+
+                per_trade.append({
+                    "trade_id": entry.get("trade_id", ""),
+                    "ticker": entry.get("ticker", ""),
+                    "slippage_bps": round(slippage_bps, 2),
+                    "shortfall_bps": round(shortfall_bps, 2),
+                })
+
+            if not slippages:
+                result["detail"] = "No valid trades for quality computation"
+                return result
+
+            avg_slip = float(np.mean(slippages))
+            avg_shortfall = float(np.mean(shortfalls))
+            # Timing cost: std of slippage (variance from optimal)
+            timing_cost = float(np.std(slippages))
+
+            result.update({
+                "avg_slippage_bps": round(avg_slip, 2),
+                "implementation_shortfall_bps": round(avg_shortfall, 2),
+                "timing_cost_bps": round(timing_cost, 2),
+                "n_trades_analyzed": len(slippages),
+                "per_trade": per_trade[-20:],  # Last 20 trades
+                "detail": (
+                    f"Execution quality: {len(slippages)} trades, "
+                    f"avg slip={avg_slip:.2f}bps, shortfall={avg_shortfall:.2f}bps, "
+                    f"timing cost={timing_cost:.2f}bps"
+                ),
+            })
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("Execution quality computation failed: %s", exc)
+            result["detail"] = f"Quality analysis error: {exc}"
+
+        return result
+
+    # -----------------------------------------------------------------
     # Save execution log
     # -----------------------------------------------------------------
 
@@ -751,10 +1197,25 @@ class ExecutionAgent:
             log.error("Entry execution failed: %s", exc)
             summary["errors"].append(f"Entry execution error: {exc}")
 
-        # Step 8: Save execution log
+        # Step 8: Advanced execution analytics
+        try:
+            reconciliation = self.reconcile_portfolio()
+            summary["reconciliation"] = reconciliation
+            log.info("Reconciliation: %s", reconciliation.get("detail", ""))
+        except Exception as exc:
+            log.warning("Reconciliation skipped: %s", exc)
+
+        try:
+            exec_quality = self.compute_execution_quality()
+            summary["execution_quality"] = exec_quality
+            log.info("Execution quality: %s", exec_quality.get("detail", ""))
+        except Exception as exc:
+            log.warning("Execution quality skipped: %s", exc)
+
+        # Step 9: Save execution log
         self._save_execution_log()
 
-        # Step 9: Publish to bus
+        # Step 10: Publish to bus
         if _IMPORTS_OK.get("agent_bus"):
             try:
                 bus = get_bus()

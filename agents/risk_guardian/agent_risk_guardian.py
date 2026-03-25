@@ -36,6 +36,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from scipy import stats as scipy_stats
 
 # -- Root path ----------------------------------------------------------------
 ROOT = Path(__file__).resolve().parent.parent.parent  # srv_quant_system/
@@ -492,6 +493,439 @@ class RiskGuardian:
         return result
 
     # -----------------------------------------------------------------
+    # Professional-grade risk analytics
+    # -----------------------------------------------------------------
+
+    def stress_test_correlation(self) -> dict:
+        """
+        Simulate crisis scenario where all pairwise correlations spike to 0.9.
+
+        Computes portfolio VaR under both normal and stressed correlation
+        matrices and returns the stress multiplier.
+
+        Returns
+        -------
+        dict
+            current_var, stressed_var, multiplier, detail
+        """
+        result = {
+            "check": "correlation_stress_test",
+            "current_var": None,
+            "stressed_var": None,
+            "multiplier": None,
+            "detail": "",
+        }
+        try:
+            weights = self._get_portfolio_weights()
+            if not weights or self._prices is None:
+                result["detail"] = "Insufficient data for correlation stress test"
+                return result
+
+            tickers = [t for t in weights if t in self._prices.columns]
+            if len(tickers) < 2:
+                result["detail"] = "Need at least 2 positions for stress test"
+                return result
+
+            log_rets = np.log(
+                self._prices[tickers] / self._prices[tickers].shift(1)
+            ).iloc[1:].dropna()
+
+            if len(log_rets) < 30:
+                result["detail"] = "Insufficient return history for stress test"
+                return result
+
+            w = np.array([weights[t] for t in tickers])
+            vols = log_rets.std().values
+
+            # Current covariance matrix
+            cov_current = log_rets.cov().values
+            current_var = float(np.sqrt(w @ cov_current @ w) * 1.645)  # 95% VaR
+
+            # Stressed covariance: set all correlations to 0.9
+            n = len(tickers)
+            stressed_corr = np.full((n, n), 0.9)
+            np.fill_diagonal(stressed_corr, 1.0)
+            stressed_cov = np.outer(vols, vols) * stressed_corr
+            stressed_var = float(np.sqrt(w @ stressed_cov @ w) * 1.645)
+
+            multiplier = stressed_var / current_var if current_var > 1e-10 else 1.0
+
+            result["current_var"] = round(current_var, 6)
+            result["stressed_var"] = round(stressed_var, 6)
+            result["multiplier"] = round(multiplier, 2)
+            result["detail"] = (
+                f"Stress test: current VaR={current_var:.4%}, "
+                f"stressed VaR={stressed_var:.4%}, multiplier={multiplier:.1f}x"
+            )
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("Correlation stress test failed: %s", exc)
+            result["detail"] = f"Stress test error: {exc}"
+
+        return result
+
+    def compute_tail_risk(self) -> dict:
+        """
+        Fit Generalized Pareto Distribution to the worst 5% of portfolio returns.
+
+        Computes Expected Shortfall at 99% and 99.5%, and tail loss probabilities
+        for drawdowns > 3%, > 5%, > 10%.
+
+        Returns
+        -------
+        dict
+            es_99, es_995, prob_loss_3pct, prob_loss_5pct, prob_loss_10pct,
+            gpd_shape, gpd_scale, detail
+        """
+        result = {
+            "check": "tail_risk_evt",
+            "es_99": None,
+            "es_995": None,
+            "prob_loss_3pct": None,
+            "prob_loss_5pct": None,
+            "prob_loss_10pct": None,
+            "gpd_shape": None,
+            "gpd_scale": None,
+            "detail": "",
+        }
+        try:
+            weights = self._get_portfolio_weights()
+            if not weights or self._prices is None:
+                result["detail"] = "Insufficient data for tail risk analysis"
+                return result
+
+            tickers = [t for t in weights if t in self._prices.columns]
+            if not tickers:
+                result["detail"] = "No matching tickers for tail risk"
+                return result
+
+            log_rets = np.log(
+                self._prices[tickers] / self._prices[tickers].shift(1)
+            ).iloc[1:].dropna()
+
+            if len(log_rets) < 60:
+                result["detail"] = "Insufficient history for EVT analysis"
+                return result
+
+            # Portfolio returns
+            w = np.array([weights[t] for t in tickers])
+            port_rets = log_rets.values @ w
+            losses = -port_rets[port_rets < 0]
+
+            if len(losses) < 20:
+                result["detail"] = "Not enough loss observations for EVT"
+                return result
+
+            # Threshold: 95th percentile of losses (worst 5%)
+            threshold = float(np.percentile(losses, 95))
+            exceedances = losses[losses > threshold] - threshold
+
+            if len(exceedances) < 5:
+                result["detail"] = "Too few tail exceedances for GPD fit"
+                return result
+
+            # Fit GPD using scipy
+            shape, loc, scale = scipy_stats.genpareto.fit(exceedances, floc=0)
+
+            # Expected shortfall computation via GPD
+            n_total = len(port_rets)
+            n_exceed = len(exceedances)
+            exceed_prob = n_exceed / len(losses)
+
+            # ES at given confidence level using GPD
+            def _gpd_es(confidence: float) -> float:
+                """Compute ES at given confidence from fitted GPD."""
+                p = 1 - confidence
+                # VaR from GPD
+                if abs(shape) < 1e-10:
+                    var_gpd = threshold + scale * np.log(exceed_prob / p)
+                else:
+                    var_gpd = threshold + (scale / shape) * (
+                        (exceed_prob / p) ** shape - 1
+                    )
+                # ES = VaR / (1 - shape) + (scale - shape * threshold) / (1 - shape)
+                if shape < 1.0:
+                    es = var_gpd / (1 - shape) + (scale - shape * threshold) / (1 - shape)
+                else:
+                    es = var_gpd * 1.5  # fallback for extreme shape
+                return float(es)
+
+            es_99 = _gpd_es(0.99)
+            es_995 = _gpd_es(0.995)
+
+            # Tail loss probabilities from empirical distribution
+            all_losses = -port_rets
+            prob_3 = float(np.mean(all_losses > 0.03))
+            prob_5 = float(np.mean(all_losses > 0.05))
+            prob_10 = float(np.mean(all_losses > 0.10))
+
+            result.update({
+                "es_99": round(es_99, 6),
+                "es_995": round(es_995, 6),
+                "prob_loss_3pct": round(prob_3, 6),
+                "prob_loss_5pct": round(prob_5, 6),
+                "prob_loss_10pct": round(prob_10, 6),
+                "gpd_shape": round(float(shape), 4),
+                "gpd_scale": round(float(scale), 6),
+                "detail": (
+                    f"Tail risk: ES99={es_99:.4%}, ES99.5={es_995:.4%}, "
+                    f"P(loss>3%)={prob_3:.4%}, P(loss>5%)={prob_5:.4%}, "
+                    f"GPD shape={shape:.3f}"
+                ),
+            })
+            log.info(result["detail"])
+        except Exception as exc:
+            log.error("Tail risk analysis failed: %s", exc)
+            result["detail"] = f"Tail risk error: {exc}"
+
+        return result
+
+    def monitor_portfolio_greeks(self) -> dict:
+        """
+        Estimate portfolio delta, beta, and gamma (convexity) vs SPY.
+
+        Uses OLS regression of portfolio returns on SPY returns. Gamma is
+        estimated from a quadratic regression term.
+
+        Returns
+        -------
+        dict
+            delta, beta, gamma, risk_flag (bool), detail
+        """
+        result = {
+            "check": "portfolio_greeks",
+            "delta": None,
+            "beta": None,
+            "gamma": None,
+            "risk_flag": False,
+            "detail": "",
+        }
+        try:
+            weights = self._get_portfolio_weights()
+            if not weights or self._prices is None:
+                result["detail"] = "Insufficient data for portfolio greeks"
+                return result
+
+            if "SPY" not in self._prices.columns:
+                result["detail"] = "SPY not available for greeks computation"
+                return result
+
+            tickers = [t for t in weights if t in self._prices.columns]
+            if not tickers:
+                result["detail"] = "No matching tickers for greeks"
+                return result
+
+            log_rets = np.log(
+                self._prices[tickers + ["SPY"]] / self._prices[tickers + ["SPY"]].shift(1)
+            ).iloc[1:].dropna()
+
+            if len(log_rets) < 30:
+                result["detail"] = "Insufficient history for greeks estimation"
+                return result
+
+            w = np.array([weights[t] for t in tickers])
+            port_rets = log_rets[tickers].values @ w
+            spy_rets = log_rets["SPY"].values
+
+            # Linear regression: port_ret = alpha + beta * spy_ret
+            # Use numpy polyfit for simplicity
+            beta_coeffs = np.polyfit(spy_rets, port_rets, 1)
+            beta = float(beta_coeffs[0])
+            delta = beta  # For equity portfolios, delta ~ beta
+
+            # Quadratic regression for gamma (convexity)
+            quad_coeffs = np.polyfit(spy_rets, port_rets, 2)
+            gamma = float(quad_coeffs[0])  # coefficient of x^2
+
+            risk_flag = abs(beta) > 1.5
+
+            result.update({
+                "delta": round(delta, 4),
+                "beta": round(beta, 4),
+                "gamma": round(gamma, 4),
+                "risk_flag": risk_flag,
+                "detail": (
+                    f"Portfolio greeks: delta={delta:.3f}, beta={beta:.3f}, "
+                    f"gamma={gamma:.3f}"
+                    + (f" [WARNING: |beta|={abs(beta):.2f} > 1.5]" if risk_flag else "")
+                ),
+            })
+            log.info(result["detail"])
+
+            if risk_flag:
+                log.warning("Portfolio beta exceeds safe bounds: %.3f", beta)
+
+        except Exception as exc:
+            log.error("Portfolio greeks computation failed: %s", exc)
+            result["detail"] = f"Greeks error: {exc}"
+
+        return result
+
+    def check_liquidity_risk(self) -> dict:
+        """
+        Estimate liquidity risk for each position.
+
+        Uses price volatility as a proxy for average daily volume (ADV).
+        Flags positions that are > 5% of estimated ADV or would take > 3 days
+        to unwind.
+
+        Returns
+        -------
+        dict
+            positions_at_risk (list), n_flagged, detail
+        """
+        result = {
+            "check": "liquidity_risk",
+            "positions_at_risk": [],
+            "n_flagged": 0,
+            "detail": "",
+        }
+        try:
+            positions = self._get_positions()
+            if not positions or self._prices is None:
+                result["detail"] = "No positions or price data for liquidity check"
+                return result
+
+            flagged = []
+            for pos in positions:
+                ticker = pos.get("ticker", "")
+                notional = float(pos.get("notional", 0))
+                if ticker not in self._prices.columns or notional <= 0:
+                    continue
+
+                px = self._prices[ticker].dropna()
+                if len(px) < 30:
+                    continue
+
+                current_price = float(px.iloc[-1])
+                # Estimate ADV from realized volatility and price level
+                # ADV ~ price * daily_vol * empirical_volume_factor
+                # We use vol as proxy: higher vol ETFs tend to have higher turnover
+                daily_vol = float(px.pct_change().iloc[-20:].std())
+                # Conservative ADV estimate: assume turnover ~ 1% of market cap proxy
+                # For sector ETFs, rough ADV in dollar terms
+                estimated_adv_dollars = current_price * max(daily_vol, 0.005) * 1e6
+
+                pct_of_adv = notional / estimated_adv_dollars if estimated_adv_dollars > 0 else 1.0
+                days_to_unwind = notional / (estimated_adv_dollars * 0.10) if estimated_adv_dollars > 0 else 99
+
+                if pct_of_adv > 0.05 or days_to_unwind > 3:
+                    flagged.append({
+                        "ticker": ticker,
+                        "notional": round(notional, 0),
+                        "estimated_adv": round(estimated_adv_dollars, 0),
+                        "pct_of_adv": round(pct_of_adv, 4),
+                        "days_to_unwind": round(days_to_unwind, 1),
+                        "flag_reason": (
+                            f"{'ADV>' if pct_of_adv > 0.05 else ''}"
+                            f"{'5%' if pct_of_adv > 0.05 else ''}"
+                            f"{', ' if pct_of_adv > 0.05 and days_to_unwind > 3 else ''}"
+                            f"{'unwind>' if days_to_unwind > 3 else ''}"
+                            f"{'3d' if days_to_unwind > 3 else ''}"
+                        ),
+                    })
+
+            result["positions_at_risk"] = flagged
+            result["n_flagged"] = len(flagged)
+            if flagged:
+                tickers_str = ", ".join(f["ticker"] for f in flagged)
+                result["detail"] = f"Liquidity risk: {len(flagged)} positions flagged ({tickers_str})"
+                log.warning(result["detail"])
+            else:
+                result["detail"] = "Liquidity OK: all positions within ADV limits"
+                log.info(result["detail"])
+        except Exception as exc:
+            log.error("Liquidity risk check failed: %s", exc)
+            result["detail"] = f"Liquidity check error: {exc}"
+
+        return result
+
+    def format_alert(self, status: dict) -> str:
+        """
+        Create a formatted alert message suitable for Telegram/email.
+
+        Includes risk level, breaches, recommendations, and portfolio snapshot
+        in both Hebrew and English.
+
+        Parameters
+        ----------
+        status : dict
+            The risk status dict from run_all_checks().
+
+        Returns
+        -------
+        str
+            Formatted multi-line alert message.
+        """
+        try:
+            level = status.get("level", "UNKNOWN")
+            ts = status.get("timestamp", datetime.now(timezone.utc).isoformat())
+            breaches = status.get("breaches", [])
+            recommendations = status.get("recommendations", [])
+            n_pos = status.get("n_positions", 0)
+            capital = status.get("capital", 0)
+
+            level_emoji_map = {
+                "GREEN": "V",
+                "YELLOW": "!",
+                "RED": "X",
+                "BLACK": "XXX",
+            }
+            level_icon = level_emoji_map.get(level, "?")
+
+            # Hebrew level names
+            level_heb = {
+                "GREEN": "ירוק - תקין",
+                "YELLOW": "צהוב - אזהרה",
+                "RED": "אדום - עצור מסחר",
+                "BLACK": "שחור - חירום מוחלט",
+            }
+
+            lines = [
+                f"=== SRV Risk Guardian Alert ===",
+                f"Status: [{level_icon}] {level}",
+                f"סטטוס: {level_heb.get(level, level)}",
+                f"Time: {ts[:19]}",
+                f"",
+                f"--- Portfolio Snapshot ---",
+                f"Positions: {n_pos}",
+                f"Capital: ${capital:,.0f}",
+                f"",
+            ]
+
+            if breaches:
+                lines.append("--- Breaches / הפרות ---")
+                for i, b in enumerate(breaches, 1):
+                    lines.append(f"  {i}. {b}")
+                lines.append("")
+
+            if recommendations:
+                lines.append("--- Recommendations / המלצות ---")
+                for r in recommendations:
+                    lines.append(f"  - {r}")
+                lines.append("")
+
+            # Add advanced analytics summary if available
+            checks = status.get("checks", [])
+            advanced = [c for c in checks if c.get("check") in (
+                "correlation_stress_test", "tail_risk_evt",
+                "portfolio_greeks", "liquidity_risk",
+            )]
+            if advanced:
+                lines.append("--- Advanced Analytics ---")
+                for c in advanced:
+                    lines.append(f"  [{c['check']}] {c.get('detail', 'N/A')}")
+                lines.append("")
+
+            lines.append("=== End Alert ===")
+            alert = "\n".join(lines)
+            log.info("Alert formatted: %d lines, level=%s", len(lines), level)
+            return alert
+        except Exception as exc:
+            log.error("Alert formatting failed: %s", exc)
+            return f"RISK ALERT: {status.get('level', 'UNKNOWN')} (formatting error: {exc})"
+
+    # -----------------------------------------------------------------
     # Aggregate checks
     # -----------------------------------------------------------------
 
@@ -513,6 +947,10 @@ class RiskGuardian:
             self.check_correlation_spike(),
             self.check_drawdown(),
             self.check_vix_regime(),
+            self.stress_test_correlation(),
+            self.compute_tail_risk(),
+            self.monitor_portfolio_greeks(),
+            self.check_liquidity_risk(),
         ]
 
         # Determine overall level
@@ -654,6 +1092,12 @@ class RiskGuardian:
 
         # Execute actions based on level
         self.execute_actions(status)
+
+        # Format and log alert
+        alert_msg = self.format_alert(status)
+        status["alert_message"] = alert_msg
+        if status["level"] != RISK_GREEN:
+            log.warning("Alert:\n%s", alert_msg)
 
         # Save status to JSON
         self._save_status(status)

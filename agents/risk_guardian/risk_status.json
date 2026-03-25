@@ -1,6 +1,6 @@
 {
   "level": "GREEN",
-  "timestamp": "2026-03-25T17:43:43.936398+00:00",
+  "timestamp": "2026-03-25T18:44:32.157792+00:00",
   "date": "2026-03-25",
   "breaches": [],
   "recommendations": [],
@@ -8,49 +8,67 @@
     {
       "check": "var_breach",
       "level": "GREEN",
-      "detail": "VaR OK: 0.4196% <= 2.00%",
-      "var_95_1d": 0.004196,
-      "limit": 0.02
+      "detail": "Insufficient data for VaR computation"
     },
     {
       "check": "exposure_limits",
       "level": "GREEN",
-      "detail": "Exposure OK: gross=0.50x, net=30.00%",
-      "gross_exposure": 0.5,
-      "net_exposure": 0.3
+      "detail": "No positions or zero capital"
     },
     {
       "check": "concentration",
       "level": "GREEN",
-      "detail": "Concentration OK: max=10.00%, HHI=0.0500",
-      "hhi": 0.05,
-      "max_single_weight": 0.1,
-      "limit": 0.25
+      "detail": "No positions for concentration check"
     },
     {
       "check": "correlation_spike",
       "level": "GREEN",
-      "detail": "Correlation OK: avg=0.217 <= 0.70",
-      "avg_pairwise_corr": 0.2166,
-      "limit": 0.7
+      "detail": "Not enough positions for correlation check"
     },
     {
       "check": "drawdown",
       "level": "GREEN",
-      "detail": "Drawdown OK: 0.00% <= 8%",
-      "max_drawdown": 0.0,
-      "warn_limit": 0.08,
-      "halt_limit": 0.12
+      "detail": "No portfolio data for drawdown check"
     },
     {
       "check": "vix_regime",
       "level": "GREEN",
-      "detail": "VIX OK: 25.2 (1d change: -1.8)",
-      "current_vix": 25.18,
-      "vix_1d_change": -1.77,
-      "jump_limit": 5.0
+      "detail": "No VIX data available"
+    },
+    {
+      "check": "correlation_stress_test",
+      "current_var": null,
+      "stressed_var": null,
+      "multiplier": null,
+      "detail": "Insufficient data for correlation stress test"
+    },
+    {
+      "check": "tail_risk_evt",
+      "es_99": null,
+      "es_995": null,
+      "prob_loss_3pct": null,
+      "prob_loss_5pct": null,
+      "prob_loss_10pct": null,
+      "gpd_shape": null,
+      "gpd_scale": null,
+      "detail": "Insufficient data for tail risk analysis"
+    },
+    {
+      "check": "portfolio_greeks",
+      "delta": null,
+      "beta": null,
+      "gamma": null,
+      "risk_flag": false,
+      "detail": "Insufficient data for portfolio greeks"
+    },
+    {
+      "check": "liquidity_risk",
+      "positions_at_risk": [],
+      "n_flagged": 0,
+      "detail": "No positions or price data for liquidity check"
     }
   ],
-  "n_positions": 5,
-  "capital": 1000000.0
+  "n_positions": 0,
+  "capital": 1000000.0,
+  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-25T18:44:32\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ==="
 }
