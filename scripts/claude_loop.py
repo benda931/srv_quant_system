@@ -86,17 +86,32 @@ def send_to_claude(
     Send user_content to Claude and return (response_text, updated_messages).
     Manages the conversation history.
     """
+    import unicodedata
+
+    def _sanitize(text: str) -> str:
+        """Normalize Unicode to NFC and ensure valid UTF-8 roundtrip."""
+        text = unicodedata.normalize("NFC", text)
+        return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+
     client = _get_client()
     messages = list(messages)  # copy
-    messages.append({"role": "user", "content": user_content})
+
+    # Sanitize all text to prevent encoding errors with Hebrew/Unicode content
+    safe_content = _sanitize(user_content)
+    safe_system = _sanitize(system_prompt)
+    safe_messages = [
+        {"role": m["role"], "content": _sanitize(m["content"])} for m in messages
+    ]
+    safe_messages.append({"role": "user", "content": safe_content})
 
     response = client.messages.create(
         model=_MODEL,
         max_tokens=_MAX_TOKENS,
-        system=system_prompt,
-        messages=messages,
+        system=safe_system,
+        messages=safe_messages,
     )
     reply = response.content[0].text
+    messages.append({"role": "user", "content": user_content})
     messages.append({"role": "assistant", "content": reply})
     return reply, messages
 

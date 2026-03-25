@@ -113,36 +113,23 @@ class DualLLMBridge:
 
         full_prompt = f"{context}\n\n{prompt}" if context else prompt
 
-        # Normalize Unicode — NFC form prevents decomposed character issues
-        import unicodedata
-        full_prompt = unicodedata.normalize("NFC", full_prompt)
-
-        # Ensure valid UTF-8 roundtrip (strips lone surrogates / invalid sequences)
-        full_prompt = full_prompt.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+        # Strip non-ASCII (Hebrew etc.) to prevent encoding errors in the API layer.
+        # Mathematical prompts don't need Hebrew content.
+        clean_prompt = full_prompt.encode("ascii", errors="ignore").decode("ascii")
+        # Remove double-spaces and blank lines caused by stripping
+        import re as _re
+        clean_prompt = _re.sub(r"  +", " ", clean_prompt)
+        clean_prompt = _re.sub(r"\n{3,}", "\n\n", clean_prompt)
 
         try:
             response = self.claude_client.messages.create(
                 model=self.CLAUDE_MODEL,
                 max_tokens=self.MAX_TOKENS,
-                messages=[{"role": "user", "content": full_prompt}],
+                messages=[{"role": "user", "content": clean_prompt}],
             )
             text = response.content[0].text
             log.info("Claude response received (%d chars)", len(text))
             return text
-        except (UnicodeEncodeError, UnicodeDecodeError) as exc:
-            # Fallback: strip non-ASCII (Hebrew etc.) and retry
-            log.warning("Claude encoding error, retrying with ASCII-only: %s", exc)
-            ascii_prompt = full_prompt.encode("ascii", errors="ignore").decode("ascii")
-            try:
-                response = self.claude_client.messages.create(
-                    model=self.CLAUDE_MODEL,
-                    max_tokens=self.MAX_TOKENS,
-                    messages=[{"role": "user", "content": ascii_prompt}],
-                )
-                return response.content[0].text
-            except Exception as exc2:
-                log.error("Claude API error (retry): %s", exc2)
-                return ""
         except Exception as exc:
             log.error("Claude API error: %s", exc)
             return ""

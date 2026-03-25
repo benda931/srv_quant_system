@@ -1,0 +1,41 @@
+{
+  "level": "GREEN",
+  "timestamp": "2026-03-25T17:18:20.406059+00:00",
+  "date": "2026-03-25",
+  "breaches": [],
+  "recommendations": [],
+  "checks": [
+    {
+      "check": "var_breach",
+      "level": "GREEN",
+      "detail": "Insufficient data for VaR computation"
+    },
+    {
+      "check": "exposure_limits",
+      "level": "GREEN",
+      "detail": "No positions or zero capital"
+    },
+    {
+      "check": "concentration",
+      "level": "GREEN",
+      "detail": "No positions for concentration check"
+    },
+    {
+      "check": "correlation_spike",
+      "level": "GREEN",
+      "detail": "Not enough positions for correlation check"
+    },
+    {
+      "check": "drawdown",
+      "level": "GREEN",
+      "detail": "No portfolio data for drawdown check"
+    },
+    {
+      "check": "vix_regime",
+      "level": "GREEN",
+      "detail": "No VIX data available"
+    }
+  ],
+  "n_positions": 0,
+  "capital": 1000000.0
+}

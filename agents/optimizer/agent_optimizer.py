@@ -643,7 +643,7 @@ def _build_system_prompt(
         {trend_block}
 
         ## Math Agent Proposals
-        {math_proposals_block}
+        {{math_proposals_block}}
 
         ## Available Actions
         ```json
