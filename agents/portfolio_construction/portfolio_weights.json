@@ -1,0 +1,61 @@
+{
+  "timestamp": "2026-03-25T17:36:11.398043+00:00",
+  "weights": {
+    "XLU": 0.1047,
+    "XLF": 0.0183,
+    "XLRE": 0.0583,
+    "XLB": 0.0769,
+    "XLE": 0.0154,
+    "XLV": 0.0222,
+    "XLC": 0.0227,
+    "XLI": 0.0828
+  },
+  "method_weights": {
+    "mv": {
+      "XLC": -0.2,
+      "XLY": -0.2,
+      "XLP": 0.2,
+      "XLE": 0.2,
+      "XLF": -0.2,
+      "XLV": -0.2,
+      "XLI": 0.2,
+      "XLB": 0.2,
+      "XLRE": -0.0,
+      "XLK": -0.2,
+      "XLU": 0.2
+    },
+    "rp": {
+      "XLC": 0.1045,
+      "XLY": 0.0705,
+      "XLP": 0.1132,
+      "XLE": 0.1128,
+      "XLF": 0.0971,
+      "XLV": 0.1037,
+      "XLI": 0.0713,
+      "XLB": 0.0615,
+      "XLRE": 0.0971,
+      "XLK": 0.0606,
+      "XLU": 0.1078
+    },
+    "conv": {
+      "XLC": 0.0,
+      "XLY": 0.0,
+      "XLP": 0.0,
+      "XLE": 0.0,
+      "XLF": 0.0,
+      "XLV": 0.0,
+      "XLI": 0.0,
+      "XLB": 0.0,
+      "XLRE": 0.0,
+      "XLK": 0.0,
+      "XLU": 0.0
+    }
+  },
+  "blend_regime": "TENSION",
+  "gross_exposure": 0.401,
+  "net_exposure": 0.401,
+  "n_positions": 8,
+  "expected_return": 0.1178,
+  "expected_vol": 0.0411,
+  "sharpe_estimate": 2.863
+}
