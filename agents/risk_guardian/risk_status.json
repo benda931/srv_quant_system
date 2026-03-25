@@ -1,6 +1,6 @@
 {
   "level": "GREEN",
-  "timestamp": "2026-03-25T17:29:36.194550+00:00",
+  "timestamp": "2026-03-25T17:43:43.936398+00:00",
   "date": "2026-03-25",
   "breaches": [],
   "recommendations": [],
@@ -8,34 +8,49 @@
     {
       "check": "var_breach",
       "level": "GREEN",
-      "detail": "Insufficient data for VaR computation"
+      "detail": "VaR OK: 0.4196% <= 2.00%",
+      "var_95_1d": 0.004196,
+      "limit": 0.02
     },
     {
       "check": "exposure_limits",
       "level": "GREEN",
-      "detail": "No positions or zero capital"
+      "detail": "Exposure OK: gross=0.50x, net=30.00%",
+      "gross_exposure": 0.5,
+      "net_exposure": 0.3
     },
     {
       "check": "concentration",
       "level": "GREEN",
-      "detail": "No positions for concentration check"
+      "detail": "Concentration OK: max=10.00%, HHI=0.0500",
+      "hhi": 0.05,
+      "max_single_weight": 0.1,
+      "limit": 0.25
     },
     {
       "check": "correlation_spike",
       "level": "GREEN",
-      "detail": "Not enough positions for correlation check"
+      "detail": "Correlation OK: avg=0.217 <= 0.70",
+      "avg_pairwise_corr": 0.2166,
+      "limit": 0.7
     },
     {
       "check": "drawdown",
       "level": "GREEN",
-      "detail": "No portfolio data for drawdown check"
+      "detail": "Drawdown OK: 0.00% <= 8%",
+      "max_drawdown": 0.0,
+      "warn_limit": 0.08,
+      "halt_limit": 0.12
     },
     {
       "check": "vix_regime",
       "level": "GREEN",
-      "detail": "No VIX data available"
+      "detail": "VIX OK: 25.2 (1d change: -1.8)",
+      "current_vix": 25.18,
+      "vix_1d_change": -1.77,
+      "jump_limit": 5.0
     }
   ],
-  "n_positions": 0,
+  "n_positions": 5,
   "capital": 1000000.0
 }

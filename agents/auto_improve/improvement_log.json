@@ -115,6 +115,64 @@
         }
       ],
       "status": "completed"
+    },
+    {
+      "timestamp": "2026-03-25T17:43:47.389465+00:00",
+      "metrics_before": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "weaknesses": [
+        "All 19 strategies have negative Sharpe",
+        "Win rate below 50%: 0.0%"
+      ],
+      "suggestions_tested": 3,
+      "promoted": 0,
+      "metrics_after": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "gpt_used": false,
+      "gpt_suggestions": [],
+      "details": [
+        {
+          "param": "trade_max_holding_days",
+          "current": 20,
+          "proposed": 15,
+          "source": "rule",
+          "reason": "Shorten max hold to reduce time decay on losing trades",
+          "test_passed": false,
+          "sharpe_delta": -1.1235,
+          "promoted": false
+        },
+        {
+          "param": "regime_z_calm",
+          "current": 0.7,
+          "proposed": 0.85,
+          "source": "rule",
+          "reason": "Require stronger signal in CALM regime",
+          "test_passed": false,
+          "sharpe_delta": -1.1235,
+          "promoted": false
+        },
+        {
+          "param": "monitor_z_compression_exit",
+          "current": 0.75,
+          "proposed": 0.8,
+          "source": "rule",
+          "reason": "Widen z compression exit to hold winners longer",
+          "test_passed": false,
+          "sharpe_delta": -1.1235,
+          "promoted": false
+        }
+      ],
+      "status": "completed"
     }
   ]
 }

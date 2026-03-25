@@ -27,5 +27,34 @@
       "vol_trend": 0.0176,
       "vol_of_vol": 0.0182
     }
+  },
+  {
+    "timestamp": "2026-03-25T17:43:42.124924+00:00",
+    "probabilities": {
+      "CALM": 0.02,
+      "NORMAL": 0.201,
+      "TENSION": 0.176,
+      "CRISIS": 0.603
+    },
+    "predicted_regime": "CRISIS",
+    "transition_probability": 0.57,
+    "regime_safety_score": 0,
+    "features": {
+      "vix": 25.18,
+      "vix_pct": 0.952,
+      "vix_5d_chg": 1.12,
+      "vix_vol": 1.367,
+      "credit_spread": -0.1809,
+      "credit_z": -0.512,
+      "credit_mom": 0.0095,
+      "avg_corr": 0.311,
+      "corr_chg": -0.0362,
+      "dispersion": 0.0099,
+      "breadth_50d": 0.091,
+      "breadth_200d": 0.455,
+      "realized_vol": 0.1384,
+      "vol_trend": 0.0176,
+      "vol_of_vol": 0.0182
+    }
   }
 ]
