@@ -1,0 +1,411 @@
+{
+  "timestamp": "2026-03-25T17:38:48.443578+00:00",
+  "macro": {
+    "macro_score": 0.0
+  },
+  "anomalies": [
+    {
+      "ticker": "XLU",
+      "date": "2026-03-20",
+      "anomaly_type": "extreme_negative",
+      "magnitude": -4.34,
+      "return_pct": -4.06
+    },
+    {
+      "ticker": "XLRE",
+      "date": "2026-03-20",
+      "anomaly_type": "extreme_negative",
+      "magnitude": -3.6,
+      "return_pct": -3.17
+    },
+    {
+      "ticker": "HYG",
+      "date": "2026-03-20",
+      "anomaly_type": "extreme_negative",
+      "magnitude": -3.46,
+      "return_pct": -0.93
+    },
+    {
+      "ticker": "TLT",
+      "date": "2026-03-20",
+      "anomaly_type": "extreme_negative",
+      "magnitude": -3.07,
+      "return_pct": -1.9
+    }
+  ],
+  "correlation_breaks": [
+    {
+      "pair": "XLK/IEF",
+      "corr_20d": 0.65,
+      "corr_120d": -0.032,
+      "change": 0.682,
+      "direction": "converging"
+    },
+    {
+      "pair": "SPY/IEF",
+      "corr_20d": 0.783,
+      "corr_120d": 0.167,
+      "change": 0.615,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLK/XLRE",
+      "corr_20d": 0.691,
+      "corr_120d": 0.174,
+      "change": 0.518,
+      "direction": "converging"
+    },
+    {
+      "pair": "SPY/^TNX",
+      "corr_20d": -0.695,
+      "corr_120d": -0.184,
+      "change": -0.51,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLK/^TNX",
+      "corr_20d": -0.496,
+      "corr_120d": 0.009,
+      "change": -0.505,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLK/TLT",
+      "corr_20d": 0.604,
+      "corr_120d": 0.107,
+      "change": 0.497,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLV/XLK",
+      "corr_20d": 0.643,
+      "corr_120d": 0.157,
+      "change": 0.486,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLF/^TNX",
+      "corr_20d": -0.516,
+      "corr_120d": -0.041,
+      "change": -0.475,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLF/IEF",
+      "corr_20d": 0.492,
+      "corr_120d": 0.027,
+      "change": 0.465,
+      "direction": "converging"
+    },
+    {
+      "pair": "^VIX/IEF",
+      "corr_20d": -0.567,
+      "corr_120d": -0.116,
+      "change": -0.451,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLY/IEF",
+      "corr_20d": 0.658,
+      "corr_120d": 0.211,
+      "change": 0.447,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLI/IEF",
+      "corr_20d": 0.629,
+      "corr_120d": 0.195,
+      "change": 0.434,
+      "direction": "converging"
+    },
+    {
+      "pair": "SPY/TLT",
+      "corr_20d": 0.678,
+      "corr_120d": 0.252,
+      "change": 0.427,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLY/^TNX",
+      "corr_20d": -0.642,
+      "corr_120d": -0.217,
+      "change": -0.425,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLK/HYG",
+      "corr_20d": 0.878,
+      "corr_120d": 0.469,
+      "change": 0.408,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLRE/IEF",
+      "corr_20d": 0.87,
+      "corr_120d": 0.468,
+      "change": 0.402,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLC/^TNX",
+      "corr_20d": -0.692,
+      "corr_120d": -0.293,
+      "change": -0.399,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLP/GLD",
+      "corr_20d": 0.525,
+      "corr_120d": 0.128,
+      "change": 0.396,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLV/XLI",
+      "corr_20d": 0.841,
+      "corr_120d": 0.446,
+      "change": 0.395,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLI/^TNX",
+      "corr_20d": -0.618,
+      "corr_120d": -0.223,
+      "change": -0.395,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLRE/^TNX",
+      "corr_20d": -0.804,
+      "corr_120d": -0.413,
+      "change": -0.391,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLC/IEF",
+      "corr_20d": 0.676,
+      "corr_120d": 0.285,
+      "change": 0.391,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLK/XLP",
+      "corr_20d": 0.178,
+      "corr_120d": -0.208,
+      "change": 0.386,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLE/GLD",
+      "corr_20d": -0.148,
+      "corr_120d": 0.233,
+      "change": -0.381,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLK/DX-Y.NYB",
+      "corr_20d": -0.541,
+      "corr_120d": -0.16,
+      "change": -0.381,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLV/GLD",
+      "corr_20d": 0.524,
+      "corr_120d": 0.146,
+      "change": 0.378,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLF/XLP",
+      "corr_20d": 0.366,
+      "corr_120d": -0.009,
+      "change": 0.375,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLE/XLC",
+      "corr_20d": -0.366,
+      "corr_120d": 0.007,
+      "change": -0.373,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLE/XLP",
+      "corr_20d": -0.11,
+      "corr_120d": 0.262,
+      "change": -0.372,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLRE/TLT",
+      "corr_20d": 0.783,
+      "corr_120d": 0.418,
+      "change": 0.365,
+      "direction": "converging"
+    },
+    {
+      "pair": "SPY/XLP",
+      "corr_20d": 0.412,
+      "corr_120d": 0.047,
+      "change": 0.364,
+      "direction": "converging"
+    },
+    {
+      "pair": "SPY/XLV",
+      "corr_20d": 0.761,
+      "corr_120d": 0.399,
+      "change": 0.363,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLE/XLRE",
+      "corr_20d": -0.143,
+      "corr_120d": 0.22,
+      "change": -0.363,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLI/DX-Y.NYB",
+      "corr_20d": -0.495,
+      "corr_120d": -0.138,
+      "change": -0.356,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "^TNX/GLD",
+      "corr_20d": -0.439,
+      "corr_120d": -0.082,
+      "change": -0.356,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLV/DX-Y.NYB",
+      "corr_20d": -0.472,
+      "corr_120d": -0.119,
+      "change": -0.353,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLV/^VIX",
+      "corr_20d": -0.77,
+      "corr_120d": -0.419,
+      "change": -0.351,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "SPY/DX-Y.NYB",
+      "corr_20d": -0.569,
+      "corr_120d": -0.219,
+      "change": -0.35,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "XLP/^TNX",
+      "corr_20d": -0.626,
+      "corr_120d": -0.276,
+      "change": -0.35,
+      "direction": "decorrelating"
+    },
+    {
+      "pair": "SPY/XLRE",
+      "corr_20d": 0.781,
+      "corr_120d": 0.432,
+      "change": 0.349,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLF/TLT",
+      "corr_20d": 0.397,
+      "corr_120d": 0.07,
+      "change": 0.327,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLV/XLC",
+      "corr_20d": 0.612,
+      "corr_120d": 0.293,
+      "change": 0.319,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLK/XLC",
+      "corr_20d": 0.749,
+      "corr_120d": 0.43,
+      "change": 0.319,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLK/XLU",
+      "corr_20d": 0.457,
+      "corr_120d": 0.139,
+      "change": 0.318,
+      "direction": "converging"
+    },
+    {
+      "pair": "^TNX/^VIX",
+      "corr_20d": 0.443,
+      "corr_120d": 0.126,
+      "change": 0.317,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLY/GLD",
+      "corr_20d": 0.457,
+      "corr_120d": 0.146,
+      "change": 0.312,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLY/XLRE",
+      "corr_20d": 0.682,
+      "corr_120d": 0.376,
+      "change": 0.307,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLV/XLF",
+      "corr_20d": 0.614,
+      "corr_120d": 0.31,
+      "change": 0.304,
+      "direction": "converging"
+    },
+    {
+      "pair": "XLRE/GLD",
+      "corr_20d": 0.428,
+      "corr_120d": 0.127,
+      "change": 0.301,
+      "direction": "converging"
+    }
+  ],
+  "momentum_divergences": [
+    {
+      "ticker": "HYG",
+      "type": "bullish_divergence",
+      "price": 79.47,
+      "low_20d": 78.92,
+      "rsi_recent": 39.9,
+      "rsi_prior": 34.8
+    },
+    {
+      "ticker": "IEF",
+      "type": "bullish_divergence",
+      "price": 95.24,
+      "low_20d": 94.86,
+      "rsi_recent": 28.9,
+      "rsi_prior": 24.9
+    }
+  ],
+  "opportunities": [
+    "Correlation break: XLK/IEF (converging, 20d=0.65 vs 120d=-0.03)",
+    "Correlation break: SPY/IEF (converging, 20d=0.78 vs 120d=0.17)",
+    "Correlation break: XLK/XLRE (converging, 20d=0.69 vs 120d=0.17)",
+    "Momentum divergence (bullish): HYG RSI 35->40",
+    "Momentum divergence (bullish): IEF RSI 25->29"
+  ],
+  "risk_flags": [
+    "Extreme negative move in XLU: -4.1% (z=-4.3)",
+    "Extreme negative move in XLRE: -3.2% (z=-3.6)",
+    "Extreme negative move in HYG: -0.9% (z=-3.5)"
+  ]
+}
