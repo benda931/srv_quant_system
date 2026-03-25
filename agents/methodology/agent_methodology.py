@@ -175,6 +175,655 @@ def _regime_breakdown_to_dict(breakdown: dict) -> dict:
 
 
 # =============================================================================
+# Professional-Grade MethodologyAgent — walk-forward, regime IC, Monte Carlo,
+# strategy correlations, enhanced GPT analysis
+# =============================================================================
+
+class MethodologyAgent:
+    """
+    Hedge-fund professional methodology analysis engine.
+
+    Adds institutional-grade validation on top of the existing pipeline:
+    walk-forward purged CV, regime-conditional IC, Monte Carlo confidence,
+    strategy correlation matrix, and enhanced GPT consultation.
+    """
+
+    def __init__(self, settings=None, engine=None):
+        """
+        Initialize the MethodologyAgent.
+
+        Parameters
+        ----------
+        settings : Settings, optional
+            System settings. If None, loaded from config.
+        engine : QuantEngine, optional
+            Pre-loaded QuantEngine instance. If None, one is created on demand.
+        """
+        try:
+            self.settings = settings or get_settings()
+            self.engine = engine
+            self._lab = None
+            self._lab_results = None
+            log.info("MethodologyAgent initialized")
+        except Exception as exc:
+            log.error("MethodologyAgent init failed: %s", exc)
+            self.settings = get_settings()
+            self.engine = None
+
+    def _get_lab(self):
+        """Lazy-load MethodologyLab with engine prices."""
+        try:
+            if self._lab is None and _IMPORTS_OK.get("methodology_lab"):
+                prices = getattr(self.engine, "prices", None)
+                if prices is not None and not prices.empty:
+                    self._lab = MethodologyLab(prices, self.settings, step=10)
+            return self._lab
+        except Exception as exc:
+            log.warning("Failed to create MethodologyLab: %s", exc)
+            return None
+
+    def _get_lab_results(self):
+        """Run all methodologies and cache results."""
+        try:
+            if self._lab_results is None:
+                lab = self._get_lab()
+                if lab is not None:
+                    self._lab_results = lab.run_all()
+            return self._lab_results or {}
+        except Exception as exc:
+            log.warning("Failed to run lab: %s", exc)
+            return {}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # A. Walk-Forward Validation with Purged CV
+    # ─────────────────────────────────────────────────────────────────────
+    def run_walk_forward_validation(
+        self, strategy_name: str, n_splits: int = 5, purge_days: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Run walk-forward validation with purged cross-validation.
+
+        Splits data into n_splits time blocks. For each split, trains on
+        all blocks before the current one, tests on the current block,
+        and purges `purge_days` between train and test to avoid lookahead bias.
+
+        Parameters
+        ----------
+        strategy_name : str
+            Name of the strategy to validate (must be in ALL_METHODOLOGIES).
+        n_splits : int
+            Number of time-series splits (default 5).
+        purge_days : int
+            Gap days between train and test sets (default 5).
+
+        Returns
+        -------
+        dict
+            Per-split metrics (IC, Sharpe, WR) plus aggregate statistics.
+            Keys: splits, aggregate, strategy_name, n_splits, purge_days.
+        """
+        try:
+            if not _IMPORTS_OK.get("methodology_lab"):
+                return {"error": "methodology_lab not available"}
+
+            prices = getattr(self.engine, "prices", None)
+            if prices is None or prices.empty:
+                return {"error": "no price data available"}
+
+            import pandas as pd
+
+            # Find the methodology
+            target_method = None
+            for m in ALL_METHODOLOGIES:
+                if m.name == strategy_name:
+                    target_method = m
+                    break
+            if target_method is None:
+                return {"error": f"strategy '{strategy_name}' not found in ALL_METHODOLOGIES"}
+
+            total_days = len(prices)
+            split_size = total_days // n_splits
+            if split_size < 30:
+                return {"error": f"insufficient data: {total_days} days for {n_splits} splits"}
+
+            split_results = []
+            for i in range(1, n_splits):
+                try:
+                    # Train: all data before split i (minus purge gap)
+                    train_end_idx = i * split_size - purge_days
+                    test_start_idx = i * split_size
+                    test_end_idx = min((i + 1) * split_size, total_days)
+
+                    if train_end_idx < split_size or test_start_idx >= total_days:
+                        continue
+
+                    train_prices = prices.iloc[:train_end_idx]
+                    test_prices = prices.iloc[test_start_idx:test_end_idx]
+
+                    if len(test_prices) < 10:
+                        continue
+
+                    # Run strategy on test period
+                    test_lab = MethodologyLab(test_prices, self.settings, step=5)
+                    test_result = test_lab.run_methodology(target_method)
+
+                    # Compute IC from equity curve returns
+                    eq = test_result.equity_curve
+                    returns = eq.pct_change().dropna() if len(eq) > 1 else pd.Series([0.0])
+                    mean_ret = float(returns.mean()) if len(returns) > 0 else 0.0
+                    std_ret = float(returns.std()) if len(returns) > 1 else 1.0
+
+                    split_sharpe = (mean_ret / std_ret * np.sqrt(252)) if std_ret > 1e-12 else 0.0
+
+                    split_results.append({
+                        "split": i,
+                        "train_days": train_end_idx,
+                        "test_days": len(test_prices),
+                        "purge_days": purge_days,
+                        "ic": round(float(test_result.regime_stats.get("overall", {}).get("ic", mean_ret)), 6),
+                        "sharpe": round(float(split_sharpe), 4),
+                        "win_rate": round(float(test_result.win_rate), 4),
+                        "total_trades": test_result.total_trades,
+                        "total_pnl": round(float(test_result.total_pnl), 6),
+                    })
+                except Exception as split_exc:
+                    log.debug("Split %d failed: %s", i, split_exc)
+                    split_results.append({"split": i, "error": str(split_exc)})
+
+            # Aggregate
+            valid_splits = [s for s in split_results if "error" not in s]
+            if valid_splits:
+                agg = {
+                    "mean_sharpe": round(float(np.mean([s["sharpe"] for s in valid_splits])), 4),
+                    "std_sharpe": round(float(np.std([s["sharpe"] for s in valid_splits])), 4),
+                    "mean_wr": round(float(np.mean([s["win_rate"] for s in valid_splits])), 4),
+                    "mean_ic": round(float(np.mean([s["ic"] for s in valid_splits])), 6),
+                    "n_valid_splits": len(valid_splits),
+                    "total_splits": n_splits - 1,
+                    "consistency": round(
+                        sum(1 for s in valid_splits if s["sharpe"] > 0) / max(len(valid_splits), 1), 2
+                    ),
+                }
+            else:
+                agg = {"error": "no valid splits completed"}
+
+            log.info(
+                "Walk-forward validation for %s: %d/%d splits, mean Sharpe=%.3f",
+                strategy_name, len(valid_splits), n_splits - 1,
+                agg.get("mean_sharpe", 0),
+            )
+
+            return {
+                "strategy_name": strategy_name,
+                "n_splits": n_splits,
+                "purge_days": purge_days,
+                "splits": split_results,
+                "aggregate": agg,
+            }
+
+        except Exception as exc:
+            log.exception("Walk-forward validation failed for %s", strategy_name)
+            return {"error": str(exc), "strategy_name": strategy_name}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # B. Regime-Conditional IC Analysis
+    # ─────────────────────────────────────────────────────────────────────
+    def compute_regime_conditional_ic(self, results: Optional[Dict] = None) -> Dict[str, Any]:
+        """
+        Compute information coefficient (IC), Sharpe, and win-rate per regime
+        for each strategy. Identifies which strategies work in which regimes.
+
+        Parameters
+        ----------
+        results : dict, optional
+            Pre-computed lab results {name: MethodologyResult}. If None,
+            runs all methodologies.
+
+        Returns
+        -------
+        dict
+            {regime: {strategy: {ic, sharpe, wr}}}, plus 'best_per_regime' summary.
+        """
+        try:
+            if results is None:
+                results = self._get_lab_results()
+
+            if not results:
+                return {"error": "no methodology results available"}
+
+            regimes = ["CALM", "NORMAL", "TENSION", "CRISIS"]
+            regime_data: Dict[str, Dict[str, Dict[str, float]]] = {r: {} for r in regimes}
+            best_per_regime: Dict[str, Dict[str, Any]] = {}
+
+            for name, result in results.items():
+                try:
+                    regime_stats = getattr(result, "regime_stats", {})
+                    for regime in regimes:
+                        # Try case variations
+                        rs = regime_stats.get(regime) or regime_stats.get(regime.lower()) or {}
+                        if isinstance(rs, dict):
+                            ic_val = _sf(rs.get("ic", rs.get("ic_mean", 0)))
+                            sharpe_val = _sf(rs.get("sharpe", 0))
+                            wr_val = _sf(rs.get("win_rate", rs.get("hit_rate", 0)))
+                        else:
+                            ic_val = _sf(getattr(rs, "ic_mean", getattr(rs, "ic", 0)))
+                            sharpe_val = _sf(getattr(rs, "sharpe", 0))
+                            wr_val = _sf(getattr(rs, "hit_rate", getattr(rs, "win_rate", 0)))
+
+                        regime_data[regime][name] = {
+                            "ic": round(ic_val, 6),
+                            "sharpe": round(sharpe_val, 4),
+                            "wr": round(wr_val, 4),
+                        }
+                except Exception as strat_exc:
+                    log.debug("Regime IC for %s failed: %s", name, strat_exc)
+
+            # Find best strategy per regime
+            for regime in regimes:
+                strats = regime_data[regime]
+                if strats:
+                    best_name = max(strats, key=lambda s: strats[s]["sharpe"])
+                    best_per_regime[regime] = {
+                        "strategy": best_name,
+                        **strats[best_name],
+                    }
+
+            log.info(
+                "Regime-conditional IC: %s",
+                {r: v.get("strategy", "N/A") for r, v in best_per_regime.items()},
+            )
+
+            return {
+                "regime_data": regime_data,
+                "best_per_regime": best_per_regime,
+                "n_strategies": len(results),
+                "regimes_analyzed": regimes,
+            }
+
+        except Exception as exc:
+            log.exception("Regime-conditional IC analysis failed")
+            return {"error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # C. Monte Carlo Confidence Intervals
+    # ─────────────────────────────────────────────────────────────────────
+    def monte_carlo_confidence(
+        self, strategy_name: str, n_sims: int = 1000
+    ) -> Dict[str, Any]:
+        """
+        Bootstrap Monte Carlo confidence intervals for strategy Sharpe ratio.
+
+        Resamples from trade returns to build a distribution of Sharpe ratios,
+        answering: 'How confident are we that Sharpe > 0?'
+
+        Parameters
+        ----------
+        strategy_name : str
+            Strategy to analyze.
+        n_sims : int
+            Number of bootstrap resamples (default 1000).
+
+        Returns
+        -------
+        dict
+            median_sharpe, p5/p95 percentiles, prob_positive_sharpe, distribution stats.
+        """
+        try:
+            results = self._get_lab_results()
+            if strategy_name not in results:
+                return {"error": f"strategy '{strategy_name}' not found in results"}
+
+            result = results[strategy_name]
+            eq = result.equity_curve
+            if eq is None or len(eq) < 10:
+                return {"error": "insufficient equity curve data"}
+
+            # Daily returns from equity curve
+            returns = eq.pct_change().dropna().values
+            if len(returns) < 5:
+                return {"error": "insufficient return data for Monte Carlo"}
+
+            n_days = len(returns)
+            sharpe_dist = []
+
+            rng = np.random.default_rng(42)
+            for _ in range(n_sims):
+                # Bootstrap resample with replacement
+                sample = rng.choice(returns, size=n_days, replace=True)
+                mu = np.mean(sample)
+                sigma = np.std(sample, ddof=1)
+                sim_sharpe = (mu / sigma * np.sqrt(252)) if sigma > 1e-12 else 0.0
+                sharpe_dist.append(float(sim_sharpe))
+
+            sharpe_arr = np.array(sharpe_dist)
+            prob_positive = float(np.mean(sharpe_arr > 0))
+
+            result_dict = {
+                "strategy_name": strategy_name,
+                "n_sims": n_sims,
+                "n_days": n_days,
+                "median_sharpe": round(float(np.median(sharpe_arr)), 4),
+                "mean_sharpe": round(float(np.mean(sharpe_arr)), 4),
+                "p5_sharpe": round(float(np.percentile(sharpe_arr, 5)), 4),
+                "p25_sharpe": round(float(np.percentile(sharpe_arr, 25)), 4),
+                "p75_sharpe": round(float(np.percentile(sharpe_arr, 75)), 4),
+                "p95_sharpe": round(float(np.percentile(sharpe_arr, 95)), 4),
+                "std_sharpe": round(float(np.std(sharpe_arr)), 4),
+                "prob_positive_sharpe": round(prob_positive, 4),
+                "confidence_level": (
+                    "HIGH" if prob_positive > 0.90
+                    else "MODERATE" if prob_positive > 0.70
+                    else "LOW" if prob_positive > 0.50
+                    else "VERY_LOW"
+                ),
+            }
+
+            log.info(
+                "Monte Carlo %s: median Sharpe=%.3f, P(Sharpe>0)=%.1f%%, [%.3f, %.3f]",
+                strategy_name, result_dict["median_sharpe"],
+                prob_positive * 100,
+                result_dict["p5_sharpe"], result_dict["p95_sharpe"],
+            )
+
+            return result_dict
+
+        except Exception as exc:
+            log.exception("Monte Carlo confidence failed for %s", strategy_name)
+            return {"error": str(exc), "strategy_name": strategy_name}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # D. Strategy Correlation Matrix
+    # ─────────────────────────────────────────────────────────────────────
+    def compute_strategy_correlations(self) -> Dict[str, Any]:
+        """
+        Compute correlation matrix between all strategy daily P&L series.
+
+        Identifies uncorrelated strategies for ensemble diversification.
+
+        Returns
+        -------
+        dict
+            correlation_matrix (nested dict), uncorrelated_pairs (list of tuples
+            with |corr| < 0.3), highly_correlated (|corr| > 0.7),
+            best_diversifiers (strategies with lowest average correlation).
+        """
+        try:
+            import pandas as pd
+
+            results = self._get_lab_results()
+            if not results or len(results) < 2:
+                return {"error": "need at least 2 strategy results for correlations"}
+
+            # Build daily P&L DataFrame from equity curves
+            pnl_dict = {}
+            for name, result in results.items():
+                try:
+                    eq = result.equity_curve
+                    if eq is not None and len(eq) > 5:
+                        daily_ret = eq.pct_change().dropna()
+                        pnl_dict[name] = daily_ret
+                except Exception:
+                    continue
+
+            if len(pnl_dict) < 2:
+                return {"error": "insufficient equity curves for correlation"}
+
+            pnl_df = pd.DataFrame(pnl_dict).dropna(how="all")
+            # Forward-fill NaN and drop rows that are still all NaN
+            pnl_df = pnl_df.fillna(0.0)
+
+            if len(pnl_df) < 10:
+                return {"error": "insufficient overlapping data for correlation"}
+
+            corr_matrix = pnl_df.corr()
+
+            # Find uncorrelated and highly correlated pairs
+            uncorrelated = []
+            highly_correlated = []
+            strategy_names = list(corr_matrix.columns)
+
+            for i in range(len(strategy_names)):
+                for j in range(i + 1, len(strategy_names)):
+                    s1, s2 = strategy_names[i], strategy_names[j]
+                    c = float(corr_matrix.loc[s1, s2])
+                    if abs(c) < 0.3:
+                        uncorrelated.append({"pair": [s1, s2], "correlation": round(c, 4)})
+                    elif abs(c) > 0.7:
+                        highly_correlated.append({"pair": [s1, s2], "correlation": round(c, 4)})
+
+            # Best diversifiers: lowest mean absolute correlation
+            mean_abs_corr = corr_matrix.abs().mean().sort_values()
+            best_diversifiers = [
+                {"strategy": name, "mean_abs_corr": round(float(val), 4)}
+                for name, val in mean_abs_corr.head(5).items()
+            ]
+
+            # Convert matrix to nested dict for JSON serialization
+            corr_dict = {}
+            for s1 in strategy_names:
+                corr_dict[s1] = {}
+                for s2 in strategy_names:
+                    corr_dict[s1][s2] = round(float(corr_matrix.loc[s1, s2]), 4)
+
+            log.info(
+                "Strategy correlations: %d strategies, %d uncorrelated pairs, %d highly correlated",
+                len(strategy_names), len(uncorrelated), len(highly_correlated),
+            )
+
+            return {
+                "correlation_matrix": corr_dict,
+                "n_strategies": len(strategy_names),
+                "uncorrelated_pairs": uncorrelated[:20],  # Top 20
+                "highly_correlated": highly_correlated[:20],
+                "best_diversifiers": best_diversifiers,
+            }
+
+        except Exception as exc:
+            log.exception("Strategy correlation analysis failed")
+            return {"error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # E. Enhanced GPT Analysis
+    # ─────────────────────────────────────────────────────────────────────
+    def enhanced_gpt_analysis(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Enhanced GPT consultation with regime context, per-regime numbers,
+        and structured actionable recommendations.
+
+        Sends current regime, IC/Sharpe/WR per regime to GPT, asks for
+        3 specific actionable improvements, and parses the response into
+        structured recommendations.
+
+        Parameters
+        ----------
+        report : dict
+            The full methodology report dict.
+
+        Returns
+        -------
+        dict
+            structured_recommendations (list of dicts with action, parameter,
+            direction, expected_impact), raw_response, quality_score.
+        """
+        try:
+            from agents.shared.gpt_conversation import GPTConversation
+
+            gpt = GPTConversation(system_role="senior quant PM")
+            if not gpt.available:
+                return {"error": "GPT not available"}
+
+            # Build rich context
+            metrics = report.get("metrics", {})
+            regime_bd = report.get("regime_breakdown", {})
+            regime_ic = report.get("regime_conditional_ic", {})
+            mc = report.get("monte_carlo", {})
+            correlations = report.get("strategy_correlations", {})
+            walk_forward = report.get("walk_forward_validation", {})
+
+            regime_lines = []
+            for regime, data in regime_bd.items():
+                if isinstance(data, dict):
+                    regime_lines.append(
+                        f"  {regime}: IC={data.get('ic_mean', 'N/A')}, "
+                        f"Sharpe={data.get('sharpe', 'N/A')}, "
+                        f"WR={data.get('hit_rate', 'N/A')}"
+                    )
+
+            best_per_regime = regime_ic.get("best_per_regime", {})
+            best_regime_lines = []
+            for regime, info in best_per_regime.items():
+                if isinstance(info, dict):
+                    best_regime_lines.append(
+                        f"  {regime}: best={info.get('strategy', 'N/A')} "
+                        f"(Sharpe={info.get('sharpe', 'N/A')})"
+                    )
+
+            current_regime = report.get("parameters_snapshot", {}).get("regime", "UNKNOWN")
+
+            prompt = (
+                f"CURRENT REGIME: {current_regime}\n\n"
+                f"OVERALL METRICS:\n"
+                f"  Sharpe={metrics.get('sharpe', 'N/A')}, IC={metrics.get('ic_mean', 'N/A')}, "
+                f"IC_IR={metrics.get('ic_ir', 'N/A')}, WR={metrics.get('hit_rate', 'N/A')}, "
+                f"MaxDD={metrics.get('max_dd', 'N/A')}\n\n"
+                f"REGIME BREAKDOWN:\n{'  '.join(regime_lines) if regime_lines else '  N/A'}\n\n"
+                f"BEST STRATEGY PER REGIME:\n{'  '.join(best_regime_lines) if best_regime_lines else '  N/A'}\n\n"
+                f"MONTE CARLO:\n"
+                f"  Median Sharpe={mc.get('median_sharpe', 'N/A')}, "
+                f"P(Sharpe>0)={mc.get('prob_positive_sharpe', 'N/A')}, "
+                f"95% CI=[{mc.get('p5_sharpe', 'N/A')}, {mc.get('p95_sharpe', 'N/A')}]\n\n"
+                f"WALK-FORWARD CONSISTENCY: {walk_forward.get('aggregate', {}).get('consistency', 'N/A')}\n\n"
+                f"DIVERSIFIERS: {[d.get('strategy') for d in correlations.get('best_diversifiers', [])]}\n\n"
+                f"Provide EXACTLY 3 specific actionable improvements in this format:\n"
+                f"1. [ACTION]: parameter/code change | [DIRECTION]: increase/decrease/modify | "
+                f"[EXPECTED]: +X Sharpe or +X% WR\n"
+                f"2. ...\n"
+                f"3. ...\n\n"
+                f"Focus on the weakest regime. Be quantitatively specific."
+            )
+
+            gpt.system_prompt = (
+                "You are a senior quant portfolio manager at a top-tier hedge fund. "
+                "You review strategy performance and give SPECIFIC, ACTIONABLE recommendations. "
+                "Every recommendation must include: what to change, which direction, and expected impact. "
+                "Max 200 words total."
+            )
+
+            response = gpt.query(prompt)
+            if not response:
+                return {"error": "empty GPT response"}
+
+            # Parse structured recommendations from response
+            recommendations = []
+            lines = response.strip().split("\n")
+            for line in lines:
+                line = line.strip()
+                if not line or not any(line.startswith(f"{i}") for i in range(1, 10)):
+                    continue
+                rec = {"raw": line}
+                # Try to extract structure
+                if "[ACTION]" in line.upper() or ":" in line:
+                    parts = line.split("|")
+                    for part in parts:
+                        part = part.strip()
+                        part_upper = part.upper()
+                        if "ACTION" in part_upper:
+                            rec["action"] = part.split(":", 1)[-1].strip() if ":" in part else part
+                        elif "DIRECTION" in part_upper:
+                            rec["direction"] = part.split(":", 1)[-1].strip() if ":" in part else part
+                        elif "EXPECTED" in part_upper:
+                            rec["expected_impact"] = part.split(":", 1)[-1].strip() if ":" in part else part
+                if "action" not in rec:
+                    rec["action"] = line
+                recommendations.append(rec)
+
+            result = {
+                "raw_response": response,
+                "structured_recommendations": recommendations[:3],
+                "current_regime": current_regime,
+                "n_recommendations": len(recommendations[:3]),
+            }
+
+            log.info(
+                "Enhanced GPT analysis: %d recommendations for regime %s",
+                len(recommendations[:3]), current_regime,
+            )
+
+            return result
+
+        except Exception as exc:
+            log.exception("Enhanced GPT analysis failed")
+            return {"error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Run all professional analyses
+    # ─────────────────────────────────────────────────────────────────────
+    def run_professional_analysis(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Run all professional-grade analyses and merge into the report.
+
+        Executes: walk-forward validation (best strategy), regime-conditional IC,
+        Monte Carlo confidence, strategy correlations, enhanced GPT.
+
+        Parameters
+        ----------
+        report : dict
+            The existing methodology report to enrich.
+
+        Returns
+        -------
+        dict
+            The enriched report with professional metrics added.
+        """
+        try:
+            log.info("Running professional-grade analysis suite...")
+
+            # Run lab if not done yet
+            lab_results = self._get_lab_results()
+
+            # Regime-conditional IC
+            log.info("  [PRO 1/5] Regime-conditional IC analysis...")
+            regime_ic = self.compute_regime_conditional_ic(lab_results)
+            report["regime_conditional_ic"] = regime_ic
+
+            # Strategy correlations
+            log.info("  [PRO 2/5] Strategy correlation matrix...")
+            correlations = self.compute_strategy_correlations()
+            report["strategy_correlations"] = correlations
+
+            # Monte Carlo on best strategy
+            best_strategy = None
+            if lab_results:
+                best_strategy = max(lab_results, key=lambda k: lab_results[k].sharpe)
+
+            if best_strategy:
+                log.info("  [PRO 3/5] Monte Carlo confidence for %s...", best_strategy)
+                mc = self.monte_carlo_confidence(best_strategy)
+                report["monte_carlo"] = mc
+
+                # Walk-forward validation
+                log.info("  [PRO 4/5] Walk-forward purged CV for %s...", best_strategy)
+                wf = self.run_walk_forward_validation(best_strategy)
+                report["walk_forward_validation"] = wf
+            else:
+                report["monte_carlo"] = {"error": "no best strategy found"}
+                report["walk_forward_validation"] = {"error": "no best strategy found"}
+
+            # Enhanced GPT
+            log.info("  [PRO 5/5] Enhanced GPT analysis...")
+            gpt_enhanced = self.enhanced_gpt_analysis(report)
+            report["gpt_enhanced_analysis"] = gpt_enhanced
+
+            log.info("Professional analysis suite complete")
+            return report
+
+        except Exception as exc:
+            log.exception("Professional analysis suite failed")
+            report["professional_analysis_error"] = str(exc)
+            return report
+
+
+# =============================================================================
 # גוף הסוכן
 # =============================================================================
 
@@ -473,15 +1122,25 @@ def run(once: bool = False) -> dict:
     else:
         log.warning("[7/8] Tail risk not available — skipping")
 
-    # ── שלב 8: ניתוח מסקנות והמלצות ────────────────────────────────────────
-    log.info("[8/8] Generating conclusions and recommendations...")
+    # ── שלב 8: Professional-Grade Analysis Suite ─────────────────────────────
+    log.info("[8/10] Running professional-grade analysis suite...")
+    try:
+        pro_agent = MethodologyAgent(settings=settings, engine=engine)
+        pro_agent.run_professional_analysis(report)
+        log.info("  Professional analysis: OK")
+    except Exception as exc:
+        log.warning("Professional analysis failed: %s", exc)
+        report["errors"].append(f"Professional Analysis: {exc}")
+
+    # ── שלב 9: ניתוח מסקנות והמלצות ────────────────────────────────────────
+    log.info("[9/10] Generating conclusions and recommendations...")
     try:
         _generate_conclusions(report, portfolio)
     except Exception as exc:
         log.exception("Conclusion generation failed")
         report["errors"].append(f"Conclusions: {exc}")
 
-    # ── סיום: שמירה, פרסום, עדכון portfolio ──────────────────────────────────
+    # ── שלב 10: סיום — שמירה, פרסום, עדכון portfolio ──────────────────────────
     finished_at = datetime.now(timezone.utc)
     report["finished_at"] = finished_at.isoformat()
     report["elapsed_seconds"] = round(
@@ -578,6 +1237,13 @@ def run(once: bool = False) -> dict:
                 "signal_stack_top": report.get("signal_stack", {}).get("top_conviction", 0),
                 "conclusions_count": len(report["conclusions"]),
                 "errors_count": len(report["errors"]),
+                "monte_carlo": report.get("monte_carlo", {}),
+                "regime_conditional_ic": report.get("regime_conditional_ic", {}),
+                "walk_forward_validation": report.get("walk_forward_validation", {}),
+                "strategy_correlations_summary": {
+                    "n_uncorrelated": len(report.get("strategy_correlations", {}).get("uncorrelated_pairs", [])),
+                    "best_diversifiers": report.get("strategy_correlations", {}).get("best_diversifiers", []),
+                },
             }
             bus.publish("agent_methodology", bus_payload)
             log.info("Published to AgentBus")

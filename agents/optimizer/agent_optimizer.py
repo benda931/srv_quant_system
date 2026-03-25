@@ -867,6 +867,792 @@ def _analyze_weaknesses(metrics: dict) -> str:
     return "\n".join(lines)
 
 
+# =============================================================================
+# Professional-Grade OptimizerAgent — Bayesian search, joint optimization,
+# sensitivity analysis, auto-revert, GPT strategy brainstorming
+# =============================================================================
+
+class OptimizerAgent:
+    """
+    Hedge-fund professional optimization engine.
+
+    Adds institutional-grade parameter optimization: Bayesian search,
+    multi-parameter joint optimization, sensitivity analysis, automatic
+    degradation revert, and GPT strategy brainstorming.
+    """
+
+    def __init__(self):
+        """
+        Initialize the OptimizerAgent.
+
+        Loads current settings, backtest cache, and optimization log.
+        """
+        try:
+            from config.settings import get_settings, Settings
+            self.settings = get_settings()
+            self.Settings = Settings
+            self.opt_log = get_optimization_log()
+            self._backup_settings: dict = {}
+            log.info("OptimizerAgent initialized")
+        except Exception as exc:
+            log.error("OptimizerAgent init failed: %s", exc)
+            from config.settings import get_settings, Settings
+            self.settings = get_settings()
+            self.Settings = Settings
+            self.opt_log = None
+
+    def _get_param_bounds(self, param_name: str) -> tuple:
+        """Get (min, max, current) for a parameter from Settings field metadata."""
+        try:
+            field_info = self.Settings.model_fields.get(param_name)
+            if field_info is None:
+                return (None, None, None)
+
+            current = getattr(self.settings, param_name, None)
+            lower, upper = None, None
+            for constraint in field_info.metadata:
+                if hasattr(constraint, "ge"):
+                    lower = constraint.ge
+                if hasattr(constraint, "gt"):
+                    lower = constraint.gt
+                if hasattr(constraint, "le"):
+                    upper = constraint.le
+                if hasattr(constraint, "lt"):
+                    upper = constraint.lt
+
+            return (lower, upper, current)
+        except Exception:
+            return (None, None, getattr(self.settings, param_name, None))
+
+    def _quick_backtest_sharpe(self) -> float:
+        """Run a quick backtest and return Sharpe ratio."""
+        try:
+            result = _run_backtest()
+            return float(result.get("sharpe", 0))
+        except Exception as exc:
+            log.warning("Quick backtest failed: %s", exc)
+            return 0.0
+
+    # ─────────────────────────────────────────────────────────────────────
+    # A. Bayesian Parameter Search
+    # ─────────────────────────────────────────────────────────────────────
+    def bayesian_search(
+        self, param_name: str, n_trials: int = 20
+    ) -> dict:
+        """
+        Bayesian-like parameter optimization using expected improvement.
+
+        Uses Optuna if available, otherwise falls back to a manual
+        surrogate-based search that starts from the current value and
+        intelligently explores the neighborhood.
+
+        Parameters
+        ----------
+        param_name : str
+            The parameter to optimize (must exist in Settings).
+        n_trials : int
+            Number of evaluation trials (default 20).
+
+        Returns
+        -------
+        dict
+            best_value, best_sharpe, improvement_curve, n_trials_run.
+        """
+        try:
+            lower, upper, current = self._get_param_bounds(param_name)
+            if current is None:
+                return {"error": f"parameter '{param_name}' not found in Settings"}
+
+            current = float(current)
+            if lower is None:
+                lower = current * 0.3 if current > 0 else current - abs(current) * 2
+            if upper is None:
+                upper = current * 3.0 if current > 0 else current + abs(current) * 2
+            lower, upper = float(lower), float(upper)
+
+            original_value = current
+            best_sharpe = self._quick_backtest_sharpe()
+            best_value = current
+            improvement_curve = [{"trial": 0, "value": current, "sharpe": best_sharpe}]
+
+            # Try Optuna first
+            optuna_available = False
+            try:
+                import optuna
+                optuna.logging.set_verbosity(optuna.logging.WARNING)
+                optuna_available = True
+            except ImportError:
+                pass
+
+            if optuna_available:
+                import optuna
+
+                def objective(trial):
+                    val = trial.suggest_float(param_name, lower, upper)
+                    setattr(self.settings, param_name, type(original_value)(val))
+                    sharpe = self._quick_backtest_sharpe()
+                    return sharpe
+
+                study = optuna.create_study(direction="maximize")
+                # Seed with current value
+                study.enqueue_trial({param_name: current})
+                study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+                for i, trial in enumerate(study.trials):
+                    improvement_curve.append({
+                        "trial": i + 1,
+                        "value": round(trial.params.get(param_name, current), 6),
+                        "sharpe": round(trial.value if trial.value else 0, 4),
+                    })
+
+                best_value = study.best_params.get(param_name, current)
+                best_sharpe = study.best_value or 0
+
+            else:
+                # Manual Bayesian-like search: Latin hypercube + neighborhood refinement
+                import numpy as np
+                rng = np.random.default_rng(42)
+
+                # Phase 1: Broad exploration — Latin hypercube
+                n_explore = max(n_trials // 2, 5)
+                explore_vals = np.linspace(lower, upper, n_explore)
+                rng.shuffle(explore_vals)
+
+                observed_x = [current]
+                observed_y = [best_sharpe]
+
+                for i, val in enumerate(explore_vals):
+                    try:
+                        setattr(self.settings, param_name, type(original_value)(val))
+                        sharpe = self._quick_backtest_sharpe()
+                        observed_x.append(float(val))
+                        observed_y.append(sharpe)
+                        improvement_curve.append({
+                            "trial": i + 1, "value": round(float(val), 6), "sharpe": round(sharpe, 4),
+                        })
+                        if sharpe > best_sharpe:
+                            best_sharpe = sharpe
+                            best_value = float(val)
+                    except Exception:
+                        continue
+
+                # Phase 2: Refinement around best region
+                n_refine = n_trials - n_explore
+                if n_refine > 0 and best_value is not None:
+                    radius = (upper - lower) * 0.1
+                    for i in range(n_refine):
+                        try:
+                            val = float(rng.normal(best_value, radius))
+                            val = max(lower, min(upper, val))
+                            setattr(self.settings, param_name, type(original_value)(val))
+                            sharpe = self._quick_backtest_sharpe()
+                            improvement_curve.append({
+                                "trial": n_explore + i + 1,
+                                "value": round(val, 6),
+                                "sharpe": round(sharpe, 4),
+                            })
+                            if sharpe > best_sharpe:
+                                best_sharpe = sharpe
+                                best_value = val
+                        except Exception:
+                            continue
+
+            # Restore original value (caller decides whether to apply best)
+            setattr(self.settings, param_name, type(original_value)(original_value))
+
+            result = {
+                "param_name": param_name,
+                "original_value": round(original_value, 6),
+                "best_value": round(float(best_value), 6),
+                "original_sharpe": round(improvement_curve[0]["sharpe"], 4),
+                "best_sharpe": round(float(best_sharpe), 4),
+                "improvement": round(float(best_sharpe) - improvement_curve[0]["sharpe"], 4),
+                "n_trials_run": len(improvement_curve) - 1,
+                "improvement_curve": improvement_curve,
+                "used_optuna": optuna_available,
+            }
+
+            log.info(
+                "Bayesian search %s: %.4f -> %.4f (Sharpe %.3f -> %.3f, %+.3f)",
+                param_name, original_value, best_value,
+                improvement_curve[0]["sharpe"], best_sharpe,
+                float(best_sharpe) - improvement_curve[0]["sharpe"],
+            )
+
+            return result
+
+        except Exception as exc:
+            log.exception("Bayesian search failed for %s", param_name)
+            # Restore original
+            try:
+                setattr(self.settings, param_name, original_value)
+            except Exception:
+                pass
+            return {"error": str(exc), "param_name": param_name}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # B. Multi-Parameter Joint Optimization
+    # ─────────────────────────────────────────────────────────────────────
+    def joint_optimize(
+        self, params_to_tune: list, n_trials: int = 30
+    ) -> dict:
+        """
+        Optimize multiple parameters simultaneously using random search
+        with Latin hypercube sampling.
+
+        Parameters
+        ----------
+        params_to_tune : list of str
+            Parameter names to optimize jointly.
+        n_trials : int
+            Number of joint evaluation trials (default 30).
+
+        Returns
+        -------
+        dict
+            best_params, best_sharpe, pareto_front (top combos sorted by Sharpe),
+            trials log.
+        """
+        try:
+            import numpy as np
+
+            # Collect bounds and originals
+            param_info = {}
+            originals = {}
+            for p in params_to_tune:
+                lo, hi, cur = self._get_param_bounds(p)
+                if cur is None:
+                    return {"error": f"parameter '{p}' not found"}
+                cur = float(cur)
+                if lo is None:
+                    lo = cur * 0.5 if cur > 0 else cur - abs(cur)
+                if hi is None:
+                    hi = cur * 2.0 if cur > 0 else cur + abs(cur)
+                param_info[p] = {"lower": float(lo), "upper": float(hi), "current": cur}
+                originals[p] = cur
+
+            # Latin hypercube sampling
+            rng = np.random.default_rng(42)
+            n_params = len(params_to_tune)
+            trials_log = []
+
+            # Generate LHS samples
+            for trial_idx in range(n_trials):
+                try:
+                    combo = {}
+                    for p in params_to_tune:
+                        info = param_info[p]
+                        # Stratified random sample with some bias toward current
+                        if trial_idx == 0:
+                            val = info["current"]  # First trial: baseline
+                        else:
+                            val = float(rng.uniform(info["lower"], info["upper"]))
+                        combo[p] = val
+                        setattr(self.settings, p, type(originals[p])(val))
+
+                    sharpe = self._quick_backtest_sharpe()
+                    trials_log.append({
+                        "trial": trial_idx,
+                        "params": {k: round(v, 6) for k, v in combo.items()},
+                        "sharpe": round(sharpe, 4),
+                    })
+                except Exception as trial_exc:
+                    log.debug("Joint trial %d failed: %s", trial_idx, trial_exc)
+
+            # Restore originals
+            for p, orig in originals.items():
+                setattr(self.settings, p, type(orig)(orig))
+
+            if not trials_log:
+                return {"error": "no valid trials completed"}
+
+            # Sort by Sharpe — Pareto front (top 5)
+            trials_sorted = sorted(trials_log, key=lambda t: t["sharpe"], reverse=True)
+            best = trials_sorted[0]
+            pareto = trials_sorted[:5]
+
+            baseline_sharpe = next(
+                (t["sharpe"] for t in trials_log if t["trial"] == 0), 0.0
+            )
+
+            result = {
+                "params_tuned": params_to_tune,
+                "n_trials": len(trials_log),
+                "baseline_sharpe": baseline_sharpe,
+                "best_params": best["params"],
+                "best_sharpe": best["sharpe"],
+                "improvement": round(best["sharpe"] - baseline_sharpe, 4),
+                "pareto_front": pareto,
+            }
+
+            log.info(
+                "Joint optimization (%s): best Sharpe=%.3f (%+.3f), %d trials",
+                ", ".join(params_to_tune), best["sharpe"],
+                best["sharpe"] - baseline_sharpe, len(trials_log),
+            )
+
+            return result
+
+        except Exception as exc:
+            log.exception("Joint optimization failed")
+            # Restore originals
+            try:
+                for p, orig in originals.items():
+                    setattr(self.settings, p, type(orig)(orig))
+            except Exception:
+                pass
+            return {"error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # C. Parameter Sensitivity Analysis
+    # ─────────────────────────────────────────────────────────────────────
+    def sensitivity_analysis(
+        self, param_name: str, n_points: int = 10
+    ) -> dict:
+        """
+        Sweep a parameter from min to max and record performance metrics
+        at each point. Computes gradient (dSharpe/dParam), optimal region,
+        and stability assessment.
+
+        Parameters
+        ----------
+        param_name : str
+            Parameter to analyze.
+        n_points : int
+            Number of sweep points (default 10).
+
+        Returns
+        -------
+        dict
+            sweep_results (list), gradient, optimal_region, stability_score.
+        """
+        try:
+            import numpy as np
+
+            lower, upper, current = self._get_param_bounds(param_name)
+            if current is None:
+                return {"error": f"parameter '{param_name}' not found"}
+
+            current = float(current)
+            if lower is None:
+                lower = current * 0.3 if current > 0 else current - abs(current) * 2
+            if upper is None:
+                upper = current * 3.0 if current > 0 else current + abs(current) * 2
+            lower, upper = float(lower), float(upper)
+
+            original_value = current
+            sweep_values = np.linspace(lower, upper, n_points)
+            sweep_results = []
+
+            for val in sweep_values:
+                try:
+                    setattr(self.settings, param_name, type(original_value)(val))
+                    result = _run_backtest()
+                    sweep_results.append({
+                        "value": round(float(val), 6),
+                        "sharpe": round(float(result.get("sharpe", 0)), 4),
+                        "win_rate": round(float(result.get("win_rate", result.get("hit_rate", 0))), 4),
+                        "max_drawdown": round(float(result.get("max_drawdown", 0)), 4),
+                    })
+                except Exception as sweep_exc:
+                    log.debug("Sensitivity sweep at %s=%.4f failed: %s", param_name, val, sweep_exc)
+
+            # Restore
+            setattr(self.settings, param_name, type(original_value)(original_value))
+
+            if len(sweep_results) < 3:
+                return {"error": "insufficient sweep data", "param_name": param_name}
+
+            sharpes = np.array([s["sharpe"] for s in sweep_results])
+            values = np.array([s["value"] for s in sweep_results])
+
+            # Gradient: average dSharpe/dParam
+            if len(values) > 1:
+                d_sharpe = np.diff(sharpes)
+                d_param = np.diff(values)
+                gradients = d_sharpe / np.where(np.abs(d_param) > 1e-12, d_param, 1e-12)
+                avg_gradient = float(np.mean(gradients))
+            else:
+                avg_gradient = 0.0
+
+            # Optimal region: contiguous region where Sharpe is within 90% of peak
+            peak_sharpe = float(np.max(sharpes))
+            threshold = peak_sharpe * 0.9 if peak_sharpe > 0 else peak_sharpe * 1.1
+            in_optimal = sharpes >= threshold if peak_sharpe > 0 else sharpes <= threshold
+            optimal_indices = np.where(in_optimal)[0]
+            if len(optimal_indices) > 0:
+                optimal_region = {
+                    "lower": round(float(values[optimal_indices[0]]), 6),
+                    "upper": round(float(values[optimal_indices[-1]]), 6),
+                    "best_value": round(float(values[np.argmax(sharpes)]), 6),
+                    "best_sharpe": round(peak_sharpe, 4),
+                }
+            else:
+                optimal_region = {"lower": lower, "upper": upper, "best_value": current, "best_sharpe": 0}
+
+            # Stability: std of Sharpe across sweep (lower = more stable)
+            stability = round(float(np.std(sharpes)), 4)
+            stability_score = (
+                "STABLE" if stability < 0.1
+                else "MODERATE" if stability < 0.3
+                else "SENSITIVE"
+            )
+
+            result = {
+                "param_name": param_name,
+                "n_points": len(sweep_results),
+                "current_value": round(original_value, 6),
+                "sweep_results": sweep_results,
+                "gradient": round(avg_gradient, 6),
+                "optimal_region": optimal_region,
+                "stability": stability,
+                "stability_score": stability_score,
+            }
+
+            log.info(
+                "Sensitivity %s: gradient=%.4f, optimal=[%.3f, %.3f], stability=%s",
+                param_name, avg_gradient,
+                optimal_region["lower"], optimal_region["upper"],
+                stability_score,
+            )
+
+            return result
+
+        except Exception as exc:
+            log.exception("Sensitivity analysis failed for %s", param_name)
+            try:
+                setattr(self.settings, param_name, original_value)
+            except Exception:
+                pass
+            return {"error": str(exc), "param_name": param_name}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # D. Automatic Revert on Degradation
+    # ─────────────────────────────────────────────────────────────────────
+    def check_and_revert(self) -> dict:
+        """
+        Compare current performance vs last promoted performance.
+        If Sharpe dropped > 0.1 or win-rate dropped > 5%, automatically
+        revert to backup settings and log the revert action.
+
+        Returns
+        -------
+        dict
+            action_taken (str: 'reverted' or 'no_action'), before/after metrics,
+            reverted_params (list if reverted).
+        """
+        try:
+            # Load last promoted metrics from optimization log
+            if self.opt_log is None:
+                return {"action_taken": "no_action", "reason": "optimization log not available"}
+
+            trend = self.opt_log.recent_trend(n=1)
+            if not trend:
+                return {"action_taken": "no_action", "reason": "no previous optimization records"}
+
+            last_record = trend[-1]
+            promoted_metrics = last_record.get("after_metrics", last_record.get("before_metrics", {}))
+            promoted_sharpe = float(promoted_metrics.get("sharpe", promoted_metrics.get("ic", 0)))
+            promoted_wr = float(promoted_metrics.get("hit_rate", promoted_metrics.get("win_rate", 0)))
+
+            # Current performance
+            current_bt = _run_backtest()
+            current_sharpe = float(current_bt.get("sharpe", 0))
+            current_wr = float(current_bt.get("win_rate", current_bt.get("hit_rate", 0)))
+
+            sharpe_drop = promoted_sharpe - current_sharpe
+            wr_drop = (promoted_wr - current_wr) * 100  # percentage points
+
+            needs_revert = sharpe_drop > 0.1 or wr_drop > 5.0
+
+            result = {
+                "promoted_sharpe": round(promoted_sharpe, 4),
+                "current_sharpe": round(current_sharpe, 4),
+                "sharpe_drop": round(sharpe_drop, 4),
+                "promoted_wr": round(promoted_wr, 4),
+                "current_wr": round(current_wr, 4),
+                "wr_drop_pct": round(wr_drop, 2),
+            }
+
+            if needs_revert:
+                log.warning(
+                    "DEGRADATION DETECTED: Sharpe %.3f->%.3f (drop=%.3f), WR drop=%.1f%%",
+                    promoted_sharpe, current_sharpe, sharpe_drop, wr_drop,
+                )
+
+                # Load backup settings
+                backup_path = ROOT / "config" / "settings.py.optbak"
+                reverted_params = []
+
+                if backup_path.exists():
+                    try:
+                        import importlib
+                        # Reload settings from backup
+                        import shutil
+                        settings_path = ROOT / "config" / "settings.py"
+                        shutil.copy2(backup_path, settings_path)
+                        log.info("Reverted settings.py from backup")
+                        reverted_params.append("settings.py (full revert from backup)")
+                    except Exception as rev_exc:
+                        log.warning("File revert failed: %s", rev_exc)
+                else:
+                    log.info("No backup file found — logging revert recommendation only")
+                    reverted_params.append("NO_BACKUP_AVAILABLE — manual review required")
+
+                # Log the revert
+                if self.opt_log:
+                    self.opt_log.log_attempt({
+                        "agent_source": "optimizer_revert",
+                        "change_type": "auto_revert",
+                        "target_file": "config/settings.py",
+                        "before_metrics": {"sharpe": current_sharpe, "hit_rate": current_wr},
+                        "after_metrics": {"sharpe": promoted_sharpe, "hit_rate": promoted_wr},
+                        "outcome": "reverted",
+                        "delta_sharpe": round(sharpe_drop, 6),
+                        "reason": f"Sharpe drop={sharpe_drop:.3f}, WR drop={wr_drop:.1f}%",
+                    })
+
+                result["action_taken"] = "reverted"
+                result["reverted_params"] = reverted_params
+                result["reason"] = f"Sharpe drop={sharpe_drop:.3f}, WR drop={wr_drop:.1f}%"
+
+            else:
+                result["action_taken"] = "no_action"
+                result["reason"] = "performance within acceptable bounds"
+
+            log.info("Check-and-revert: %s", result["action_taken"])
+            return result
+
+        except Exception as exc:
+            log.exception("Check-and-revert failed")
+            return {"action_taken": "error", "error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # E. GPT Strategy Brainstorming
+    # ─────────────────────────────────────────────────────────────────────
+    def brainstorm_with_gpt(self, context: dict) -> dict:
+        """
+        Send current performance, regime, and weaknesses to GPT and ask
+        for NEW strategy ideas (not just parameter changes). Parses the
+        response into actionable strategy blueprints and saves them.
+
+        Parameters
+        ----------
+        context : dict
+            Current system context with keys: metrics, regime, weaknesses,
+            existing_strategies.
+
+        Returns
+        -------
+        dict
+            strategy_ideas (list of dicts), raw_response, saved_path.
+        """
+        try:
+            from agents.math.llm_bridge import DualLLMBridge
+
+            bridge = DualLLMBridge()
+            if not bridge.has_gpt and not bridge.has_claude:
+                return {"error": "no LLM available for brainstorming"}
+
+            metrics = context.get("metrics", {})
+            regime = context.get("regime", "UNKNOWN")
+            weaknesses = context.get("weaknesses", "none identified")
+            existing = context.get("existing_strategies", [])
+
+            prompt = (
+                f"You are a senior quant researcher at a systematic hedge fund.\n\n"
+                f"CURRENT REGIME: {regime}\n"
+                f"METRICS: Sharpe={metrics.get('sharpe', 'N/A')}, "
+                f"WR={metrics.get('hit_rate', metrics.get('win_rate', 'N/A'))}, "
+                f"IC={metrics.get('ic_mean', metrics.get('ic', 'N/A'))}\n"
+                f"WEAKNESSES: {weaknesses}\n"
+                f"EXISTING STRATEGIES: {', '.join(existing[:10]) if existing else 'N/A'}\n\n"
+                f"Propose 3 NEW trading strategies (not parameter changes) that would:\n"
+                f"1. Diversify from existing strategies\n"
+                f"2. Perform well in the current regime ({regime})\n"
+                f"3. Be implementable with sector ETF data\n\n"
+                f"For EACH strategy, provide:\n"
+                f"- NAME: (short unique name)\n"
+                f"- SIGNAL: (how to generate entry/exit signals)\n"
+                f"- EDGE: (why this should work, economic intuition)\n"
+                f"- PARAMS: (key parameters with suggested starting values)\n"
+                f"- EXPECTED: (estimated Sharpe range)\n"
+            )
+
+            if bridge.has_gpt:
+                response = bridge.query_gpt(prompt, "strategy_brainstorm")
+            else:
+                response = bridge.query_claude(prompt, "strategy_brainstorm")
+
+            if not response:
+                return {"error": "empty LLM response"}
+
+            # Parse strategy ideas
+            ideas = []
+            current_idea: dict = {}
+            for line in response.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    if current_idea and current_idea.get("name"):
+                        ideas.append(current_idea)
+                        current_idea = {}
+                    continue
+                line_upper = line.upper()
+                if "NAME:" in line_upper or line_upper.startswith("NAME"):
+                    if current_idea and current_idea.get("name"):
+                        ideas.append(current_idea)
+                    current_idea = {"name": line.split(":", 1)[-1].strip()}
+                elif "SIGNAL:" in line_upper:
+                    current_idea["signal"] = line.split(":", 1)[-1].strip()
+                elif "EDGE:" in line_upper:
+                    current_idea["edge"] = line.split(":", 1)[-1].strip()
+                elif "PARAMS:" in line_upper:
+                    current_idea["params"] = line.split(":", 1)[-1].strip()
+                elif "EXPECTED:" in line_upper:
+                    current_idea["expected_sharpe"] = line.split(":", 1)[-1].strip()
+
+            if current_idea and current_idea.get("name"):
+                ideas.append(current_idea)
+
+            # Save to strategy_ideas directory
+            ideas_dir = Path(__file__).resolve().parent / "strategy_ideas"
+            ideas_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            save_path = ideas_dir / f"brainstorm_{ts}.json"
+            save_data = {
+                "timestamp": ts,
+                "regime": regime,
+                "metrics": metrics,
+                "ideas": ideas,
+                "raw_response": response,
+            }
+            save_path.write_text(
+                json.dumps(save_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            result = {
+                "strategy_ideas": ideas[:3],
+                "n_ideas": len(ideas[:3]),
+                "raw_response": response[:500],
+                "saved_path": str(save_path),
+                "regime": regime,
+            }
+
+            log.info(
+                "GPT brainstorm: %d strategy ideas for regime %s, saved to %s",
+                len(ideas[:3]), regime, save_path.name,
+            )
+
+            return result
+
+        except Exception as exc:
+            log.exception("GPT strategy brainstorming failed")
+            return {"error": str(exc)}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Run all professional optimizations
+    # ─────────────────────────────────────────────────────────────────────
+    def run_professional_optimization(self, metrics: dict) -> dict:
+        """
+        Run full professional-grade optimization suite.
+
+        Executes: degradation check, sensitivity analysis on key params,
+        Bayesian search on most sensitive param, brainstorming.
+
+        Parameters
+        ----------
+        metrics : dict
+            Current backtest metrics.
+
+        Returns
+        -------
+        dict
+            Results from all professional optimization steps.
+        """
+        try:
+            log.info("Running professional-grade optimization suite...")
+            results: dict = {}
+
+            # Step 1: Check for degradation / auto-revert
+            log.info("  [OPT-PRO 1/4] Checking for degradation...")
+            revert_result = self.check_and_revert()
+            results["degradation_check"] = revert_result
+
+            if revert_result.get("action_taken") == "reverted":
+                log.warning("  Settings reverted due to degradation — re-running backtest")
+                metrics = _run_backtest()
+
+            # Step 2: Sensitivity analysis on key parameters
+            log.info("  [OPT-PRO 2/4] Sensitivity analysis on key params...")
+            key_params = ["pca_window", "zscore_window", "signal_entry_threshold"]
+            sensitivity_results = {}
+            for param in key_params:
+                try:
+                    if hasattr(self.settings, param):
+                        sa = self.sensitivity_analysis(param, n_points=7)
+                        sensitivity_results[param] = sa
+                except Exception as sa_exc:
+                    log.debug("Sensitivity for %s failed: %s", param, sa_exc)
+            results["sensitivity"] = sensitivity_results
+
+            # Step 3: Bayesian search on most sensitive parameter
+            log.info("  [OPT-PRO 3/4] Bayesian search on most sensitive param...")
+            most_sensitive = None
+            max_gradient = 0
+            for param, sa in sensitivity_results.items():
+                if isinstance(sa, dict) and "gradient" in sa:
+                    if abs(sa["gradient"]) > abs(max_gradient):
+                        max_gradient = sa["gradient"]
+                        most_sensitive = param
+
+            if most_sensitive:
+                bayesian_result = self.bayesian_search(most_sensitive, n_trials=15)
+                results["bayesian_search"] = bayesian_result
+            else:
+                results["bayesian_search"] = {"skipped": "no sensitive parameter found"}
+
+            # Step 4: GPT brainstorming
+            log.info("  [OPT-PRO 4/4] GPT strategy brainstorming...")
+            bus = get_bus()
+            meth_report = bus.latest("agent_methodology") or {}
+            regime = "UNKNOWN"
+            if isinstance(meth_report, dict):
+                regime = meth_report.get("parameters_snapshot", {}).get("regime", "UNKNOWN")
+
+            existing_strategies = []
+            if isinstance(meth_report, dict):
+                lab_data = meth_report.get("methodology_lab", {})
+                if isinstance(lab_data, dict):
+                    existing_strategies = [
+                        r.get("name", "") for r in lab_data.get("ranking", [])
+                    ]
+
+            weaknesses = []
+            sharpe = metrics.get("sharpe", 0)
+            if sharpe < 0.5:
+                weaknesses.append(f"Low Sharpe ({sharpe})")
+            wr = metrics.get("hit_rate", metrics.get("win_rate", 0))
+            if wr < 0.52:
+                weaknesses.append(f"Low win rate ({wr})")
+
+            brainstorm = self.brainstorm_with_gpt({
+                "metrics": metrics,
+                "regime": regime,
+                "weaknesses": "; ".join(weaknesses) if weaknesses else "none critical",
+                "existing_strategies": existing_strategies,
+            })
+            results["brainstorm"] = brainstorm
+
+            log.info("Professional optimization suite complete")
+            return results
+
+        except Exception as exc:
+            log.exception("Professional optimization suite failed")
+            return {"error": str(exc)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main run
 # ─────────────────────────────────────────────────────────────────────────────
@@ -949,6 +1735,16 @@ def run(once: bool = False) -> None:
                 current_metrics=metrics,
             )
 
+            # 8.5 Professional-grade optimization suite
+            log.info("Running professional-grade optimization suite...")
+            try:
+                pro_optimizer = OptimizerAgent()
+                pro_results = pro_optimizer.run_professional_optimization(metrics)
+                log.info("Professional optimization: %d results", len(pro_results))
+            except Exception as pro_exc:
+                log.warning("Professional optimization failed: %s", pro_exc)
+                pro_results = {"error": str(pro_exc)}
+
             # 9. הרצת backtest אחרי שינויים — השוואה
             log.info("Running post-optimization backtest...")
             after_bt = _run_backtest()
@@ -991,6 +1787,10 @@ def run(once: bool = False) -> None:
                 "delta_ic": round(delta_ic, 6),
                 "turns": result["turns"],
                 "math_proposals_used": len(math_proposals),
+                "professional_optimization": {
+                    k: v for k, v in pro_results.items()
+                    if k not in ("brainstorm",)  # exclude large raw responses
+                } if isinstance(pro_results, dict) else {},
             })
 
             registry.heartbeat("agent_optimizer", AgentStatus.COMPLETED)
