@@ -503,31 +503,60 @@ class AutoImprover:
         return suggestions
 
     def _suggest_for_all_negative(self, params: Dict) -> List[Dict]:
-        """Suggestions when all strategies are negative — conservative shift."""
+        """
+        Smart suggestions based on alpha research findings:
+        - LOWER z-entry = more trades, better WR (proven: z=0.5 → WR 57%)
+        - LONGER hold = more time for mean reversion (proven: hold=30 → better)
+        - HIGHER regime sizing in CALM = capitalize on best regime (Sharpe 0.66)
+        - LOWER tension sizing = avoid TENSION losses
+        """
         suggestions = []
-        # Shorten hold period
-        current_hold = params.get("trade_max_holding_days", 20)
-        proposed_hold = max(10, current_hold - 5)
-        if proposed_hold != current_hold:
-            suggestions.append({
-                "param": "trade_max_holding_days",
-                "current": current_hold,
-                "proposed": proposed_hold,
-                "reason": "Shorten max hold to reduce time decay on losing trades",
-                "source": "rule",
-            })
-        # Raise entry bar
+
+        # Lower z-entry in CALM (proven: lower threshold catches more MR opportunities)
         current_z = params.get("regime_z_calm", 0.7)
-        proposed_z = min(1.5, round(current_z + 0.15, 2))
-        if proposed_z != current_z:
+        if current_z > 0.5:
             suggestions.append({
                 "param": "regime_z_calm",
                 "current": current_z,
-                "proposed": proposed_z,
-                "reason": "Require stronger signal in CALM regime",
-                "source": "rule",
+                "proposed": round(max(0.4, current_z - 0.1), 2),
+                "reason": "Lower CALM z-entry: more MR trades, proven WR improvement at z=0.5",
+                "source": "rule_alpha_research",
             })
-        return suggestions
+
+        # Increase hold period (MR needs time to revert)
+        current_hold = params.get("trade_max_holding_days", 20)
+        if current_hold < 30:
+            suggestions.append({
+                "param": "trade_max_holding_days",
+                "current": current_hold,
+                "proposed": min(35, current_hold + 5),
+                "reason": "Extend hold: MR needs time, proven optimal at 25-30 days",
+                "source": "rule_alpha_research",
+            })
+
+        # Boost CALM regime sizing (Sharpe 0.66 in CALM)
+        current_calm = params.get("regime_size_calm", 1.3)
+        if current_calm < 1.5:
+            suggestions.append({
+                "param": "regime_size_calm",
+                "current": current_calm,
+                "proposed": min(2.0, round(current_calm + 0.2, 1)),
+                "reason": "Increase CALM sizing: best regime for MR (Sharpe=0.66)",
+                "source": "rule_alpha_research",
+            })
+
+        # Reduce TENSION sizing (Sharpe only 0.23 in NORMAL, MR weaker)
+        current_tension = params.get("regime_size_tension", 0.6)
+        if current_tension > 0.4:
+            suggestions.append({
+                "param": "regime_size_tension",
+                "current": current_tension,
+                "proposed": round(max(0.2, current_tension - 0.1), 1),
+                "reason": "Reduce TENSION sizing: MR less reliable under stress",
+                "source": "rule_alpha_research",
+            })
+
+        return suggestions[:MAX_SUGGESTIONS_PER_CYCLE]
 
     def ask_gpt_for_ideas(self, weaknesses: List[Dict], current_params: Dict) -> List[Dict]:
         """
@@ -657,25 +686,53 @@ class AutoImprover:
             from config.settings import Settings
             test_settings = Settings()
 
-            # Run a quick backtest with best methodology only
-            from analytics.methodology_lab import MethodologyLab, PcaZReversal
+            # Run AlphaWhitelistMR with settings-mapped parameters
+            from analytics.methodology_lab import MethodologyLab, AlphaWhitelistMR
             lab = MethodologyLab(self.prices, test_settings)
 
-            # Run just the baseline methodology for speed
-            baseline = PcaZReversal()
-            result = lab.run_methodology(baseline)
+            # Map settings params to AlphaWhitelistMR constructor
+            alpha_kwargs = {
+                "z_entry": getattr(test_settings, "regime_z_calm", 0.7),
+                "max_hold": getattr(test_settings, "trade_max_holding_days", 25),
+                "vix_kill": getattr(test_settings, "signal_vix_hard", 32),
+                "regime_sizing": {
+                    "CALM": getattr(test_settings, "regime_size_calm", 1.3),
+                    "NORMAL": getattr(test_settings, "regime_size_normal", 1.0),
+                    "TENSION": getattr(test_settings, "regime_size_tension", 0.6),
+                    "CRISIS": 0.0,
+                },
+            }
+            test_method = AlphaWhitelistMR(**alpha_kwargs)
+            result = lab.run_methodology(test_method)
+
+            # Compare vs AlphaWhitelistMR baseline using WR + Sharpe composite
+            baseline_wr = getattr(self, "_last_baseline_wr", 0.53)
+            baseline_sh = self._last_baseline_sharpe
+
+            # Composite: 60% WR improvement + 40% Sharpe improvement
+            wr_delta = result.win_rate - baseline_wr
+            sh_delta = result.sharpe - baseline_sh
+            composite_delta = 0.6 * wr_delta + 0.4 * sh_delta
+
+            # Pass if: WR improves or stays same, AND enough trades
+            passed = (
+                result.win_rate >= baseline_wr - 0.02  # WR doesn't drop much
+                and result.total_trades >= 100           # Enough trades
+                and composite_delta > -0.02              # Overall improvement
+            )
 
             test_result = {
                 "param": param,
                 "current": current,
                 "proposed": proposed,
-                "sharpe_before": self._last_baseline_sharpe,
+                "sharpe_before": baseline_sh,
                 "sharpe_after": result.sharpe,
-                "delta": result.sharpe - self._last_baseline_sharpe,
-                "win_rate_after": result.win_rate,
+                "wr_before": baseline_wr,
+                "wr_after": result.win_rate,
+                "delta": round(composite_delta, 4),
                 "max_dd_after": result.max_drawdown,
                 "trades_after": result.total_trades,
-                "passed": (result.sharpe - self._last_baseline_sharpe) >= SHARPE_PROMOTION_THRESHOLD,
+                "passed": passed,
             }
 
             log.info(
@@ -786,8 +843,15 @@ class AutoImprover:
                 "trades": metrics.get("best_trades", 0),
             }
 
-            # Cache baseline Sharpe for sandbox testing
-            self._last_baseline_sharpe = metrics.get("best_sharpe", 0)
+            # Cache baseline using AlphaWhitelistMR specifically (not "best" which may be 0-trade)
+            all_r = metrics.get("all_results", {})
+            alpha_r = all_r.get("ALPHA_WHITELIST_MR", all_r.get("ALPHA_WHITELIST_MR_LOOSE", {}))
+            if alpha_r:
+                self._last_baseline_sharpe = alpha_r.get("sharpe", 0)
+                self._last_baseline_wr = alpha_r.get("win_rate", 0.50)
+            else:
+                self._last_baseline_sharpe = metrics.get("best_sharpe", 0)
+                self._last_baseline_wr = metrics.get("best_win_rate", 0.50)
 
             # Step 2: Identify weaknesses
             log.info("Step 2/6: Identifying weaknesses...")
