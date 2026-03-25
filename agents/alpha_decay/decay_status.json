@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-03-25T17:02:55.425842+00:00",
+  "decay_level": "HEALTHY",
+  "metrics": {
+    "ic_current": 0,
+    "sharpe_current": 0,
+    "wr_current": 0.5,
+    "n_periods": 387
+  },
+  "signals": {
+    "ic_declining": false,
+    "sharpe_declining": false,
+    "wr_declining": false,
+    "consecutive_negative_ic": 0,
+    "consecutive_negative_sharpe": 0,
+    "ic_slope": 0.0,
+    "sharpe_slope": 0.0,
+    "wr_slope": 0.0
+  },
+  "recommendations": [
+    "Continue current strategy \u2014 all metrics within normal range"
+  ]
+}
