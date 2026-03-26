@@ -1390,13 +1390,47 @@ class ReportAssembler:
             "strategies_rejected": sum(1 for sc in scorecards if sc.promotion_decision == "REJECTED"),
         }
 
-        # Machine summary
-        machine_summary = {
-            "scorecards_computed": len(scorecards),
-            "methodology_version": METHODOLOGY_VERSION,
-            "validation_complete": bool(validation_suite),
-            "governance_complete": bool(governance),
-        }
+        # Machine summary — stable contract for downstream agents
+        from agents.methodology.report_schema import MachineSummary, REPORT_SCHEMA_VERSION
+        best_sc = scorecards[0] if scorecards else None
+        approved_list = [sc for sc in scorecards if sc.promotion_decision == "APPROVED"]
+        conditional_list = [sc for sc in scorecards if sc.promotion_decision == "CONDITIONAL"]
+        rejected_list = [sc for sc in scorecards if sc.promotion_decision == "REJECTED"]
+        disable_list = [sc.name for sc in scorecards if sc.classification == "DISABLE"]
+        observe_list = [sc.name for sc in scorecards if sc.classification == "EXPERIMENTAL"]
+
+        ms_obj = MachineSummary(
+            schema_version=REPORT_SCHEMA_VERSION,
+            methodology_version=METHODOLOGY_VERSION,
+            experiment_id=governance.get("experiment_id", ""),
+            timestamp=governance.get("timestamp", ""),
+            n_strategies=len(scorecards),
+            n_approved=len(approved_list),
+            n_conditional=len(conditional_list),
+            n_rejected=len(rejected_list),
+            best_strategy_name=best_sc.name if best_sc else "",
+            best_strategy_decision=best_sc.promotion_decision if best_sc else "REJECTED",
+            best_net_sharpe=best_sc.net_sharpe if best_sc else 0.0,
+            best_gross_sharpe=best_sc.gross_sharpe if best_sc else 0.0,
+            best_deflated_sharpe=best_sc.deflated_sharpe if best_sc else 0.0,
+            best_hit_rate=best_sc.hit_rate if best_sc else 0.0,
+            best_max_drawdown=best_sc.max_drawdown if best_sc else 0.0,
+            best_total_trades=best_sc.total_trades if best_sc else 0,
+            best_classification=best_sc.classification if best_sc else "DISABLE",
+            current_regime=regime_attribution.get("current_regime", "UNKNOWN"),
+            best_per_regime=regime_attribution.get("best_per_regime", {}),
+            validation_complete=bool(validation_suite),
+            governance_complete=bool(governance),
+            overfitting_flag=any(sc.deflated_sharpe < 0 for sc in scorecards),
+            cost_drag_flag=any(sc.cost_drag_pct > 30 for sc in scorecards),
+            mean_robustness=_safe_round(float(np.mean([sc.robustness_score for sc in scorecards]))) if scorecards else 0.0,
+            mean_stability=_safe_round(float(np.mean([sc.stability_score for sc in scorecards]))) if scorecards else 0.0,
+            final_rankings={sc.name: sc.final_rank for sc in scorecards},
+            optimizer_should_tune=bool(conditional_list) and not bool(approved_list),
+            strategies_to_disable=disable_list,
+            strategies_to_observe=observe_list,
+        )
+        machine_summary = ms_obj.to_dict()
 
         # Merge into base report
         base_report["governance"] = governance
