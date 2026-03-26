@@ -20,11 +20,14 @@ Commission: $0.005/share (configurable)
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import math
 import sys
 import time
+import uuid
+from dataclasses import dataclass, field, asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -115,6 +118,66 @@ _DEFAULT_SLIPPAGE_BPS = 5          # 5 basis points
 _DEFAULT_COMMISSION_PER_SHARE = 0.005  # $0.005/share
 _INITIAL_CAPITAL = 1_000_000.0
 
+# -- Institutional input paths ------------------------------------------------
+_PORTFOLIO_WEIGHTS_PATH = ROOT / "agents" / "portfolio_construction" / "portfolio_weights.json"
+_RISK_STATUS_PATH = ROOT / "agents" / "risk_guardian" / "risk_status.json"
+_REGIME_FORECAST_PATH = ROOT / "agents" / "regime_forecaster" / "regime_forecast.json"
+_DECAY_STATUS_PATH = ROOT / "agents" / "alpha_decay" / "decay_status.json"
+
+# -- Execution style constants ------------------------------------------------
+_DUST_THRESHOLD_WEIGHT = 0.005  # below this delta weight -> NO_TRADE
+_PROFIT_TAKE_PCT = 0.03
+_STOP_LOSS_PCT = -0.04
+_TIME_STOP_DAYS = 25
+_MAX_PENDING_CYCLES = 5
+
+# -- Slippage profiles per execution style ------------------------------------
+_SLIPPAGE_PROFILES: Dict[str, Dict[str, float]] = {
+    "AGGRESSIVE":      {"fill_pct": 1.00, "slippage_bps": 8.0},
+    "PASSIVE":         {"fill_pct": 0.80, "slippage_bps": 3.0},
+    "TWAP":            {"fill_pct": 0.95, "slippage_bps": 5.0},
+    "SCALED_ENTRY":    {"fill_pct": 0.60, "slippage_bps": 4.0},
+    "DEFENSIVE_EXIT":  {"fill_pct": 0.90, "slippage_bps": 6.0},
+    "EMERGENCY_EXIT":  {"fill_pct": 1.00, "slippage_bps": 15.0},
+    "NO_TRADE":        {"fill_pct": 0.00, "slippage_bps": 0.0},
+    "DEFERRED":        {"fill_pct": 0.00, "slippage_bps": 0.0},
+}
+
+
+# =============================================================================
+# OrderIntent dataclass
+# =============================================================================
+@dataclass
+class OrderIntent:
+    """Represents a single order intention with full institutional context."""
+
+    order_id: str = ""
+    ticker: str = ""
+    side: str = ""                      # BUY / SELL
+    order_type: str = ""                # ENTRY / EXIT / INCREASE / DECREASE / FLIP / HOLD
+    target_weight: float = 0.0
+    current_weight: float = 0.0
+    delta_notional: float = 0.0
+    urgency: str = "MEDIUM"             # HIGH / MEDIUM / LOW / DEFERRED
+    execution_style: str = "PASSIVE"    # AGGRESSIVE / PASSIVE / TWAP / SCALED_ENTRY / DEFENSIVE_EXIT / EMERGENCY_EXIT / NO_TRADE
+    allowed: bool = True
+    restrictions: List[str] = field(default_factory=list)
+    expected_cost_bps: float = 0.0
+    expected_impact_bps: float = 0.0
+    sleeve_role: str = "CORE"           # CORE / TACTICAL / etc
+    health_state: str = "HEALTHY"
+    regime_eligible: bool = True
+    fill_status: str = "PENDING"        # PENDING / PARTIAL / FILLED / REJECTED / DEFERRED
+    filled_pct: float = 0.0
+    reason: str = ""
+    fill_price: float = 0.0
+    decision_price: float = 0.0
+    arrival_price: float = 0.0
+    cycle_age: int = 0                  # how many cycles this intent has been pending
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
 
 # =============================================================================
 # ExecutionAgent
@@ -163,6 +226,7 @@ class ExecutionAgent:
                 log.warning("Failed to initialize LeverageEngine: %s", exc)
 
         self._execution_log: List[dict] = []
+        self._pending_orders: List[OrderIntent] = []
 
     # -----------------------------------------------------------------
     # Signal loading
@@ -1053,6 +1117,973 @@ class ExecutionAgent:
 
         return result
 
+    # =================================================================
+    # INSTITUTIONAL EXECUTION DESK — added methods
+    # =================================================================
+
+    # -----------------------------------------------------------------
+    # 1. ExecutionInputAssembler
+    # -----------------------------------------------------------------
+
+    def assemble_execution_inputs(self) -> Dict[str, Any]:
+        """
+        Load all upstream agent outputs needed for institutional execution.
+
+        Returns structured dict with available_inputs list and each
+        agent's data under its own key.
+        """
+        inputs: Dict[str, Any] = {
+            "available_inputs": [],
+            "portfolio_construction": None,
+            "risk_guardian": None,
+            "regime_forecast": None,
+            "alpha_decay": None,
+        }
+
+        # Portfolio Construction targets
+        try:
+            if _PORTFOLIO_WEIGHTS_PATH.exists():
+                data = json.loads(_PORTFOLIO_WEIGHTS_PATH.read_text(encoding="utf-8"))
+                inputs["portfolio_construction"] = data
+                inputs["available_inputs"].append("portfolio_construction")
+                log.info("Loaded portfolio construction targets: %d positions",
+                         len(data.get("weights", {})))
+        except Exception as exc:
+            log.warning("Failed to load portfolio_weights.json: %s", exc)
+
+        # Risk Guardian veto
+        try:
+            if _RISK_STATUS_PATH.exists():
+                data = json.loads(_RISK_STATUS_PATH.read_text(encoding="utf-8"))
+                inputs["risk_guardian"] = data
+                inputs["available_inputs"].append("risk_guardian")
+                log.info("Loaded risk guardian status: level=%s",
+                         data.get("level", "UNKNOWN"))
+        except Exception as exc:
+            log.warning("Failed to load risk_status.json: %s", exc)
+
+        # Regime Forecast
+        try:
+            if _REGIME_FORECAST_PATH.exists():
+                data = json.loads(_REGIME_FORECAST_PATH.read_text(encoding="utf-8"))
+                inputs["regime_forecast"] = data
+                inputs["available_inputs"].append("regime_forecast")
+                log.info("Loaded regime forecast: predicted=%s",
+                         data.get("predicted_regime", "UNKNOWN"))
+        except Exception as exc:
+            log.warning("Failed to load regime_forecast.json: %s", exc)
+
+        # Alpha Decay
+        try:
+            if _DECAY_STATUS_PATH.exists():
+                data = json.loads(_DECAY_STATUS_PATH.read_text(encoding="utf-8"))
+                inputs["alpha_decay"] = data
+                inputs["available_inputs"].append("alpha_decay")
+                log.info("Loaded alpha decay status: level=%s",
+                         data.get("decay_level", "UNKNOWN"))
+        except Exception as exc:
+            log.warning("Failed to load decay_status.json: %s", exc)
+
+        log.info("Assembled execution inputs: %s", inputs["available_inputs"])
+        return inputs
+
+    # -----------------------------------------------------------------
+    # 2. Portfolio Layer Separation
+    # -----------------------------------------------------------------
+
+    def compute_portfolio_layers(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Compute four portfolio layers from desired to realized.
+
+        Returns dict with desired_portfolio, risk_approved_portfolio,
+        executable_portfolio, realized_portfolio — each mapping ticker to
+        a dict of target_weight, current_weight, delta, order_type.
+        """
+        layers: Dict[str, Any] = {
+            "desired_portfolio": {},
+            "risk_approved_portfolio": {},
+            "executable_portfolio": {},
+            "realized_portfolio": {},
+        }
+
+        # --- Desired portfolio: from Portfolio Construction ---
+        pc = inputs.get("portfolio_construction") or {}
+        desired_weights: Dict[str, float] = pc.get("weights", {})
+
+        # --- Realized portfolio: current positions ---
+        realized_weights: Dict[str, float] = {}
+        try:
+            portfolio_path = ROOT / "data" / "paper_portfolio.json"
+            if portfolio_path.exists():
+                pdata = json.loads(portfolio_path.read_text(encoding="utf-8"))
+                positions = pdata.get("positions", [])
+                total_value = float(pdata.get("total_value", _INITIAL_CAPITAL))
+                if total_value <= 0:
+                    total_value = _INITIAL_CAPITAL
+                for pos in positions:
+                    ticker = pos.get("ticker", "")
+                    notional = float(pos.get("notional", 0))
+                    realized_weights[ticker] = notional / total_value
+        except Exception as exc:
+            log.warning("Failed to load realized portfolio: %s", exc)
+
+        # All tickers across desired + realized
+        all_tickers = set(desired_weights.keys()) | set(realized_weights.keys())
+
+        # --- Risk Guardian veto/haircut ---
+        rg = inputs.get("risk_guardian") or {}
+        veto = rg.get("veto", {})
+        can_add_new = veto.get("can_allocate_new_risk", True)
+        must_reduce = veto.get("must_reduce_existing_risk", False)
+        emergency_unwind = veto.get("emergency_unwind_required", False)
+        vetoed_sleeves = set(veto.get("vetoed_sleeves", []))
+        haircut_required = rg.get("proposed_assessment", {}).get("haircut_required", False)
+        haircut_factor = 0.8 if haircut_required else 1.0
+
+        # --- Regime constraints ---
+        regime_data = inputs.get("regime_forecast") or {}
+        regime = regime_data.get("predicted_regime", "NORMAL")
+
+        # Regime-based turnover cap
+        regime_turnover_cap = {"CALM": 0.30, "NORMAL": 0.25, "TENSION": 0.15, "CRISIS": 0.08}
+        max_turnover = regime_turnover_cap.get(regime, 0.20)
+
+        for ticker in all_tickers:
+            target_w = desired_weights.get(ticker, 0.0)
+            current_w = realized_weights.get(ticker, 0.0)
+            delta = target_w - current_w
+
+            # Determine order type
+            if current_w == 0 and target_w > 0:
+                order_type = "ENTRY"
+            elif current_w > 0 and target_w == 0:
+                order_type = "EXIT"
+            elif delta > 0:
+                order_type = "INCREASE"
+            elif delta < 0:
+                order_type = "DECREASE"
+            else:
+                order_type = "HOLD"
+
+            row = {
+                "target_weight": round(target_w, 6),
+                "current_weight": round(current_w, 6),
+                "delta": round(delta, 6),
+                "order_type": order_type,
+            }
+
+            # Layer 1: Desired
+            layers["desired_portfolio"][ticker] = dict(row)
+
+            # Layer 2: Risk-approved (apply haircuts/vetoes)
+            approved_row = dict(row)
+            if ticker in vetoed_sleeves:
+                approved_row["target_weight"] = approved_row["current_weight"]
+                approved_row["delta"] = 0.0
+                approved_row["order_type"] = "HOLD"
+            elif emergency_unwind:
+                approved_row["target_weight"] = 0.0
+                approved_row["delta"] = -approved_row["current_weight"]
+                approved_row["order_type"] = "EXIT" if approved_row["current_weight"] > 0 else "HOLD"
+            elif not can_add_new and order_type in ("ENTRY", "INCREASE"):
+                approved_row["target_weight"] = approved_row["current_weight"]
+                approved_row["delta"] = 0.0
+                approved_row["order_type"] = "HOLD"
+            elif must_reduce and order_type in ("ENTRY", "INCREASE", "HOLD"):
+                approved_row["target_weight"] = round(approved_row["current_weight"] * 0.85, 6)
+                approved_row["delta"] = round(approved_row["target_weight"] - approved_row["current_weight"], 6)
+                approved_row["order_type"] = "DECREASE" if approved_row["delta"] < 0 else "HOLD"
+            elif haircut_required:
+                approved_row["target_weight"] = round(target_w * haircut_factor, 6)
+                approved_row["delta"] = round(approved_row["target_weight"] - current_w, 6)
+            layers["risk_approved_portfolio"][ticker] = approved_row
+
+            # Layer 3: Executable (apply regime/turnover/dust constraints)
+            exec_row = dict(approved_row)
+            if abs(exec_row["delta"]) < _DUST_THRESHOLD_WEIGHT:
+                exec_row["delta"] = 0.0
+                exec_row["target_weight"] = exec_row["current_weight"]
+                exec_row["order_type"] = "HOLD"
+            layers["executable_portfolio"][ticker] = exec_row
+
+            # Layer 4: Realized (current state)
+            layers["realized_portfolio"][ticker] = {
+                "target_weight": round(current_w, 6),
+                "current_weight": round(current_w, 6),
+                "delta": 0.0,
+                "order_type": "HOLD",
+            }
+
+        log.info(
+            "Portfolio layers computed: %d tickers, desired=%d, executable_deltas=%d",
+            len(all_tickers),
+            len(desired_weights),
+            sum(1 for t in layers["executable_portfolio"].values() if t["delta"] != 0),
+        )
+        return layers
+
+    # -----------------------------------------------------------------
+    # 3. OrderIntent builder
+    # -----------------------------------------------------------------
+
+    def build_order_intents(
+        self, layers: Dict[str, Any], inputs: Dict[str, Any]
+    ) -> List[OrderIntent]:
+        """
+        Build OrderIntent objects for every ticker with a non-zero executable delta.
+
+        Applies governance: veto, decay, regime eligibility, execution style.
+        """
+        intents: List[OrderIntent] = []
+        executable = layers.get("executable_portfolio", {})
+
+        rg = inputs.get("risk_guardian") or {}
+        veto = rg.get("veto", {})
+        vetoed_sleeves = set(veto.get("vetoed_sleeves", []))
+        emergency_unwind = veto.get("emergency_unwind_required", False)
+
+        decay_data = inputs.get("alpha_decay") or {}
+        decay_level = decay_data.get("decay_level", "HEALTHY")
+
+        regime_data = inputs.get("regime_forecast") or {}
+        regime = regime_data.get("predicted_regime", "NORMAL")
+        transition_prob = regime_data.get("transition_probability", 0.0)
+        # Derive transition state
+        if transition_prob > 0.6:
+            transition_state = "ACTIVE_TRANSITION"
+        elif transition_prob > 0.4:
+            transition_state = "EARLY_WARNING"
+        else:
+            transition_state = "STABLE"
+
+        for ticker, row in executable.items():
+            delta = row.get("delta", 0.0)
+            order_type = row.get("order_type", "HOLD")
+            if order_type == "HOLD" and abs(delta) < _DUST_THRESHOLD_WEIGHT:
+                continue
+
+            target_w = row.get("target_weight", 0.0)
+            current_w = row.get("current_weight", 0.0)
+            side = "BUY" if delta > 0 else "SELL"
+            delta_notional = abs(delta) * _INITIAL_CAPITAL
+
+            # Governance checks
+            allowed = True
+            restrictions: List[str] = []
+
+            if ticker in vetoed_sleeves:
+                allowed = False
+                restrictions.append("VETOED_BY_RISK_GUARDIAN")
+
+            if decay_level in ("STRUCTURAL_DECAY", "DEAD") and order_type in ("ENTRY", "INCREASE"):
+                allowed = False
+                restrictions.append(f"BLOCKED_BY_DECAY_{decay_level}")
+
+            regime_eligible = True
+            if regime == "CRISIS" and order_type == "ENTRY":
+                regime_eligible = False
+                restrictions.append("CRISIS_REGIME_ENTRY_BLOCKED")
+                allowed = False
+
+            # Urgency
+            if emergency_unwind:
+                urgency = "HIGH"
+            elif order_type == "EXIT":
+                urgency = "HIGH"
+            elif regime == "CRISIS":
+                urgency = "LOW"
+            elif abs(delta) > 0.05:
+                urgency = "HIGH"
+            elif abs(delta) > 0.02:
+                urgency = "MEDIUM"
+            else:
+                urgency = "LOW"
+
+            # Execution style
+            execution_style = self.determine_execution_style(
+                None, regime, transition_state, urgency, order_type, emergency_unwind
+            )
+
+            profile = _SLIPPAGE_PROFILES.get(execution_style, _SLIPPAGE_PROFILES["PASSIVE"])
+
+            intent = OrderIntent(
+                order_id=f"OI_{ticker}_{uuid.uuid4().hex[:8]}",
+                ticker=ticker,
+                side=side,
+                order_type=order_type,
+                target_weight=target_w,
+                current_weight=current_w,
+                delta_notional=round(delta_notional, 2),
+                urgency=urgency,
+                execution_style=execution_style,
+                allowed=allowed,
+                restrictions=restrictions,
+                expected_cost_bps=profile["slippage_bps"],
+                expected_impact_bps=round(profile["slippage_bps"] * 0.6, 2),
+                sleeve_role="CORE",
+                health_state=decay_level,
+                regime_eligible=regime_eligible,
+                fill_status="PENDING" if allowed else "REJECTED",
+                filled_pct=0.0,
+                reason="; ".join(restrictions) if restrictions else order_type,
+            )
+            intents.append(intent)
+
+        log.info(
+            "Built %d order intents (%d allowed, %d rejected)",
+            len(intents),
+            sum(1 for i in intents if i.allowed),
+            sum(1 for i in intents if not i.allowed),
+        )
+        return intents
+
+    # -----------------------------------------------------------------
+    # 4. ExecutionPolicyEngine
+    # -----------------------------------------------------------------
+
+    def determine_execution_style(
+        self,
+        intent: Optional[Any],
+        regime: str,
+        transition_state: str,
+        urgency: str,
+        order_type: str = "",
+        emergency: bool = False,
+    ) -> str:
+        """
+        Determine the execution style based on regime, urgency, and order type.
+
+        Returns one of: AGGRESSIVE, PASSIVE, TWAP, SCALED_ENTRY,
+        DEFENSIVE_EXIT, EMERGENCY_EXIT, NO_TRADE, DEFERRED.
+        """
+        if emergency:
+            return "EMERGENCY_EXIT"
+
+        otype = order_type or (intent.order_type if intent else "")
+
+        # Exit styles
+        if otype == "EXIT":
+            if regime == "CRISIS":
+                return "DEFENSIVE_EXIT"
+            if urgency == "HIGH":
+                return "AGGRESSIVE"
+            return "DEFENSIVE_EXIT"
+
+        # Entry / Increase styles
+        if otype in ("ENTRY", "INCREASE", "FLIP"):
+            if regime == "CRISIS":
+                return "NO_TRADE"  # Don't add risk in crisis
+            if regime == "TENSION":
+                return "SCALED_ENTRY"
+            if urgency == "HIGH":
+                return "AGGRESSIVE"
+            if urgency == "MEDIUM":
+                return "TWAP"
+            if urgency == "LOW":
+                return "DEFERRED"
+            return "PASSIVE"
+
+        # Decrease
+        if otype == "DECREASE":
+            if urgency == "HIGH":
+                return "AGGRESSIVE"
+            return "PASSIVE"
+
+        # Default
+        if urgency == "HIGH":
+            return "AGGRESSIVE"
+        return "PASSIVE"
+
+    # -----------------------------------------------------------------
+    # 5. Partial Fill Simulation
+    # -----------------------------------------------------------------
+
+    def simulate_fills(
+        self, intents: List[OrderIntent], prices: Optional[pd.DataFrame] = None
+    ) -> List[OrderIntent]:
+        """
+        Simulate partial fills for each OrderIntent based on execution style.
+
+        Updates fill_status, filled_pct, and fill_price on each intent.
+        """
+        for intent in intents:
+            if not intent.allowed:
+                intent.fill_status = "REJECTED"
+                intent.filled_pct = 0.0
+                continue
+
+            profile = _SLIPPAGE_PROFILES.get(
+                intent.execution_style, _SLIPPAGE_PROFILES["PASSIVE"]
+            )
+            fill_pct = profile["fill_pct"]
+            slip_bps = profile["slippage_bps"]
+
+            if fill_pct <= 0:
+                intent.fill_status = "DEFERRED"
+                intent.filled_pct = 0.0
+                continue
+
+            # Get reference price
+            ref_price = 0.0
+            if prices is not None and intent.ticker in prices.columns:
+                try:
+                    ref_price = float(prices[intent.ticker].dropna().iloc[-1])
+                except Exception:
+                    pass
+
+            if ref_price <= 0:
+                ref_price = 100.0  # fallback
+
+            intent.decision_price = ref_price
+            intent.arrival_price = ref_price
+
+            # Apply slippage
+            slip_mult = slip_bps / 10_000.0
+            if intent.side == "BUY":
+                intent.fill_price = round(ref_price * (1.0 + slip_mult), 4)
+            else:
+                intent.fill_price = round(ref_price * (1.0 - slip_mult), 4)
+
+            intent.filled_pct = round(fill_pct, 4)
+            intent.expected_cost_bps = slip_bps
+
+            if fill_pct >= 1.0:
+                intent.fill_status = "FILLED"
+            elif fill_pct > 0:
+                intent.fill_status = "PARTIAL"
+            else:
+                intent.fill_status = "DEFERRED"
+
+        filled_count = sum(1 for i in intents if i.fill_status == "FILLED")
+        partial_count = sum(1 for i in intents if i.fill_status == "PARTIAL")
+        log.info(
+            "Simulated fills: %d filled, %d partial, %d deferred/rejected out of %d",
+            filled_count, partial_count, len(intents) - filled_count - partial_count,
+            len(intents),
+        )
+        return intents
+
+    # -----------------------------------------------------------------
+    # 6. Pending Order Manager
+    # -----------------------------------------------------------------
+
+    def manage_pending_orders(
+        self, new_intents: List[OrderIntent]
+    ) -> List[OrderIntent]:
+        """
+        Merge new intents with carried-forward pending orders.
+
+        Removes stale orders (> MAX_PENDING_CYCLES old), avoids duplicates
+        by ticker, and returns a combined list.
+        """
+        # Age existing pending orders
+        carried: List[OrderIntent] = []
+        for pending in self._pending_orders:
+            pending.cycle_age += 1
+            if pending.cycle_age > _MAX_PENDING_CYCLES:
+                log.info("Stale pending order removed: %s (age=%d)", pending.ticker, pending.cycle_age)
+                continue
+            carried.append(pending)
+
+        # Build set of tickers in new intents
+        new_tickers = {i.ticker for i in new_intents}
+
+        # Keep carried orders only for tickers NOT in new intents
+        merged = [c for c in carried if c.ticker not in new_tickers]
+        merged.extend(new_intents)
+
+        # Separate out the ones that need to stay pending
+        still_pending: List[OrderIntent] = []
+        active: List[OrderIntent] = []
+        for intent in merged:
+            if intent.fill_status in ("DEFERRED", "PARTIAL") and intent.filled_pct < 1.0:
+                still_pending.append(intent)
+            active.append(intent)
+
+        self._pending_orders = still_pending
+        log.info(
+            "Pending order manager: %d new, %d carried, %d merged, %d still pending",
+            len(new_intents), len(carried), len(active), len(still_pending),
+        )
+        return active
+
+    # -----------------------------------------------------------------
+    # 7. Enhanced Exit Engine
+    # -----------------------------------------------------------------
+
+    def generate_exit_intents(
+        self, inputs: Dict[str, Any], prices: Optional[pd.DataFrame] = None
+    ) -> List[OrderIntent]:
+        """
+        Generate prioritized exit OrderIntents.
+
+        Exit types (priority order):
+        1. EMERGENCY — Risk Guardian emergency_unwind
+        2. RISK_FORCED — must_reduce from Risk Guardian
+        3. DECAY_FORCED — STRUCTURAL_DECAY / DEAD sleeves
+        4. REGIME_FORCED — blocked in current regime
+        5. TARGET_REBALANCE — target weight reduced to zero
+        6. PROFIT_TAKING — above configurable threshold
+        7. STOP_LOSS — below configurable threshold
+        8. TIME_STOP — held > configured days
+        """
+        exit_intents: List[OrderIntent] = []
+
+        rg = inputs.get("risk_guardian") or {}
+        veto = rg.get("veto", {})
+        emergency_unwind = veto.get("emergency_unwind_required", False)
+        must_reduce = veto.get("must_reduce_existing_risk", False)
+        vetoed_sleeves = set(veto.get("vetoed_sleeves", []))
+
+        decay_data = inputs.get("alpha_decay") or {}
+        decay_level = decay_data.get("decay_level", "HEALTHY")
+
+        regime_data = inputs.get("regime_forecast") or {}
+        regime = regime_data.get("predicted_regime", "NORMAL")
+
+        pc = inputs.get("portfolio_construction") or {}
+        target_weights = pc.get("weights", {})
+
+        # Load current positions
+        positions: List[dict] = []
+        try:
+            portfolio_path = ROOT / "data" / "paper_portfolio.json"
+            if portfolio_path.exists():
+                pdata = json.loads(portfolio_path.read_text(encoding="utf-8"))
+                positions = pdata.get("positions", [])
+        except Exception as exc:
+            log.warning("Failed to load positions for exit engine: %s", exc)
+
+        for pos in positions:
+            ticker = pos.get("ticker", "")
+            entry_price = float(pos.get("entry_price", 0))
+            current_price = float(pos.get("current_price", entry_price))
+            days_held = int(pos.get("days_held", 0))
+            notional = float(pos.get("notional", 0))
+            direction = pos.get("direction", "LONG")
+            direction_sign = 1.0 if direction == "LONG" else -1.0
+
+            if entry_price > 0:
+                pnl_pct = direction_sign * (current_price - entry_price) / entry_price
+            else:
+                pnl_pct = 0.0
+
+            exit_reason = ""
+            urgency = "MEDIUM"
+            execution_style = "DEFENSIVE_EXIT"
+
+            # Priority 1: EMERGENCY
+            if emergency_unwind:
+                exit_reason = "EMERGENCY"
+                urgency = "HIGH"
+                execution_style = "EMERGENCY_EXIT"
+            # Priority 2: RISK_FORCED
+            elif must_reduce:
+                exit_reason = "RISK_FORCED"
+                urgency = "HIGH"
+                execution_style = "AGGRESSIVE"
+            # Priority 3: DECAY_FORCED
+            elif decay_level in ("STRUCTURAL_DECAY", "DEAD"):
+                exit_reason = "DECAY_FORCED"
+                urgency = "HIGH"
+                execution_style = "DEFENSIVE_EXIT"
+            # Priority 4: REGIME_FORCED
+            elif regime == "CRISIS" and ticker not in target_weights:
+                exit_reason = "REGIME_FORCED"
+                urgency = "HIGH"
+                execution_style = "DEFENSIVE_EXIT"
+            # Priority 5: TARGET_REBALANCE (target went to zero)
+            elif ticker not in target_weights or target_weights.get(ticker, 0) == 0:
+                exit_reason = "TARGET_REBALANCE"
+                urgency = "MEDIUM"
+                execution_style = "PASSIVE"
+            # Priority 6: PROFIT_TAKING
+            elif pnl_pct >= _PROFIT_TAKE_PCT:
+                exit_reason = "PROFIT_TAKING"
+                urgency = "MEDIUM"
+                execution_style = "PASSIVE"
+            # Priority 7: STOP_LOSS
+            elif pnl_pct <= _STOP_LOSS_PCT:
+                exit_reason = "STOP_LOSS"
+                urgency = "HIGH"
+                execution_style = "AGGRESSIVE"
+            # Priority 8: TIME_STOP
+            elif days_held >= _TIME_STOP_DAYS:
+                exit_reason = "TIME_STOP"
+                urgency = "MEDIUM"
+                execution_style = "PASSIVE"
+
+            if not exit_reason:
+                continue
+
+            intent = OrderIntent(
+                order_id=f"EXIT_{ticker}_{uuid.uuid4().hex[:8]}",
+                ticker=ticker,
+                side="SELL" if direction == "LONG" else "BUY",
+                order_type="EXIT",
+                target_weight=0.0,
+                current_weight=notional / _INITIAL_CAPITAL if _INITIAL_CAPITAL > 0 else 0.0,
+                delta_notional=round(notional, 2),
+                urgency=urgency,
+                execution_style=execution_style,
+                allowed=True,
+                restrictions=[],
+                expected_cost_bps=_SLIPPAGE_PROFILES.get(execution_style, {}).get("slippage_bps", 5.0),
+                expected_impact_bps=0.0,
+                sleeve_role="CORE",
+                health_state=decay_level,
+                regime_eligible=True,
+                fill_status="PENDING",
+                filled_pct=0.0,
+                reason=exit_reason,
+                decision_price=entry_price,
+                arrival_price=current_price,
+            )
+            exit_intents.append(intent)
+
+        # Sort by priority (EMERGENCY first)
+        priority_order = {
+            "EMERGENCY": 0, "RISK_FORCED": 1, "DECAY_FORCED": 2,
+            "REGIME_FORCED": 3, "TARGET_REBALANCE": 4, "PROFIT_TAKING": 5,
+            "STOP_LOSS": 6, "TIME_STOP": 7,
+        }
+        exit_intents.sort(key=lambda i: priority_order.get(i.reason, 99))
+
+        log.info("Generated %d exit intents", len(exit_intents))
+        return exit_intents
+
+    # -----------------------------------------------------------------
+    # 8. TCA Engine
+    # -----------------------------------------------------------------
+
+    def compute_tca(self, intents: List[OrderIntent]) -> Dict[str, Any]:
+        """
+        Compute Transaction Cost Analysis for filled orders.
+
+        Returns per-order and summary TCA metrics.
+        """
+        tca: Dict[str, Any] = {
+            "per_order": [],
+            "summary": {
+                "avg_slippage_bps": 0.0,
+                "avg_shortfall_bps": 0.0,
+                "total_cost_bps": 0.0,
+                "by_side": {"BUY": [], "SELL": []},
+                "by_regime": {},
+                "by_style": {},
+            },
+        }
+
+        filled = [i for i in intents if i.fill_status in ("FILLED", "PARTIAL") and i.filled_pct > 0]
+        if not filled:
+            return tca
+
+        slippages: List[float] = []
+        shortfalls: List[float] = []
+        commission_bps = 1.0  # 1bps commission assumption
+
+        for intent in filled:
+            decision_px = intent.decision_price if intent.decision_price > 0 else intent.arrival_price
+            arrival_px = intent.arrival_price if intent.arrival_price > 0 else decision_px
+            fill_px = intent.fill_price if intent.fill_price > 0 else arrival_px
+
+            if decision_px <= 0:
+                continue
+
+            # Slippage: fill vs arrival
+            if intent.side == "BUY":
+                slippage_bps = (fill_px / arrival_px - 1.0) * 10_000 if arrival_px > 0 else 0.0
+                shortfall_bps = (fill_px / decision_px - 1.0) * 10_000 if decision_px > 0 else 0.0
+            else:
+                slippage_bps = (1.0 - fill_px / arrival_px) * 10_000 if arrival_px > 0 else 0.0
+                shortfall_bps = (1.0 - fill_px / decision_px) * 10_000 if decision_px > 0 else 0.0
+
+            market_impact_bps = abs(slippage_bps) * 0.6
+
+            order_tca = {
+                "order_id": intent.order_id,
+                "ticker": intent.ticker,
+                "side": intent.side,
+                "execution_style": intent.execution_style,
+                "decision_price": decision_px,
+                "arrival_price": arrival_px,
+                "fill_price": fill_px,
+                "slippage_bps": round(slippage_bps, 2),
+                "implementation_shortfall_bps": round(shortfall_bps, 2),
+                "market_impact_bps": round(market_impact_bps, 2),
+                "commission_bps": commission_bps,
+                "total_cost_bps": round(abs(slippage_bps) + commission_bps, 2),
+            }
+            tca["per_order"].append(order_tca)
+
+            slippages.append(abs(slippage_bps))
+            shortfalls.append(abs(shortfall_bps))
+
+            # Accumulate by side
+            tca["summary"]["by_side"].setdefault(intent.side, []).append(abs(slippage_bps))
+
+            # By style
+            tca["summary"]["by_style"].setdefault(intent.execution_style, []).append(abs(slippage_bps))
+
+        if slippages:
+            tca["summary"]["avg_slippage_bps"] = round(float(np.mean(slippages)), 2)
+            tca["summary"]["avg_shortfall_bps"] = round(float(np.mean(shortfalls)), 2)
+            tca["summary"]["total_cost_bps"] = round(
+                float(np.mean(slippages)) + commission_bps, 2
+            )
+
+        # Collapse by_side / by_style to averages
+        for side_key in ("BUY", "SELL"):
+            vals = tca["summary"]["by_side"].get(side_key, [])
+            tca["summary"]["by_side"][side_key] = round(float(np.mean(vals)), 2) if vals else 0.0
+
+        for style_key, vals in list(tca["summary"]["by_style"].items()):
+            tca["summary"]["by_style"][style_key] = round(float(np.mean(vals)), 2) if vals else 0.0
+
+        log.info(
+            "TCA: %d orders, avg_slip=%.2fbps, avg_shortfall=%.2fbps",
+            len(filled), tca["summary"]["avg_slippage_bps"],
+            tca["summary"]["avg_shortfall_bps"],
+        )
+        return tca
+
+    # -----------------------------------------------------------------
+    # 9. Target vs Actual Reconciliation
+    # -----------------------------------------------------------------
+
+    def reconcile_target_vs_actual(
+        self, layers: Dict[str, Any], filled_intents: List[OrderIntent]
+    ) -> Dict[str, Any]:
+        """
+        Reconcile target weights vs actual post-execution weights.
+
+        For each ticker computes drift and categorizes it.
+        """
+        recon: Dict[str, Any] = {"positions": {}, "summary": {}}
+
+        desired = layers.get("desired_portfolio", {})
+        realized = layers.get("realized_portfolio", {})
+        executable = layers.get("executable_portfolio", {})
+
+        # Build filled tickers set
+        filled_tickers = {i.ticker for i in filled_intents if i.fill_status in ("FILLED", "PARTIAL")}
+        rejected_tickers = {i.ticker for i in filled_intents if i.fill_status == "REJECTED"}
+
+        # Build risk-blocked tickers
+        risk_blocked: Dict[str, Any] = {}
+        for ticker, row in layers.get("risk_approved_portfolio", {}).items():
+            if row.get("order_type") == "HOLD" and desired.get(ticker, {}).get("order_type") != "HOLD":
+                risk_blocked[ticker] = True
+
+        all_tickers = set(desired.keys()) | set(realized.keys())
+
+        total_drift = 0.0
+        for ticker in all_tickers:
+            target_w = desired.get(ticker, {}).get("target_weight", 0.0)
+            actual_w = realized.get(ticker, {}).get("current_weight", 0.0)
+            drift = abs(target_w - actual_w)
+            total_drift += drift
+
+            # Categorize
+            if drift < _DUST_THRESHOLD_WEIGHT:
+                category = "WITHIN_TOLERANCE"
+                next_action = "HOLD"
+            elif ticker in filled_tickers:
+                category = "AWAITING_EXECUTION"
+                next_action = "MONITOR_FILL"
+            elif ticker in risk_blocked:
+                category = "BLOCKED_BY_RISK"
+                next_action = "WAIT_FOR_RISK_CLEARANCE"
+            elif ticker in rejected_tickers:
+                category = "BLOCKED_BY_DECAY"
+                next_action = "REVIEW_ALPHA"
+            else:
+                category = "STALE_POSITION"
+                next_action = "EVALUATE_EXIT"
+
+            recon["positions"][ticker] = {
+                "target_weight": round(target_w, 6),
+                "actual_weight": round(actual_w, 6),
+                "drift": round(drift, 6),
+                "drift_category": category,
+                "next_action": next_action,
+            }
+
+        recon["summary"] = {
+            "total_drift": round(total_drift, 6),
+            "n_within_tolerance": sum(
+                1 for p in recon["positions"].values() if p["drift_category"] == "WITHIN_TOLERANCE"
+            ),
+            "n_awaiting": sum(
+                1 for p in recon["positions"].values() if p["drift_category"] == "AWAITING_EXECUTION"
+            ),
+            "n_blocked": sum(
+                1 for p in recon["positions"].values()
+                if p["drift_category"] in ("BLOCKED_BY_RISK", "BLOCKED_BY_DECAY")
+            ),
+            "n_stale": sum(
+                1 for p in recon["positions"].values() if p["drift_category"] == "STALE_POSITION"
+            ),
+        }
+
+        log.info(
+            "Reconciliation: drift=%.4f, within_tol=%d, awaiting=%d, blocked=%d, stale=%d",
+            total_drift,
+            recon["summary"]["n_within_tolerance"],
+            recon["summary"]["n_awaiting"],
+            recon["summary"]["n_blocked"],
+            recon["summary"]["n_stale"],
+        )
+        return recon
+
+    # -----------------------------------------------------------------
+    # 10. Execution Governance
+    # -----------------------------------------------------------------
+
+    def apply_execution_governance(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Compute execution governance state from all upstream inputs.
+
+        Determines what the execution desk is allowed to do this cycle.
+        """
+        rg = inputs.get("risk_guardian") or {}
+        veto = rg.get("veto", {})
+        regime_data = inputs.get("regime_forecast") or {}
+        regime = regime_data.get("predicted_regime", "NORMAL")
+        decay_data = inputs.get("alpha_decay") or {}
+        decay_level = decay_data.get("decay_level", "HEALTHY")
+
+        emergency_unwind = veto.get("emergency_unwind_required", False)
+        must_reduce = veto.get("must_reduce_existing_risk", False)
+        can_add_new = veto.get("can_allocate_new_risk", True)
+        can_execute = veto.get("can_execute_new_trades", True)
+        vetoed_sleeves = veto.get("vetoed_sleeves", [])
+
+        # Regime caution
+        regime_caution_map = {
+            "CALM": "NORMAL",
+            "NORMAL": "NORMAL",
+            "TENSION": "CAUTIOUS",
+            "CRISIS": "DEFENSIVE",
+        }
+        regime_caution = regime_caution_map.get(regime, "NORMAL")
+
+        if emergency_unwind:
+            regime_caution = "HALT"
+
+        # Conservative defaults when Risk Guardian is missing
+        has_risk_guardian = "risk_guardian" in inputs.get("available_inputs", [])
+        if not has_risk_guardian:
+            can_add_new = False  # conservative
+
+        # Blocked sleeves: from veto + decay
+        blocked_sleeves = list(set(vetoed_sleeves))
+        if decay_level in ("STRUCTURAL_DECAY", "DEAD"):
+            blocked_sleeves.append(f"ALL_ENTRY_BLOCKED_DECAY_{decay_level}")
+
+        # Max turnover budget
+        turnover_budget_map = {
+            "CALM": 0.30, "NORMAL": 0.25, "TENSION": 0.15, "CRISIS": 0.05,
+        }
+        max_turnover = turnover_budget_map.get(regime, 0.20)
+        if must_reduce:
+            max_turnover = min(max_turnover, 0.10)
+
+        governance = {
+            "can_add_new_risk": can_add_new and not emergency_unwind,
+            "can_reduce_risk": True,  # always allowed
+            "can_rebalance_normally": can_execute and not emergency_unwind and not must_reduce,
+            "emergency_mode": emergency_unwind,
+            "regime_caution": regime_caution,
+            "blocked_sleeves": blocked_sleeves,
+            "max_turnover_budget": round(max_turnover, 4),
+        }
+
+        log.info(
+            "Execution governance: add_risk=%s, reduce=%s, rebalance=%s, "
+            "emergency=%s, caution=%s, turnover_budget=%.2f",
+            governance["can_add_new_risk"], governance["can_reduce_risk"],
+            governance["can_rebalance_normally"], governance["emergency_mode"],
+            governance["regime_caution"], governance["max_turnover_budget"],
+        )
+        return governance
+
+    # -----------------------------------------------------------------
+    # 11. Machine Summary
+    # -----------------------------------------------------------------
+
+    def build_machine_summary(
+        self,
+        governance: Dict[str, Any],
+        intents: List[OrderIntent],
+        tca: Dict[str, Any],
+        recon: Dict[str, Any],
+        inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build machine-readable summary for downstream agents.
+        """
+        regime_data = inputs.get("regime_forecast") or {}
+        regime = regime_data.get("predicted_regime", "NORMAL")
+        transition_prob = regime_data.get("transition_probability", 0.0)
+        if transition_prob > 0.6:
+            transition_state = "ACTIVE_TRANSITION"
+        elif transition_prob > 0.4:
+            transition_state = "EARLY_WARNING"
+        else:
+            transition_state = "STABLE"
+
+        target_count = sum(1 for i in intents if i.allowed)
+        executed_count = sum(1 for i in intents if i.fill_status in ("FILLED", "PARTIAL"))
+        pending_count = sum(1 for i in intents if i.fill_status in ("DEFERRED", "PARTIAL"))
+        rejected_count = sum(1 for i in intents if i.fill_status == "REJECTED")
+
+        turnover_executed = sum(
+            abs(i.delta_notional) * i.filled_pct
+            for i in intents if i.fill_status in ("FILLED", "PARTIAL")
+        ) / _INITIAL_CAPITAL if _INITIAL_CAPITAL > 0 else 0.0
+
+        # Top blockers
+        top_blockers = [
+            f"{i.ticker} {'; '.join(i.restrictions)}"
+            for i in intents if not i.allowed and i.restrictions
+        ][:5]
+
+        # Top forced exits
+        top_forced_exits = [
+            f"{i.ticker} {i.reason}"
+            for i in intents if i.order_type == "EXIT" and i.reason in (
+                "EMERGENCY", "RISK_FORCED", "DECAY_FORCED", "REGIME_FORCED"
+            )
+        ][:5]
+
+        # Top pending
+        top_pending = [
+            f"{i.ticker} partial fill {i.filled_pct:.0%}"
+            for i in intents if i.fill_status == "PARTIAL"
+        ][:5]
+
+        summary = {
+            "can_add_new_risk": governance.get("can_add_new_risk", False),
+            "can_reduce_risk": governance.get("can_reduce_risk", True),
+            "emergency_mode": governance.get("emergency_mode", False),
+            "target_positions": target_count,
+            "executed_positions": executed_count,
+            "pending_count": pending_count,
+            "rejected_count": rejected_count,
+            "avg_slippage_bps": tca.get("summary", {}).get("avg_slippage_bps", 0.0),
+            "implementation_shortfall_bps": tca.get("summary", {}).get("avg_shortfall_bps", 0.0),
+            "turnover_executed": round(turnover_executed, 4),
+            "drift_to_target": recon.get("summary", {}).get("total_drift", 0.0),
+            "active_regime": regime,
+            "transition_state": transition_state,
+            "execution_caution_level": governance.get("regime_caution", "NORMAL"),
+            "top_blockers": top_blockers,
+            "top_forced_exits": top_forced_exits,
+            "top_pending": top_pending,
+        }
+        return summary
+
     # -----------------------------------------------------------------
     # Save execution log
     # -----------------------------------------------------------------
@@ -1212,6 +2243,83 @@ class ExecutionAgent:
         except Exception as exc:
             log.warning("Execution quality skipped: %s", exc)
 
+        # =============================================================
+        # INSTITUTIONAL EXECUTION DESK — steps 8b..14
+        # Wrapped in try/except to preserve existing behaviour on failure
+        # =============================================================
+        institutional_summary: Dict[str, Any] = {}
+        all_intents: List[OrderIntent] = []
+        try:
+            # 8b. Assemble all upstream inputs
+            exec_inputs = self.assemble_execution_inputs()
+            summary["execution_inputs_available"] = exec_inputs.get("available_inputs", [])
+
+            # 8c. Apply execution governance
+            governance = self.apply_execution_governance(exec_inputs)
+            summary["execution_governance"] = governance
+
+            # 8d. Compute portfolio layers
+            layers = self.compute_portfolio_layers(exec_inputs)
+            summary["portfolio_layers_computed"] = True
+
+            # 8e. Generate exit intents (prioritized)
+            exit_intents = self.generate_exit_intents(exec_inputs, prices)
+
+            # 8f. Generate entry / rebalance intents
+            entry_intents = self.build_order_intents(layers, exec_inputs)
+
+            # 8g. Merge with pending orders
+            combined_intents = exit_intents + entry_intents
+            all_intents = self.manage_pending_orders(combined_intents)
+
+            # 8h. Simulate fills (partial)
+            all_intents = self.simulate_fills(all_intents, prices)
+
+            # 8i. Reconcile target vs actual
+            recon = self.reconcile_target_vs_actual(layers, all_intents)
+            summary["target_vs_actual"] = recon
+
+            # 8j. Compute TCA
+            tca = self.compute_tca(all_intents)
+            summary["tca"] = tca
+
+            # 8k. Build machine summary
+            institutional_summary = self.build_machine_summary(
+                governance, all_intents, tca, recon, exec_inputs
+            )
+            summary["machine_summary"] = institutional_summary
+
+            # 8l. Save institutional execution state
+            try:
+                inst_out_path = Path(__file__).resolve().parent / "execution_state.json"
+                inst_out_path.write_text(
+                    json.dumps({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "machine_summary": institutional_summary,
+                        "governance": governance,
+                        "tca_summary": tca.get("summary", {}),
+                        "reconciliation_summary": recon.get("summary", {}),
+                        "order_intents": [i.to_dict() for i in all_intents],
+                        "pending_count": len(self._pending_orders),
+                    }, indent=2, default=str, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                log.info("Saved institutional execution state to %s", inst_out_path)
+            except Exception as exc:
+                log.warning("Failed to save execution_state.json: %s", exc)
+
+            log.info(
+                "Institutional desk: %d intents, %d filled, %d pending, %d rejected",
+                len(all_intents),
+                sum(1 for i in all_intents if i.fill_status in ("FILLED", "PARTIAL")),
+                sum(1 for i in all_intents if i.fill_status in ("DEFERRED", "PARTIAL")),
+                sum(1 for i in all_intents if i.fill_status == "REJECTED"),
+            )
+
+        except Exception as exc:
+            log.error("Institutional execution desk failed (legacy path intact): %s", exc)
+            summary["institutional_error"] = str(exc)
+
         # Step 9: Save execution log
         self._save_execution_log()
 
@@ -1219,14 +2327,17 @@ class ExecutionAgent:
         if _IMPORTS_OK.get("agent_bus"):
             try:
                 bus = get_bus()
-                bus.publish("execution_agent", {
+                bus_payload: Dict[str, Any] = {
                     "date": today,
                     "entries": len(summary["entries"]),
                     "exits": len(summary["exits"]),
                     "signals_found": summary["signals_found"],
                     "signals_sized": summary["signals_sized"],
                     "risk_guardian_ok": summary["risk_guardian_ok"],
-                })
+                }
+                if institutional_summary:
+                    bus_payload["machine_summary"] = institutional_summary
+                bus.publish("execution_agent", bus_payload)
             except Exception as exc:
                 log.warning("Failed to publish to agent_bus: %s", exc)
 
