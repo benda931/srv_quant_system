@@ -142,5 +142,53 @@
     "timestamp": "2026-03-26T16:43:11.326500+00:00",
     "risk_state": "INSUFFICIENT_EVIDENCE",
     "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T16:51:28.601907+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T16:51:28.666240+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T16:53:41.592285+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T16:53:41.672085+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T17:39:38.952510+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T17:39:39.001572+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T17:40:07.221122+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T17:40:07.265712+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
   }
 ]

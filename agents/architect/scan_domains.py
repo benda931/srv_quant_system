@@ -236,6 +236,109 @@ DOMAIN_NAMES: List[str] = [d.name for d in SCAN_DOMAINS]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dynamic Domain Enrichment
+# ─────────────────────────────────────────────────────────────────────────────
+
+def enrich_domain_with_dynamic_data(domain_name: str, static_files: List[str]) -> List[str]:
+    """
+    Enrich a domain's static file list with dynamically discovered files.
+
+    Adds:
+      - Recently modified files (by mtime, last 48 hours)
+      - Large files (>500 lines) in the same directories
+      - Files implicated in recent failures (from git status or test output)
+
+    Returns combined list (static + dynamic), deduplicated.
+    """
+    enriched = list(static_files)
+    seen = set(static_files)
+
+    # Determine directories to scan from static files
+    scan_dirs: set = set()
+    for f in static_files:
+        parent = str(Path(f).parent)
+        if parent and parent != ".":
+            scan_dirs.add(parent)
+
+    # Fallback: if no static files, scan based on domain name
+    domain_dir_map = {
+        "signal_quality": ["analytics"],
+        "risk_management": ["analytics"],
+        "trade_execution": ["analytics"],
+        "data_quality": ["data_ops", "data"],
+        "dashboard_accuracy": ["ui"],
+        "agent_health": ["agents/shared", "agents"],
+        "code_quality": ["analytics", "agents", "scripts"],
+        "performance": ["analytics"],
+    }
+    if not scan_dirs:
+        scan_dirs = set(domain_dir_map.get(domain_name, []))
+
+    # 1. Recently modified files (last 48 hours)
+    cutoff = time.time() - 48 * 3600
+    for rel_dir in scan_dirs:
+        full_dir = ROOT / rel_dir
+        if not full_dir.is_dir():
+            continue
+        try:
+            for py in full_dir.rglob("*.py"):
+                if "__pycache__" in str(py):
+                    continue
+                rel = str(py.relative_to(ROOT)).replace("\\", "/")
+                if rel not in seen:
+                    try:
+                        if py.stat().st_mtime > cutoff:
+                            enriched.append(rel)
+                            seen.add(rel)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    # 2. Large files (>500 lines)
+    for rel_dir in scan_dirs:
+        full_dir = ROOT / rel_dir
+        if not full_dir.is_dir():
+            continue
+        try:
+            for py in full_dir.rglob("*.py"):
+                if "__pycache__" in str(py):
+                    continue
+                rel = str(py.relative_to(ROOT)).replace("\\", "/")
+                if rel not in seen:
+                    try:
+                        line_count = len(py.read_text(encoding="utf-8", errors="replace").splitlines())
+                        if line_count > 500:
+                            enriched.append(rel)
+                            seen.add(rel)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # 3. Files implicated in recent failures (from git diff or test output)
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD~3"],
+            capture_output=True, text=True, timeout=10, cwd=str(ROOT),
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().splitlines():
+                line = line.strip().replace("\\", "/")
+                if line.endswith(".py") and line not in seen:
+                    # Only add if the file is in a relevant directory
+                    for sd in scan_dirs:
+                        if line.startswith(sd):
+                            enriched.append(line)
+                            seen.add(line)
+                            break
+    except Exception:
+        pass
+
+    return enriched
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Scanning logic
 # ─────────────────────────────────────────────────────────────────────────────
 

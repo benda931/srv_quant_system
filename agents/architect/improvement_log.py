@@ -113,3 +113,181 @@ def get_improvement_log() -> ImprovementLog:
     if _instance is None:
         _instance = ImprovementLog()
     return _instance
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Architecture Debt Tracking (module-level functions using singleton)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_architecture_debt_summary() -> Dict[str, Any]:
+    """
+    Aggregate architecture debt from improvement history.
+    Returns total unresolved items, domain-level debt counts,
+    recurring domain names, and failed intervention count.
+    """
+    log = get_improvement_log()
+    history = log.get_history(n=200)
+
+    # Count unresolved: cycles where actions were taken but tests failed
+    unresolved = 0
+    domain_debt: Dict[str, int] = {}
+    recurring_domains: Dict[str, int] = {}
+
+    for entry in history:
+        domain = entry.get("domain", "unknown")
+
+        # Track recurring domain appearances
+        recurring_domains[domain] = recurring_domains.get(domain, 0) + 1
+
+        # Unresolved = had actions but validation failed
+        actions = entry.get("actions_taken", [])
+        tests_pass = entry.get("validation_result", {}).get("tests_pass", True)
+        if actions and not tests_pass:
+            unresolved += 1
+            domain_debt[domain] = domain_debt.get(domain, 0) + 1
+
+        # Also count architecture-level unresolved flags
+        ms = entry.get("machine_summary", {})
+        if isinstance(ms, dict):
+            flags = ms.get("unresolved_flags", [])
+            if flags:
+                unresolved += len(flags)
+                domain_debt[domain] = domain_debt.get(domain, 0) + len(flags)
+
+    return {
+        "total_unresolved": unresolved,
+        "domain_debt": domain_debt,
+        "recurring_domains": recurring_domains,
+        "total_cycles": len(history),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def get_recurring_domain_issues(n: int = 5) -> List[Dict[str, Any]]:
+    """
+    Return the top N domains with the most repeated issues
+    (cycles where the same domain had failures multiple times).
+    """
+    log = get_improvement_log()
+    history = log.get_history(n=200)
+
+    domain_failures: Dict[str, int] = {}
+    domain_last_issue: Dict[str, str] = {}
+
+    for entry in history:
+        domain = entry.get("domain", "unknown")
+        tests_pass = entry.get("validation_result", {}).get("tests_pass", True)
+        findings = entry.get("scan_findings", [])
+        has_problems = (
+            not tests_pass
+            or any(f.startswith("FAILED") or f.startswith("CRITICAL") for f in findings)
+        )
+        if has_problems:
+            domain_failures[domain] = domain_failures.get(domain, 0) + 1
+            domain_last_issue[domain] = entry.get("timestamp", "")
+
+    # Sort by failure count descending
+    sorted_domains = sorted(domain_failures.items(), key=lambda x: x[1], reverse=True)
+
+    return [
+        {
+            "domain": d,
+            "failure_count": count,
+            "last_issue": domain_last_issue.get(d, ""),
+        }
+        for d, count in sorted_domains[:n]
+    ]
+
+
+def get_failed_interventions() -> List[Dict[str, Any]]:
+    """
+    Return cycles where the architect took action but validation failed.
+    These represent interventions that made things worse or didn't help.
+    """
+    log = get_improvement_log()
+    history = log.get_history(n=200)
+
+    failed = []
+    for entry in history:
+        actions = entry.get("actions_taken", [])
+        tests_pass = entry.get("validation_result", {}).get("tests_pass", True)
+        if actions and not tests_pass:
+            failed.append({
+                "cycle_id": entry.get("cycle_id", "unknown"),
+                "domain": entry.get("domain", "unknown"),
+                "timestamp": entry.get("timestamp", ""),
+                "actions_count": len(actions),
+                "diagnosis": entry.get("gpt_diagnosis", "")[:200],
+            })
+
+    return failed
+
+
+def get_domain_health_trend(domain: str, n: int = 10) -> List[Dict[str, Any]]:
+    """
+    Return the last N cycle results for a specific domain,
+    showing health trajectory over time.
+    """
+    log = get_improvement_log()
+    history = log.get_history(n=500)
+
+    domain_entries = [e for e in history if e.get("domain") == domain]
+    recent = domain_entries[-n:]
+
+    trend = []
+    for entry in recent:
+        ms = entry.get("machine_summary", {})
+        scores = entry.get("architecture_scores", {})
+        trend.append({
+            "cycle_id": entry.get("cycle_id", ""),
+            "timestamp": entry.get("timestamp", ""),
+            "tests_pass": entry.get("validation_result", {}).get("tests_pass", False),
+            "actions_count": len(entry.get("actions_taken", [])),
+            "findings_count": len(entry.get("scan_findings", [])),
+            "architecture_health": (
+                ms.get("architecture_health_score")
+                or scores.get("architecture_health_score", None)
+            ),
+            "diagnosis": entry.get("architecture_diagnosis", entry.get("gpt_diagnosis", "")[:100]),
+        })
+
+    return trend
+
+
+def get_unresolved_flags() -> List[str]:
+    """
+    Collect all unresolved architecture flags from recent history.
+    A flag is unresolved if it appeared in a recent cycle's machine_summary
+    and has not been marked resolved in a subsequent cycle.
+    """
+    log = get_improvement_log()
+    history = log.get_history(n=50)
+
+    all_flags: List[str] = []
+    resolved: set = set()
+
+    for entry in reversed(history):
+        ms = entry.get("machine_summary", {})
+        if isinstance(ms, dict):
+            flags = ms.get("unresolved_flags", [])
+            for f in flags:
+                if isinstance(f, str) and f not in resolved:
+                    all_flags.append(f)
+
+        # Check if actions resolved prior flags
+        actions = entry.get("actions_taken", [])
+        tests_pass = entry.get("validation_result", {}).get("tests_pass", False)
+        if actions and tests_pass:
+            # Assume successful actions resolve flags from that domain
+            domain = entry.get("domain", "")
+            resolved.add(domain)
+
+    # Deduplicate preserving order
+    seen: set = set()
+    unique: List[str] = []
+    for f in all_flags:
+        if f not in seen:
+            unique.append(f)
+            seen.add(f)
+
+    return unique[:20]
