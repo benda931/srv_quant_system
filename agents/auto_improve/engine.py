@@ -1075,41 +1075,74 @@ class AutoImprover:
 
     def run_cycle(self) -> Dict:
         """
-        Run one full improvement cycle.
+        Run one full improvement cycle with governance awareness.
 
         Steps:
+          0. Check governance prerequisites
           1. Run methodology evaluation
           2. Identify weaknesses
-          3. Generate rule-based suggestions
+          3. Generate smart + rule-based suggestions
           4. Ask GPT for ideas (if available)
           5. Test each suggestion in sandbox
-          6. Promote if improvement validated
-          7. Log everything
+          6. Validate promotion safety + promote
+          7. Build enhanced cycle report
         """
         cycle_start = datetime.now(timezone.utc)
+        cycle_id = str(uuid.uuid4())[:12]
         log.info("=" * 60)
-        log.info("AUTO-IMPROVE CYCLE START — %s", cycle_start.isoformat())
+        log.info("AUTO-IMPROVE CYCLE %s START — %s", cycle_id, cycle_start.isoformat())
         log.info("=" * 60)
 
-        cycle_record = {
+        cycle_record: Dict[str, Any] = {
+            "cycle_id": cycle_id,
             "timestamp": cycle_start.isoformat(),
+            "governance_status": "unknown",
+            "mode": "full",
             "metrics_before": {},
             "weaknesses": [],
+            "suggestions_generated": 0,
             "suggestions_tested": 0,
+            "suggestions_promoted": 0,
             "promoted": 0,
+            "best_improvement": {},
             "metrics_after": {},
             "gpt_used": False,
             "gpt_suggestions": [],
             "details": [],
+            "machine_summary": {},
         }
 
         try:
+            # ── Step 0: Governance prerequisites ───────────────────────
+            log.info("Step 0/7: Checking governance prerequisites...")
+            gov = self.check_governance_prerequisites()
+            cycle_record["governance_status"] = gov["status"]
+            cycle_record["mode"] = gov["mode"]
+
+            if gov["mode"] == "skip":
+                log.warning("All strategies REJECTED — skipping optimization cycle")
+                cycle_record["status"] = "skipped_governance"
+                cycle_record["machine_summary"] = {
+                    "cycle_result": "SKIPPED_ALL_REJECTED",
+                    "next_recommended_action": "review_methodology_governance",
+                    "governance_recommendation": gov["reason"],
+                }
+                self._save_cycle(cycle_record)
+                return cycle_record
+
+            # Cautious mode limits
+            max_suggestions = MAX_SUGGESTIONS_PER_CYCLE
+            if gov["mode"] == "cautious":
+                max_suggestions = min(3, MAX_SUGGESTIONS_PER_CYCLE)
+                log.info("Cautious mode: limiting to %d suggestions", max_suggestions)
+
             # Step 1: Evaluate current state
-            log.info("Step 1/6: Running methodology evaluation...")
+            log.info("Step 1/7: Running methodology evaluation...")
             metrics = self.run_evaluation()
             if not metrics:
                 log.error("Evaluation returned no results — aborting cycle")
                 cycle_record["error"] = "evaluation_failed"
+                cycle_record["status"] = "error"
                 self._save_cycle(cycle_record)
                 return cycle_record
 
@@ -1132,22 +1165,48 @@ class AutoImprover:
                 self._last_baseline_wr = metrics.get("best_win_rate", 0.50)
 
             # Step 2: Identify weaknesses
-            log.info("Step 2/6: Identifying weaknesses...")
+            log.info("Step 2/7: Identifying weaknesses...")
             weaknesses = self.identify_weaknesses(metrics)
             cycle_record["weaknesses"] = [w["description"] for w in weaknesses]
 
             if not weaknesses:
                 log.info("No weaknesses identified — system looks healthy!")
                 cycle_record["status"] = "healthy"
+                cycle_record["machine_summary"] = {
+                    "cycle_result": "HEALTHY_NO_CHANGES",
+                    "next_recommended_action": "monitor",
+                    "governance_recommendation": "system performing within targets",
+                }
                 self._save_cycle(cycle_record)
                 return cycle_record
 
-            # Step 3: Generate rule-based suggestions
-            log.info("Step 3/6: Generating parameter suggestions...")
-            suggestions = self.generate_parameter_suggestions(weaknesses)
+            # Step 3: Generate smart suggestions from governance + alpha_decay
+            log.info("Step 3/7: Generating smart suggestions from governance...")
+            smart_suggestions = self.generate_smart_suggestions(report=None)
+
+            # Also generate rule-based suggestions
+            rule_suggestions = self.generate_parameter_suggestions(weaknesses)
+
+            # Merge: smart first, then rule-based (dedup by param)
+            suggestions: List[Dict] = []
+            seen_params: set = set()
+            for s in smart_suggestions + rule_suggestions:
+                param_key = s.get("param", "")
+                if param_key and param_key not in seen_params:
+                    seen_params.add(param_key)
+                    # Normalize keys for compatibility
+                    if "current_value" in s and "current" not in s:
+                        s["current"] = s["current_value"]
+                    if "new_value" in s and "proposed" not in s:
+                        s["proposed"] = s["new_value"]
+                    if "rationale" in s and "reason" not in s:
+                        s["reason"] = s["rationale"]
+                    suggestions.append(s)
+
+            cycle_record["suggestions_generated"] = len(suggestions)
 
             # Step 4: Ask GPT for ideas
-            log.info("Step 4/6: Querying GPT for ideas...")
+            log.info("Step 4/7: Querying GPT for ideas...")
             current_params = self.current_params()
             try:
                 gpt_ideas = self.ask_gpt_for_ideas(weaknesses, current_params)
@@ -1157,47 +1216,71 @@ class AutoImprover:
                         f"{s['param']}={s['proposed']}" for s in gpt_ideas
                     ]
                     # Add GPT suggestions that aren't already covered
-                    existing_params = {s["param"] for s in suggestions}
                     for idea in gpt_ideas:
-                        if idea["param"] not in existing_params:
+                        if idea["param"] not in seen_params:
+                            seen_params.add(idea["param"])
                             suggestions.append(idea)
             except Exception as e:
                 log.warning("GPT query failed (non-fatal): %s", e)
 
             # Limit total suggestions
-            suggestions = suggestions[:MAX_SUGGESTIONS_PER_CYCLE]
+            suggestions = suggestions[:max_suggestions]
             cycle_record["suggestions_tested"] = len(suggestions)
 
             # Step 5: Test each suggestion
-            log.info("Step 5/6: Testing %d suggestions in sandbox...", len(suggestions))
+            log.info("Step 5/7: Testing %d suggestions in sandbox...", len(suggestions))
             promoted = 0
+            best_delta = 0.0
+            best_param = ""
             for i, suggestion in enumerate(suggestions, 1):
                 log.info("  Testing suggestion %d/%d: %s", i, len(suggestions), suggestion["param"])
                 test_result = self.test_suggestion(suggestion)
                 detail = {
                     "param": suggestion["param"],
-                    "current": suggestion["current"],
-                    "proposed": suggestion["proposed"],
+                    "current": suggestion.get("current", suggestion.get("current_value")),
+                    "proposed": suggestion.get("proposed", suggestion.get("new_value")),
                     "source": suggestion.get("source", "rule"),
-                    "reason": suggestion.get("reason", ""),
+                    "reason": suggestion.get("reason", suggestion.get("rationale", "")),
                     "test_passed": test_result.get("passed", False),
                     "sharpe_delta": test_result.get("delta", 0),
                 }
 
-                # Step 6: Promote if better
-                if self.promote_if_better(suggestion, test_result):
-                    promoted += 1
-                    detail["promoted"] = True
+                # Step 6: Validate promotion safety before promoting
+                delta = test_result.get("delta", 0)
+                if test_result.get("passed", False):
+                    safe = self.validate_promotion_safety(
+                        param=suggestion["param"],
+                        old_val=suggestion.get("current", suggestion.get("current_value")),
+                        new_val=suggestion.get("proposed", suggestion.get("new_value")),
+                        delta_sharpe=delta,
+                        test_result=test_result,
+                    )
+                    if safe and self.promote_if_better(suggestion, test_result):
+                        promoted += 1
+                        detail["promoted"] = True
+                        if delta > best_delta:
+                            best_delta = delta
+                            best_param = suggestion["param"]
+                    else:
+                        detail["promoted"] = False
+                        if not safe:
+                            detail["safety_blocked"] = True
                 else:
                     detail["promoted"] = False
 
                 cycle_record["details"].append(detail)
 
             cycle_record["promoted"] = promoted
+            cycle_record["suggestions_promoted"] = promoted
+            if best_param:
+                cycle_record["best_improvement"] = {
+                    "param": best_param,
+                    "delta_sharpe": round(best_delta, 4),
+                }
 
             # Final evaluation if anything was promoted
             if promoted > 0 and not self.dry_run:
-                log.info("Step 6/6: Re-evaluating after %d promotions...", promoted)
+                log.info("Step 7/7: Re-evaluating after %d promotions...", promoted)
                 new_metrics = self.run_evaluation()
                 if new_metrics:
                     cycle_record["metrics_after"] = {
@@ -1211,18 +1294,44 @@ class AutoImprover:
 
             cycle_record["status"] = "completed"
 
+            # ── Enhanced machine_summary ───────────────────────────────
+            cycle_result = f"{promoted}_PROMOTED" if promoted > 0 else "0_PROMOTED"
+            next_action = "monitor"
+            if promoted > 0:
+                next_action = "run_regime_specific_tuning"
+            elif len(weaknesses) > 2:
+                next_action = "expand_search_space"
+
+            governance_rec = "system stable"
+            if promoted > 0:
+                governance_rec = "re-validate after promotion"
+            elif gov["mode"] == "cautious":
+                governance_rec = "wait for APPROVED strategies before full optimization"
+
+            cycle_record["machine_summary"] = {
+                "cycle_result": cycle_result,
+                "next_recommended_action": next_action,
+                "governance_recommendation": governance_rec,
+            }
+
         except Exception as e:
             log.error("Cycle failed: %s\n%s", e, traceback.format_exc())
             cycle_record["status"] = "error"
             cycle_record["error"] = str(e)
+            cycle_record["machine_summary"] = {
+                "cycle_result": "ERROR",
+                "next_recommended_action": "investigate_failure",
+                "governance_recommendation": str(e)[:200],
+            }
 
         self._save_cycle(cycle_record)
 
         elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
         log.info("=" * 60)
         log.info(
-            "CYCLE COMPLETE in %.0fs — %d weaknesses, %d tested, %d promoted",
-            elapsed, len(cycle_record["weaknesses"]),
+            "CYCLE %s COMPLETE in %.0fs — gov=%s mode=%s weaknesses=%d tested=%d promoted=%d",
+            cycle_id, elapsed, cycle_record["governance_status"], cycle_record["mode"],
+            len(cycle_record["weaknesses"]),
             cycle_record["suggestions_tested"], cycle_record["promoted"],
         )
         log.info("=" * 60)

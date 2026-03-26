@@ -785,12 +785,761 @@ class RegimeForecaster:
 
         return result
 
+    # ── Institutional Regime Intelligence Engine ─────────────────
+
+    # 1. Multi-Horizon Forecast
+    def forecast_multi_horizon(self) -> Dict:
+        """
+        Multi-horizon regime forecast: 1d, 5d, 20d.
+
+        Uses current regime probabilities, transition matrix, and feature
+        momentum to extrapolate regime probabilities at each horizon.
+        """
+        try:
+            forecast = self.forecast_regime()
+            probs = forecast["probabilities"]
+            regimes = ["CALM", "NORMAL", "TENSION", "CRISIS"]
+            prob_vec = np.array([probs.get(r, 0.25) for r in regimes])
+
+            # Get transition matrix
+            trans_df = self.compute_transition_matrix()
+            trans_mat = trans_df.values  # 4x4
+
+            # Feature momentum adjustments
+            vix_f = self.compute_vix_features()
+            vol_f = self.compute_volatility_features()
+            vix_trend = _safe(vix_f.get("vix_5d_chg", 0))
+            vol_trend = _safe(vol_f.get("vol_trend", 0))
+
+            # Momentum bias: positive = trending toward stress
+            momentum_bias = np.clip(vix_trend / 20.0 + vol_trend * 2.0, -0.15, 0.15)
+
+            horizons = {}
+            for horizon, label in [(1, "horizon_1d"), (5, "horizon_5d"), (20, "horizon_20d")]:
+                # Matrix power for multi-step transition
+                mat_power = np.linalg.matrix_power(trans_mat, horizon)
+                projected = prob_vec @ mat_power
+
+                # Apply momentum bias scaled by horizon
+                bias_scale = min(horizon / 5.0, 1.0)
+                bias_vec = np.array([-0.3, -0.1, 0.1, 0.3]) * momentum_bias * bias_scale
+                projected = projected + bias_vec
+                projected = np.clip(projected, 0.01, 1.0)
+                projected /= projected.sum()
+
+                # Transition risk: probability of NOT staying in current regime
+                current_idx = regimes.index(forecast["predicted_regime"])
+                stay_prob = mat_power[current_idx, current_idx]
+                transition_risk = 1.0 - stay_prob
+
+                # Confidence decreases with horizon
+                base_confidence = max(probs.values())
+                confidence = base_confidence * (1.0 - 0.02 * horizon)
+
+                horizons[label] = {
+                    "probabilities": {r: round(float(projected[i]), 3) for i, r in enumerate(regimes)},
+                    "most_likely": regimes[int(np.argmax(projected))],
+                    "transition_prob": round(float(transition_risk), 3),
+                    "confidence": round(max(0.1, float(confidence)), 3),
+                }
+
+            log.info("Multi-horizon forecast computed: 1d=%s, 5d=%s, 20d=%s",
+                     horizons["horizon_1d"]["most_likely"],
+                     horizons["horizon_5d"]["most_likely"],
+                     horizons["horizon_20d"]["most_likely"])
+            return horizons
+        except Exception as exc:
+            log.error("Multi-horizon forecast failed: %s", exc)
+            default_h = {
+                "probabilities": {"CALM": 0.25, "NORMAL": 0.25, "TENSION": 0.25, "CRISIS": 0.25},
+                "most_likely": "NORMAL", "transition_prob": 0.5, "confidence": 0.25,
+            }
+            return {"horizon_1d": default_h, "horizon_5d": default_h, "horizon_20d": default_h}
+
+    # 2. False Transition Filter
+    def filter_false_transitions(self, raw_forecast: Dict) -> Dict:
+        """
+        Filter false regime transitions by requiring multi-signal confirmation.
+
+        Transition states: STABLE / EARLY_WARNING / TRANSITION_RISK /
+                           TRANSITION_CONFIRMED / STABILIZING
+        """
+        try:
+            features = raw_forecast.get("features", {})
+            probs = raw_forecast.get("probabilities", {})
+            predicted = raw_forecast.get("predicted_regime", "NORMAL")
+
+            # Define feature families and their stress signals
+            family_signals = {
+                "volatility": (
+                    _safe(features.get("vix_pct", 0.5)) > 0.7
+                    or _safe(features.get("vol_trend", 0)) > 0.02
+                ),
+                "credit": (
+                    _safe(features.get("credit_z", 0)) < -1.0
+                    or _safe(features.get("credit_mom", 0)) < -0.005
+                ),
+                "correlation": (
+                    _safe(features.get("avg_corr", 0.3)) > 0.6
+                    or _safe(features.get("corr_chg", 0)) > 0.05
+                ),
+                "breadth": (
+                    _safe(features.get("breadth_50d", 0.5)) < 0.4
+                ),
+                "vol_clustering": (
+                    _safe(features.get("vol_of_vol", 0)) > 0.3
+                ),
+            }
+            n_stressed = sum(1 for v in family_signals.values() if v)
+
+            # Track consecutive elevated risk days from history
+            consecutive_elevated = 0
+            for h in reversed(self.forecast_history[-30:]):
+                tp = _safe(h.get("transition_probability", 0))
+                if tp > 0.4:
+                    consecutive_elevated += 1
+                else:
+                    break
+
+            # Determine previous regime
+            prev_regime = "NORMAL"
+            if len(self.forecast_history) >= 2:
+                prev_regime = self.forecast_history[-2].get("predicted_regime", "NORMAL")
+
+            regime_changed = predicted != prev_regime
+            transition_prob = _safe(raw_forecast.get("transition_probability", 0))
+
+            # Classify transition state
+            if not regime_changed and transition_prob < 0.3 and n_stressed < 2:
+                state = "STABLE"
+            elif not regime_changed and (n_stressed >= 1 or transition_prob >= 0.3):
+                state = "EARLY_WARNING"
+            elif regime_changed and n_stressed < 3:
+                # Single-signal spike: don't confirm yet
+                state = "TRANSITION_RISK"
+            elif regime_changed and n_stressed >= 3:
+                if consecutive_elevated >= 2:
+                    state = "TRANSITION_CONFIRMED"
+                else:
+                    state = "TRANSITION_RISK"
+            elif not regime_changed and consecutive_elevated >= 3 and n_stressed < 2:
+                state = "STABILIZING"
+            else:
+                state = "EARLY_WARNING"
+
+            result = {
+                "transition_state": state,
+                "n_stressed_families": n_stressed,
+                "stressed_families": [k for k, v in family_signals.items() if v],
+                "consecutive_elevated_risk_days": consecutive_elevated,
+                "regime_changed_raw": regime_changed,
+                "confirmed": state == "TRANSITION_CONFIRMED",
+                "previous_regime": prev_regime,
+            }
+            log.info("Transition filter: state=%s, stressed=%d/5, consecutive=%d",
+                     state, n_stressed, consecutive_elevated)
+            return result
+        except Exception as exc:
+            log.error("False transition filter failed: %s", exc)
+            return {
+                "transition_state": "EARLY_WARNING",
+                "n_stressed_families": 0, "stressed_families": [],
+                "consecutive_elevated_risk_days": 0, "regime_changed_raw": False,
+                "confirmed": False, "previous_regime": "NORMAL",
+            }
+
+    # 3. Regime Persistence Engine
+    def estimate_persistence(self) -> Dict:
+        """
+        Estimate regime persistence: age, maturity, survival probabilities.
+        """
+        try:
+            regimes_list = ["CALM", "NORMAL", "TENSION", "CRISIS"]
+            current_regime = "NORMAL"
+            if self.forecast_history:
+                current_regime = self.forecast_history[-1].get("predicted_regime", "NORMAL")
+
+            # Compute regime age (days in current regime)
+            regime_age = 0
+            for h in reversed(self.forecast_history):
+                if h.get("predicted_regime") == current_regime:
+                    regime_age += 1
+                else:
+                    break
+
+            # Maturity state
+            if regime_age < 5:
+                maturity = "EMERGING"
+            elif regime_age < 20:
+                maturity = "ESTABLISHED"
+            elif regime_age < 60:
+                maturity = "MATURE"
+            else:
+                maturity = "EXHAUSTING"
+
+            # Persistence probabilities from transition matrix
+            trans_df = self.compute_transition_matrix()
+            if current_regime in trans_df.index:
+                stay_1d = float(trans_df.loc[current_regime, current_regime])
+            else:
+                stay_1d = 0.7
+
+            # P(stay for n days) = stay_1d^n (geometric approximation)
+            # Adjust for regime age — older regimes have slightly lower persistence
+            age_decay = 1.0 - min(regime_age / 200.0, 0.15)
+            adj_stay = stay_1d * age_decay
+
+            persistence_5d = round(max(0.01, adj_stay ** 5), 3)
+            persistence_20d = round(max(0.001, adj_stay ** 20), 3)
+
+            # Historical regime durations
+            durations = []
+            if len(self.forecast_history) >= 5:
+                current_run = 1
+                for i in range(1, len(self.forecast_history)):
+                    if self.forecast_history[i].get("predicted_regime") == \
+                       self.forecast_history[i - 1].get("predicted_regime"):
+                        current_run += 1
+                    else:
+                        durations.append(current_run)
+                        current_run = 1
+                durations.append(current_run)
+
+            avg_duration = round(float(np.mean(durations)), 1) if durations else 10.0
+            median_duration = round(float(np.median(durations)), 1) if durations else 8.0
+
+            result = {
+                "current_regime": current_regime,
+                "regime_age": regime_age,
+                "maturity_state": maturity,
+                "persistence_probability_5d": persistence_5d,
+                "persistence_probability_20d": persistence_20d,
+                "daily_stay_probability": round(adj_stay, 3),
+                "avg_regime_duration": avg_duration,
+                "median_regime_duration": median_duration,
+            }
+            log.info("Persistence: regime=%s, age=%dd, maturity=%s, P(5d)=%.1f%%, P(20d)=%.1f%%",
+                     current_regime, regime_age, maturity,
+                     persistence_5d * 100, persistence_20d * 100)
+            return result
+        except Exception as exc:
+            log.error("Persistence estimation failed: %s", exc)
+            return {
+                "current_regime": "NORMAL", "regime_age": 0,
+                "maturity_state": "EMERGING",
+                "persistence_probability_5d": 0.5,
+                "persistence_probability_20d": 0.25,
+                "daily_stay_probability": 0.7,
+                "avg_regime_duration": 10.0, "median_regime_duration": 8.0,
+            }
+
+    # 4. Evidence Quality & Confidence Scoring
+    def compute_forecast_confidence(self, features: Dict, model_outputs: Dict) -> Dict:
+        """
+        Score forecast confidence based on evidence quality, model agreement,
+        feature conflict, and classification stability.
+        """
+        try:
+            # Evidence quality: what fraction of features are available and non-zero?
+            expected_features = [
+                "vix", "vix_pct", "credit_z", "credit_mom", "avg_corr",
+                "breadth_50d", "realized_vol", "vol_trend", "vol_of_vol",
+            ]
+            available = sum(1 for f in expected_features
+                          if f in features and features[f] != 0)
+            evidence_quality = round(available / len(expected_features), 3)
+
+            # Model disagreement: compare forecast_regime probs vs HMM probs
+            forecast_probs = model_outputs.get("probabilities", {})
+            hmm_probs = {}
+            hmm_data = model_outputs.get("hmm", {})
+            if isinstance(hmm_data, dict):
+                hmm_probs = hmm_data.get("state_probabilities", {})
+
+            if forecast_probs and hmm_probs:
+                regimes = ["CALM", "NORMAL", "TENSION", "CRISIS"]
+                diffs = []
+                for r in regimes:
+                    p1 = forecast_probs.get(r, 0.25)
+                    p2 = hmm_probs.get(r, 0.25)
+                    diffs.append(abs(p1 - p2))
+                model_disagreement = round(min(1.0, float(np.mean(diffs)) * 4), 3)
+            else:
+                model_disagreement = 0.5  # Unknown without both models
+
+            # Feature conflict: do features point in opposite directions?
+            stress_signals = []
+            calm_signals = []
+            vix_pct = _safe(features.get("vix_pct", 0.5))
+            if vix_pct > 0.7:
+                stress_signals.append("vix_high")
+            elif vix_pct < 0.3:
+                calm_signals.append("vix_low")
+
+            credit_z = _safe(features.get("credit_z", 0))
+            if credit_z < -1.0:
+                stress_signals.append("credit_stress")
+            elif credit_z > 0.5:
+                calm_signals.append("credit_healthy")
+
+            breadth = _safe(features.get("breadth_50d", 0.5))
+            if breadth < 0.4:
+                stress_signals.append("breadth_weak")
+            elif breadth > 0.7:
+                calm_signals.append("breadth_strong")
+
+            vol_trend = _safe(features.get("vol_trend", 0))
+            if vol_trend > 0.02:
+                stress_signals.append("vol_rising")
+            elif vol_trend < -0.02:
+                calm_signals.append("vol_falling")
+
+            # Conflict = both stress and calm signals present
+            if stress_signals and calm_signals:
+                conflict_ratio = min(len(stress_signals), len(calm_signals)) / \
+                                 max(len(stress_signals), len(calm_signals))
+                feature_conflict = round(conflict_ratio, 3)
+            else:
+                feature_conflict = 0.0
+
+            # Forecast confidence: weighted average, capped by evidence quality
+            raw_confidence = (
+                0.40 * (1.0 - model_disagreement)
+                + 0.30 * (1.0 - feature_conflict)
+                + 0.30 * evidence_quality
+            )
+            forecast_confidence = round(min(raw_confidence, evidence_quality + 0.1), 3)
+
+            # Stability score: how likely is classification to flip tomorrow?
+            max_prob = max(forecast_probs.values()) if forecast_probs else 0.25
+            second_prob = sorted(forecast_probs.values(), reverse=True)[1] if len(forecast_probs) >= 2 else 0.25
+            margin = max_prob - second_prob
+            stability = round(min(1.0, margin * 3 + 0.2), 3)
+
+            result = {
+                "evidence_quality_score": evidence_quality,
+                "model_disagreement_score": model_disagreement,
+                "feature_conflict_score": feature_conflict,
+                "forecast_confidence": forecast_confidence,
+                "stability_score": stability,
+                "stress_signals": stress_signals,
+                "calm_signals": calm_signals,
+            }
+            log.info("Confidence: evidence=%.2f, disagreement=%.2f, conflict=%.2f, "
+                     "confidence=%.2f, stability=%.2f",
+                     evidence_quality, model_disagreement, feature_conflict,
+                     forecast_confidence, stability)
+            return result
+        except Exception as exc:
+            log.error("Forecast confidence scoring failed: %s", exc)
+            return {
+                "evidence_quality_score": 0.5, "model_disagreement_score": 0.5,
+                "feature_conflict_score": 0.0, "forecast_confidence": 0.5,
+                "stability_score": 0.5, "stress_signals": [], "calm_signals": [],
+            }
+
+    # 5. Institutional Safety Scores
+    def compute_safety_scores(self, forecast: Dict) -> Dict:
+        """
+        Compute multi-dimensional safety scores for downstream agents.
+        """
+        try:
+            probs = forecast.get("probabilities", {})
+            p_crisis = _safe(probs.get("CRISIS", 0))
+            p_tension = _safe(probs.get("TENSION", 0))
+            p_calm = _safe(probs.get("CALM", 0))
+            transition_prob = _safe(forecast.get("transition_probability", 0))
+
+            # Original regime safety (backward compatible)
+            regime_safety = _safe(forecast.get("regime_safety_score", 0.5))
+
+            # Regime risk score (inverse of safety)
+            regime_risk = round(1.0 - regime_safety, 3)
+
+            # Execution safety: can we trade safely?
+            # Penalize high vol, crisis, and transition risk
+            execution_safety = round(max(0.0, min(1.0,
+                1.0 - p_crisis * 2.5 - p_tension * 0.8 - transition_prob * 0.5
+            )), 3)
+
+            # Portfolio safety: should we be defensive?
+            # More conservative than execution
+            portfolio_safety = round(max(0.0, min(1.0,
+                1.0 - p_crisis * 3.0 - p_tension * 1.0 - transition_prob * 0.3
+            )), 3)
+
+            # Research stability: is regime stable enough for research/optimization?
+            # Penalize transitions heavily — unstable regimes make backtests unreliable
+            research_stability = round(max(0.0, min(1.0,
+                p_calm * 0.5 + (1.0 - transition_prob) * 0.5
+            )), 3)
+
+            result = {
+                "regime_safety_score": regime_safety,
+                "regime_risk_score": regime_risk,
+                "execution_safety_score": execution_safety,
+                "portfolio_safety_score": portfolio_safety,
+                "research_stability_score": research_stability,
+            }
+            log.info("Safety scores: regime=%.2f, risk=%.2f, exec=%.2f, "
+                     "portfolio=%.2f, research=%.2f",
+                     regime_safety, regime_risk, execution_safety,
+                     portfolio_safety, research_stability)
+            return result
+        except Exception as exc:
+            log.error("Safety score computation failed: %s", exc)
+            return {
+                "regime_safety_score": 0.5, "regime_risk_score": 0.5,
+                "execution_safety_score": 0.5, "portfolio_safety_score": 0.5,
+                "research_stability_score": 0.5,
+            }
+
+    # 6. Downstream Action Engine
+    def generate_downstream_actions(self, forecast: Dict, safety: Dict) -> Dict:
+        """
+        Generate concrete action directives for each downstream agent
+        based on current regime and safety scores.
+
+        Logic: CALM->normal, NORMAL->cautious, TENSION->defensive, CRISIS->halt
+        """
+        try:
+            predicted = forecast.get("predicted_regime", "NORMAL")
+            transition_prob = _safe(forecast.get("transition_probability", 0))
+            exec_safety = _safe(safety.get("execution_safety_score", 0.5))
+            portfolio_safety = _safe(safety.get("portfolio_safety_score", 0.5))
+            research_stability = _safe(safety.get("research_stability_score", 0.5))
+
+            def _urgency(regime: str, transition_p: float) -> str:
+                if regime == "CRISIS":
+                    return "CRITICAL"
+                if regime == "TENSION" and transition_p > 0.5:
+                    return "HIGH"
+                if regime == "TENSION":
+                    return "MEDIUM"
+                if regime == "NORMAL" and transition_p > 0.4:
+                    return "MEDIUM"
+                return "LOW"
+
+            urgency = _urgency(predicted, transition_prob)
+
+            ACTIONS = {
+                "CALM": {
+                    "methodology": {"action": "normal_research_operations", "urgency": "LOW"},
+                    "optimizer": {"action": "full_optimization_enabled", "urgency": "LOW"},
+                    "alpha_decay": {"note": "decay_rates_nominal"},
+                    "portfolio_construction": {"action": "normal_gross_exposure", "urgency": "LOW"},
+                    "risk_guardian": {"action": "standard_monitoring", "urgency": "LOW"},
+                    "execution": {"action": "normal_urgency_tight_slippage", "urgency": "LOW"},
+                    "auto_improve": {"action": "normal_promotion_cycles", "urgency": "LOW"},
+                },
+                "NORMAL": {
+                    "methodology": {"action": "standard_research_caution", "urgency": "LOW"},
+                    "optimizer": {"action": "prefer_diversified_portfolios", "urgency": "LOW"},
+                    "alpha_decay": {"note": "monitor_for_regime_driven_decay"},
+                    "portfolio_construction": {"action": "standard_gross_exposure", "urgency": "LOW"},
+                    "risk_guardian": {"action": "standard_monitoring", "urgency": "LOW"},
+                    "execution": {"action": "normal_urgency_standard_slippage", "urgency": "LOW"},
+                    "auto_improve": {"action": "normal_promotion_cycles", "urgency": "LOW"},
+                },
+                "TENSION": {
+                    "methodology": {"action": "emphasize_stress_regime_testing", "urgency": "MEDIUM"},
+                    "optimizer": {"action": "prefer_all_weather", "urgency": "MEDIUM"},
+                    "alpha_decay": {"note": "observed_decay_may_be_regime_suppression"},
+                    "portfolio_construction": {"action": "reduce_gross_to_1x", "urgency": "HIGH"},
+                    "risk_guardian": {"action": "activate_elevated_monitoring", "urgency": "HIGH"},
+                    "execution": {"action": "slow_urgency_widen_slippage", "urgency": "MEDIUM"},
+                    "auto_improve": {"action": "pause_promotion_cycles", "urgency": "MEDIUM"},
+                },
+                "CRISIS": {
+                    "methodology": {"action": "halt_new_research_validate_existing", "urgency": "CRITICAL"},
+                    "optimizer": {"action": "defensive_only_minimize_drawdown", "urgency": "CRITICAL"},
+                    "alpha_decay": {"note": "all_decay_suspended_crisis_override"},
+                    "portfolio_construction": {"action": "max_defensive_reduce_gross_to_0.5x", "urgency": "CRITICAL"},
+                    "risk_guardian": {"action": "crisis_mode_continuous_monitoring", "urgency": "CRITICAL"},
+                    "execution": {"action": "halt_new_orders_unwind_only", "urgency": "CRITICAL"},
+                    "auto_improve": {"action": "freeze_all_changes", "urgency": "CRITICAL"},
+                },
+            }
+
+            actions = ACTIONS.get(predicted, ACTIONS["NORMAL"])
+
+            # Override urgency if transition risk is high
+            if urgency in ("HIGH", "CRITICAL"):
+                for agent_key in actions:
+                    if isinstance(actions[agent_key], dict) and "urgency" in actions[agent_key]:
+                        current = actions[agent_key]["urgency"]
+                        if urgency == "CRITICAL" or (urgency == "HIGH" and current == "LOW"):
+                            actions[agent_key]["urgency"] = urgency
+
+            actions["_meta"] = {
+                "regime": predicted,
+                "overall_urgency": urgency,
+                "transition_probability": round(transition_prob, 3),
+            }
+            log.info("Downstream actions: regime=%s, urgency=%s", predicted, urgency)
+            return actions
+        except Exception as exc:
+            log.error("Downstream action generation failed: %s", exc)
+            return {
+                "methodology": {"action": "standard_research_caution", "urgency": "MEDIUM"},
+                "optimizer": {"action": "prefer_diversified_portfolios", "urgency": "MEDIUM"},
+                "alpha_decay": {"note": "unknown_regime"},
+                "portfolio_construction": {"action": "reduce_gross_to_1x", "urgency": "MEDIUM"},
+                "risk_guardian": {"action": "activate_elevated_monitoring", "urgency": "MEDIUM"},
+                "execution": {"action": "slow_urgency_widen_slippage", "urgency": "MEDIUM"},
+                "auto_improve": {"action": "pause_promotion_cycles", "urgency": "MEDIUM"},
+                "_meta": {"regime": "NORMAL", "overall_urgency": "MEDIUM", "transition_probability": 0.5},
+            }
+
+    # 7. Enhanced Leading Indicators (augmentation — called after base)
+    def enhance_leading_indicators(self, leading: Dict, features: Dict) -> Dict:
+        """
+        Augment leading indicators with regime implications, net pressures,
+        and importance ranking.
+        """
+        try:
+            indicators = leading.get("indicators", [])
+
+            # Add regime_implication per indicator
+            regime_map = {
+                "bullish": {"CALM": "supportive", "NORMAL": "supportive",
+                            "TENSION": "counter_signal", "CRISIS": "counter_signal"},
+                "bearish": {"CALM": "counter_signal", "NORMAL": "neutral",
+                            "TENSION": "supportive", "CRISIS": "supportive"},
+                "neutral": {"CALM": "neutral", "NORMAL": "neutral",
+                            "TENSION": "neutral", "CRISIS": "neutral"},
+            }
+            for ind in indicators:
+                signal = ind.get("signal", "neutral")
+                ind["regime_implication"] = regime_map.get(signal, regime_map["neutral"])
+
+            # Net risk-off pressure
+            risk_off_indicators = [
+                ind for ind in indicators
+                if ind.get("signal") == "bearish"
+            ]
+            net_risk_off = round(sum(abs(ind.get("z_score", 0)) for ind in risk_off_indicators), 3)
+
+            # Net stabilization pressure
+            stabilization_indicators = [
+                ind for ind in indicators
+                if ind.get("signal") == "bullish"
+            ]
+            net_stabilization = round(sum(abs(ind.get("z_score", 0)) for ind in stabilization_indicators), 3)
+
+            # Net fragility pressure (hidden stress: high vol-of-vol, dispersion trend, correlation accel)
+            fragility_names = {"Correlation acceleration", "Sector dispersion trend", "VRP (implied - realized vol)"}
+            fragility_indicators = [
+                ind for ind in indicators
+                if ind.get("name") in fragility_names and ind.get("signal") == "bearish"
+            ]
+            net_fragility = round(sum(abs(ind.get("z_score", 0)) for ind in fragility_indicators), 3)
+
+            # Rank by absolute z-score (importance)
+            ranked = sorted(indicators, key=lambda x: abs(x.get("z_score", 0)), reverse=True)
+
+            leading["indicators"] = ranked
+            leading["net_risk_off_pressure"] = net_risk_off
+            leading["net_stabilization_pressure"] = net_stabilization
+            leading["net_fragility_pressure"] = net_fragility
+            leading["indicator_ranking"] = [
+                {"name": ind["name"], "abs_z": round(abs(ind.get("z_score", 0)), 3)}
+                for ind in ranked[:5]
+            ]
+
+            log.info("Enhanced indicators: risk_off=%.2f, stabilization=%.2f, fragility=%.2f",
+                     net_risk_off, net_stabilization, net_fragility)
+            return leading
+        except Exception as exc:
+            log.error("Enhanced leading indicators failed: %s", exc)
+            return leading
+
+    # 8. Machine Summary
+    def build_machine_summary(self, forecast: Dict, confidence: Dict,
+                               transition_filter: Dict, persistence: Dict,
+                               safety: Dict, leading: Dict,
+                               downstream: Dict) -> Dict:
+        """
+        Build a compact machine-readable summary for downstream consumption.
+        """
+        try:
+            predicted = forecast.get("predicted_regime", "NORMAL")
+            probs = forecast.get("probabilities", {})
+            features = forecast.get("features", {})
+
+            # Top risk factors
+            top_risks = []
+            vix_pct = _safe(features.get("vix_pct", 0.5))
+            if vix_pct > 0.7:
+                top_risks.append(f"VIX at {int(vix_pct * 100)}th percentile")
+            credit_z = _safe(features.get("credit_z", 0))
+            if credit_z < -1.0:
+                top_risks.append("credit spread widening")
+            breadth = _safe(features.get("breadth_50d", 0.5))
+            if breadth < 0.4:
+                top_risks.append(f"weak breadth ({breadth:.0%} above 50d)")
+            vol_trend = _safe(features.get("vol_trend", 0))
+            if vol_trend > 0.02:
+                top_risks.append("rising volatility trend")
+            avg_corr = _safe(features.get("avg_corr", 0.3))
+            if avg_corr > 0.6:
+                top_risks.append(f"elevated correlations ({avg_corr:.2f})")
+            if not top_risks:
+                top_risks.append("no major risk factors detected")
+
+            # Key instruction
+            instructions = {
+                "CALM": "normal operations, full risk budget available",
+                "NORMAL": "standard positioning, monitor transition indicators",
+                "TENSION": "reduce exposure, favor defensive positioning",
+                "CRISIS": "halt new positions, maximize hedges, unwind risk",
+            }
+
+            overall_urgency = downstream.get("_meta", {}).get("overall_urgency", "LOW")
+
+            horizon_5d = forecast.get("multi_horizon", {}).get("horizon_5d", {})
+            transition_risk_5d = horizon_5d.get("transition_prob", 0.5) if horizon_5d else \
+                _safe(forecast.get("transition_probability", 0.5))
+
+            summary = {
+                "predicted_regime": predicted,
+                "confidence": _safe(confidence.get("forecast_confidence", 0.5)),
+                "transition_state": transition_filter.get("transition_state", "STABLE"),
+                "transition_risk_5d": round(float(transition_risk_5d), 3),
+                "persistence": persistence.get("maturity_state", "EMERGING"),
+                "regime_age_days": persistence.get("regime_age", 0),
+                "safety_score": _safe(safety.get("regime_safety_score", 0.5)),
+                "top_risk_factors": top_risks[:5],
+                "downstream_urgency": overall_urgency,
+                "key_instruction": instructions.get(predicted, instructions["NORMAL"]),
+            }
+            log.info("Machine summary: regime=%s, confidence=%.2f, state=%s, urgency=%s",
+                     predicted, summary["confidence"],
+                     summary["transition_state"], overall_urgency)
+            return summary
+        except Exception as exc:
+            log.error("Machine summary build failed: %s", exc)
+            return {
+                "predicted_regime": "NORMAL", "confidence": 0.5,
+                "transition_state": "EARLY_WARNING", "transition_risk_5d": 0.5,
+                "persistence": "EMERGING", "regime_age_days": 0,
+                "safety_score": 0.5, "top_risk_factors": ["computation_error"],
+                "downstream_urgency": "MEDIUM",
+                "key_instruction": "reduce exposure, monitor closely",
+            }
+
+    # 9. Forecast History Analysis
+    def get_transition_alerts(self, n: int = 10) -> list:
+        """Return the most recent n transition state changes from history."""
+        try:
+            alerts = []
+            history = self.forecast_history
+            for i in range(1, min(len(history), n + 50)):
+                prev = history[-(i + 1)] if i + 1 <= len(history) else None
+                curr = history[-i]
+                if prev is None:
+                    continue
+                prev_regime = prev.get("predicted_regime", "NORMAL")
+                curr_regime = curr.get("predicted_regime", "NORMAL")
+                if prev_regime != curr_regime:
+                    alerts.append({
+                        "timestamp": curr.get("timestamp", ""),
+                        "from_regime": prev_regime,
+                        "to_regime": curr_regime,
+                        "transition_probability": curr.get("transition_probability", 0),
+                    })
+                    if len(alerts) >= n:
+                        break
+            return list(reversed(alerts))
+        except Exception as exc:
+            log.error("Transition alerts failed: %s", exc)
+            return []
+
+    def get_confidence_drift(self, n: int = 20) -> list:
+        """Return rolling confidence trend from recent history."""
+        try:
+            history = self.forecast_history[-n:]
+            drift = []
+            for h in history:
+                probs = h.get("probabilities", {})
+                max_prob = max(probs.values()) if probs else 0.25
+                drift.append({
+                    "timestamp": h.get("timestamp", ""),
+                    "regime": h.get("predicted_regime", "NORMAL"),
+                    "max_probability": round(max_prob, 3),
+                    "transition_probability": round(_safe(h.get("transition_probability", 0)), 3),
+                })
+            return drift
+        except Exception as exc:
+            log.error("Confidence drift failed: %s", exc)
+            return []
+
+    def get_regime_persistence_history(self, n: int = 20) -> list:
+        """Return how long each of the last n regimes lasted."""
+        try:
+            if not self.forecast_history:
+                return []
+            runs = []
+            current_regime = self.forecast_history[0].get("predicted_regime", "NORMAL")
+            current_start = self.forecast_history[0].get("timestamp", "")
+            current_count = 1
+            for h in self.forecast_history[1:]:
+                r = h.get("predicted_regime", "NORMAL")
+                if r == current_regime:
+                    current_count += 1
+                else:
+                    runs.append({
+                        "regime": current_regime,
+                        "duration_days": current_count,
+                        "start": current_start,
+                    })
+                    current_regime = r
+                    current_start = h.get("timestamp", "")
+                    current_count = 1
+            runs.append({
+                "regime": current_regime,
+                "duration_days": current_count,
+                "start": current_start,
+            })
+            return runs[-n:]
+        except Exception as exc:
+            log.error("Regime persistence history failed: %s", exc)
+            return []
+
+    def get_false_transition_events(self) -> list:
+        """Identify transitions that reverted within 3 days."""
+        try:
+            false_transitions = []
+            history = self.forecast_history
+            if len(history) < 5:
+                return []
+            for i in range(1, len(history) - 3):
+                prev = history[i - 1].get("predicted_regime", "NORMAL")
+                curr = history[i].get("predicted_regime", "NORMAL")
+                if prev != curr:
+                    # Check if it reverts within 3 days
+                    for j in range(1, 4):
+                        if i + j < len(history):
+                            future = history[i + j].get("predicted_regime", "NORMAL")
+                            if future == prev:
+                                false_transitions.append({
+                                    "timestamp": history[i].get("timestamp", ""),
+                                    "from_regime": prev,
+                                    "false_regime": curr,
+                                    "reverted_after_days": j,
+                                })
+                                break
+            return false_transitions
+        except Exception as exc:
+            log.error("False transition events failed: %s", exc)
+            return []
+
     # ── Run ────────────────────────────────────────────────────────
 
     def run(self) -> Dict:
-        """Full cycle: features → forecast → save → publish."""
+        """Full cycle: features -> forecast -> institutional analytics -> save -> publish."""
         log.info("=" * 60)
-        log.info("REGIME FORECASTER — %s", datetime.now(timezone.utc).isoformat()[:19])
+        log.info("REGIME INTELLIGENCE ENGINE — %s", datetime.now(timezone.utc).isoformat()[:19])
         log.info("=" * 60)
 
         forecast = self.forecast_regime()
@@ -803,7 +1552,7 @@ class RegimeForecaster:
         log.info("  Transition prob: %.1f%%, Safety score: %.3f",
                  forecast["transition_probability"] * 100, forecast["regime_safety_score"])
 
-        # Run advanced analytics
+        # ── Existing advanced analytics ───────────────────────────
         try:
             hmm_result = self.fit_hmm()
             forecast["hmm"] = hmm_result
@@ -824,6 +1573,7 @@ class RegimeForecaster:
             log.info("  Leading indicators: %s", leading.get("detail", "N/A"))
         except Exception as exc:
             log.warning("Leading indicators skipped: %s", exc)
+            leading = {}
 
         try:
             accuracy = self.track_forecast_accuracy()
@@ -832,7 +1582,107 @@ class RegimeForecaster:
         except Exception as exc:
             log.warning("Accuracy tracking skipped: %s", exc)
 
-        # Save current forecast
+        # ── Institutional Intelligence Layer ──────────────────────
+
+        # 1. Multi-Horizon Forecast
+        try:
+            multi_horizon = self.forecast_multi_horizon()
+            forecast["multi_horizon"] = multi_horizon
+            log.info("  Multi-horizon forecast computed")
+        except Exception as exc:
+            log.warning("Multi-horizon forecast skipped: %s", exc)
+
+        # 2. False Transition Filter
+        try:
+            transition_filter = self.filter_false_transitions(forecast)
+            forecast["transition_filter"] = transition_filter
+            log.info("  Transition filter: %s", transition_filter.get("transition_state", "N/A"))
+        except Exception as exc:
+            log.warning("Transition filter skipped: %s", exc)
+            transition_filter = {"transition_state": "EARLY_WARNING"}
+
+        # 3. Regime Persistence
+        try:
+            persistence = self.estimate_persistence()
+            forecast["persistence"] = persistence
+            log.info("  Persistence: %s (age=%dd)",
+                     persistence.get("maturity_state", "N/A"),
+                     persistence.get("regime_age", 0))
+        except Exception as exc:
+            log.warning("Persistence estimation skipped: %s", exc)
+            persistence = {"maturity_state": "EMERGING", "regime_age": 0}
+
+        # 4. Evidence Quality & Confidence
+        try:
+            confidence = self.compute_forecast_confidence(
+                forecast.get("features", {}), forecast
+            )
+            forecast["confidence"] = confidence
+            log.info("  Confidence: %.2f", confidence.get("forecast_confidence", 0))
+        except Exception as exc:
+            log.warning("Confidence scoring skipped: %s", exc)
+            confidence = {"forecast_confidence": 0.5}
+
+        # 5. Institutional Safety Scores
+        try:
+            safety = self.compute_safety_scores(forecast)
+            forecast["safety_scores"] = safety
+            log.info("  Safety: exec=%.2f, portfolio=%.2f, research=%.2f",
+                     safety.get("execution_safety_score", 0),
+                     safety.get("portfolio_safety_score", 0),
+                     safety.get("research_stability_score", 0))
+        except Exception as exc:
+            log.warning("Safety scores skipped: %s", exc)
+            safety = {"regime_safety_score": forecast.get("regime_safety_score", 0.5)}
+
+        # 6. Downstream Actions
+        try:
+            downstream = self.generate_downstream_actions(forecast, safety)
+            forecast["downstream_actions"] = downstream
+            log.info("  Downstream: urgency=%s",
+                     downstream.get("_meta", {}).get("overall_urgency", "N/A"))
+        except Exception as exc:
+            log.warning("Downstream actions skipped: %s", exc)
+            downstream = {"_meta": {"overall_urgency": "MEDIUM"}}
+
+        # 7. Enhanced Leading Indicators
+        try:
+            if leading:
+                enhanced_leading = self.enhance_leading_indicators(leading, forecast.get("features", {}))
+                forecast["leading_indicators"] = enhanced_leading
+                log.info("  Enhanced indicators: risk_off=%.2f, stabilization=%.2f",
+                         enhanced_leading.get("net_risk_off_pressure", 0),
+                         enhanced_leading.get("net_stabilization_pressure", 0))
+        except Exception as exc:
+            log.warning("Enhanced leading indicators skipped: %s", exc)
+
+        # 8. Machine Summary
+        try:
+            machine_summary = self.build_machine_summary(
+                forecast, confidence, transition_filter, persistence,
+                safety, leading, downstream
+            )
+            forecast["machine_summary"] = machine_summary
+            log.info("  Machine summary: regime=%s, confidence=%.2f, urgency=%s",
+                     machine_summary.get("predicted_regime", "N/A"),
+                     machine_summary.get("confidence", 0),
+                     machine_summary.get("downstream_urgency", "N/A"))
+        except Exception as exc:
+            log.warning("Machine summary skipped: %s", exc)
+
+        # 9. History Analysis (attach to forecast for record)
+        try:
+            forecast["history_analysis"] = {
+                "transition_alerts": self.get_transition_alerts(5),
+                "confidence_drift": self.get_confidence_drift(10),
+                "regime_persistence_history": self.get_regime_persistence_history(10),
+                "false_transition_events": self.get_false_transition_events(),
+            }
+            log.info("  History analysis attached")
+        except Exception as exc:
+            log.warning("History analysis skipped: %s", exc)
+
+        # ── Save & Publish ────────────────────────────────────────
         (OUTPUT_DIR / "regime_forecast.json").write_text(
             json.dumps(forecast, indent=2, default=str), encoding="utf-8"
         )
@@ -860,7 +1710,7 @@ class RegimeForecaster:
         except Exception:
             pass
 
-        log.info("Forecast saved and published.")
+        log.info("Regime Intelligence Engine complete — forecast saved and published.")
         return forecast
 
 

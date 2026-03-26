@@ -1,6 +1,6 @@
 {
   "level": "GREEN",
-  "timestamp": "2026-03-26T13:04:12.512844+00:00",
+  "timestamp": "2026-03-26T13:38:01.208937+00:00",
   "date": "2026-03-26",
   "breaches": [],
   "recommendations": [],
@@ -70,5 +70,5 @@
   ],
   "n_positions": 0,
   "capital": 1000000.0,
-  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-26T13:04:12\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ==="
+  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-26T13:38:01\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ==="
 }
