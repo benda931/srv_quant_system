@@ -214,5 +214,29 @@
     "timestamp": "2026-03-26T18:18:48.122761+00:00",
     "risk_state": "INSUFFICIENT_EVIDENCE",
     "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T18:37:58.882919+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T18:37:59.037334+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T19:33:19.052306+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-26",
+    "timestamp": "2026-03-26T19:33:19.135948+00:00",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "legacy_level": "YELLOW"
   }
 ]
