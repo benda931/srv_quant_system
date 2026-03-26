@@ -113,6 +113,26 @@ RISK_BLACK = "BLACK"
 
 _LEVEL_PRIORITY = {RISK_GREEN: 0, RISK_YELLOW: 1, RISK_RED: 2, RISK_BLACK: 3}
 
+# =============================================================================
+# Institutional Risk States — CRO Desk
+# =============================================================================
+RISK_STATES = [
+    "SAFE", "CAUTION", "FRAGILE", "ELEVATED_RISK",
+    "HALT_REQUIRED", "EMERGENCY", "INSUFFICIENT_EVIDENCE",
+]
+RISK_STATE_TO_LEGACY = {
+    "SAFE": "GREEN",
+    "CAUTION": "YELLOW",
+    "FRAGILE": "YELLOW",
+    "ELEVATED_RISK": "RED",
+    "HALT_REQUIRED": "RED",
+    "EMERGENCY": "BLACK",
+    "INSUFFICIENT_EVIDENCE": "YELLOW",
+}
+
+# Institutional risk history path
+_RISK_HISTORY_PATH = Path(__file__).resolve().parent / "risk_history.json"
+
 
 def _worst_level(a: str, b: str) -> str:
     """Return the more severe risk level."""
@@ -925,8 +945,1029 @@ class RiskGuardian:
             log.error("Alert formatting failed: %s", exc)
             return f"RISK ALERT: {status.get('level', 'UNKNOWN')} (formatting error: {exc})"
 
+    # =================================================================
+    # INSTITUTIONAL CRO DESK — New methods below
+    # =================================================================
+
     # -----------------------------------------------------------------
-    # Aggregate checks
+    # 2. RiskInputAssembler
+    # -----------------------------------------------------------------
+
+    def assemble_risk_inputs(self) -> Dict:
+        """
+        Load all upstream agent outputs needed for institutional risk assessment.
+
+        Loads:
+          - Portfolio Construction weights
+          - Regime Forecast
+          - Alpha Decay status
+          - Methodology machine_summary (latest report)
+          - Optimizer machine_summary
+
+        Returns dict with available_inputs list and each loaded payload.
+        """
+        inputs: Dict[str, Any] = {"available_inputs": []}
+
+        # Portfolio Construction weights
+        try:
+            pw_path = ROOT / "agents" / "portfolio_construction" / "portfolio_weights.json"
+            if pw_path.exists():
+                inputs["portfolio_weights"] = json.loads(pw_path.read_text(encoding="utf-8"))
+                inputs["available_inputs"].append("portfolio_weights")
+        except Exception as exc:
+            log.debug("Could not load portfolio_weights: %s", exc)
+
+        # Regime Forecast
+        try:
+            rf_path = ROOT / "agents" / "regime_forecaster" / "regime_forecast.json"
+            if rf_path.exists():
+                inputs["regime_forecast"] = json.loads(rf_path.read_text(encoding="utf-8"))
+                inputs["available_inputs"].append("regime_forecast")
+        except Exception as exc:
+            log.debug("Could not load regime_forecast: %s", exc)
+
+        # Alpha Decay
+        try:
+            ad_path = ROOT / "agents" / "alpha_decay" / "decay_status.json"
+            if ad_path.exists():
+                inputs["decay_status"] = json.loads(ad_path.read_text(encoding="utf-8"))
+                inputs["available_inputs"].append("decay_status")
+        except Exception as exc:
+            log.debug("Could not load decay_status: %s", exc)
+
+        # Methodology machine_summary — find latest report
+        try:
+            reports_dir = ROOT / "agents" / "methodology" / "reports"
+            if reports_dir.exists():
+                report_files = sorted(reports_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                for rp in report_files:
+                    try:
+                        data = json.loads(rp.read_text(encoding="utf-8"))
+                        ms = data.get("machine_summary") or data.get("machine_summary_v3")
+                        if ms:
+                            inputs["methodology_machine_summary"] = ms
+                            inputs["available_inputs"].append("methodology_machine_summary")
+                            break
+                    except Exception:
+                        continue
+        except Exception as exc:
+            log.debug("Could not load methodology machine_summary: %s", exc)
+
+        # Optimizer machine_summary — via bus or file
+        try:
+            if _IMPORTS_OK.get("agent_bus"):
+                bus = get_bus()
+                opt_report = bus.latest("agent_optimizer")
+                if isinstance(opt_report, dict):
+                    opt_ms = opt_report.get("machine_summary", {})
+                    if opt_ms:
+                        inputs["optimizer_machine_summary"] = opt_ms
+                        inputs["available_inputs"].append("optimizer_machine_summary")
+        except Exception as exc:
+            log.debug("Could not load optimizer machine_summary: %s", exc)
+
+        log.info("Risk inputs assembled: %s", inputs["available_inputs"])
+        return inputs
+
+    # -----------------------------------------------------------------
+    # 3. DataSufficiencyEngine
+    # -----------------------------------------------------------------
+
+    def check_data_sufficiency(self, risk_inputs: Dict) -> Dict:
+        """
+        Check whether we have enough data to make risk decisions.
+
+        Returns evidence_quality_score (0-1), missing_inputs, stale_data_flags,
+        sufficient (bool). If not sufficient, risk_state = INSUFFICIENT_EVIDENCE.
+        """
+        missing: List[str] = []
+        stale_flags: List[str] = []
+        checks_passed = 0
+        total_checks = 5
+
+        # 1. Positions exist?
+        positions = self._get_positions()
+        if positions:
+            checks_passed += 1
+        else:
+            missing.append("positions")
+
+        # 2. Prices fresh?
+        if self._prices is not None and len(self._prices) > 0:
+            try:
+                last_date = pd.Timestamp(self._prices.index[-1])
+                now = pd.Timestamp.now(tz="UTC")
+                if hasattr(last_date, "tz") and last_date.tz is None:
+                    last_date = last_date.tz_localize("UTC")
+                days_stale = (now - last_date).days
+                if days_stale <= 3:
+                    checks_passed += 1
+                else:
+                    stale_flags.append(f"prices_stale_{days_stale}d")
+            except Exception:
+                checks_passed += 1  # benefit of doubt
+        else:
+            missing.append("prices")
+
+        # 3. Regime inputs available?
+        if "regime_forecast" in risk_inputs.get("available_inputs", []):
+            checks_passed += 1
+        else:
+            missing.append("regime_forecast")
+
+        # 4. Decay available?
+        if "decay_status" in risk_inputs.get("available_inputs", []):
+            checks_passed += 1
+        else:
+            missing.append("decay_status")
+
+        # 5. Allocation available?
+        if "portfolio_weights" in risk_inputs.get("available_inputs", []):
+            checks_passed += 1
+        else:
+            missing.append("portfolio_weights")
+
+        evidence_quality = checks_passed / total_checks if total_checks > 0 else 0.0
+        sufficient = evidence_quality >= 0.6 and "positions" not in missing
+
+        result = {
+            "evidence_quality_score": round(evidence_quality, 2),
+            "missing_inputs": missing,
+            "stale_data_flags": stale_flags,
+            "sufficient": sufficient,
+        }
+        if not sufficient:
+            result["risk_state"] = "INSUFFICIENT_EVIDENCE"
+        log.info("Data sufficiency: score=%.2f, sufficient=%s, missing=%s",
+                 evidence_quality, sufficient, missing)
+        return result
+
+    # -----------------------------------------------------------------
+    # 4. FragilityEngine
+    # -----------------------------------------------------------------
+
+    def detect_fragility(self, risk_inputs: Dict) -> Dict:
+        """
+        Forward-looking fragility detection.
+
+        Checks:
+          - Rising correlation + high concentration -> fragility
+          - Regime transition_risk > 30% + gross > 1.5x -> fragility
+          - Multiple sleeves in EARLY_DECAY/STRUCTURAL_DECAY with combined weight > 30%
+          - Proposed turnover spike into TENSION/CRISIS -> fragility
+
+        Returns fragility_score (0-1), fragility_drivers list,
+        fragility_state (STABLE/BUILDING/CRITICAL).
+        """
+        drivers: List[str] = []
+        score_components: List[float] = []
+
+        # 1. Correlation + concentration
+        try:
+            corr_check = self.check_correlation_spike()
+            conc_check = self.check_concentration()
+            avg_corr = corr_check.get("avg_pairwise_corr", 0.0)
+            max_weight = conc_check.get("max_single_weight", 0.0)
+            if avg_corr > 0.5 and max_weight > 0.15:
+                component = min(1.0, (avg_corr - 0.3) * 1.5 + (max_weight - 0.1) * 2.0)
+                score_components.append(component)
+                drivers.append(f"corr_concentration: avg_corr={avg_corr:.3f}, max_wt={max_weight:.2%}")
+        except Exception as exc:
+            log.debug("Fragility corr+conc check: %s", exc)
+
+        # 2. Regime transition risk + gross exposure
+        try:
+            regime = risk_inputs.get("regime_forecast", {})
+            transition_prob = float(regime.get("transition_probability", 0.0))
+            exp_check = self.check_exposure_limits()
+            gross = exp_check.get("gross_exposure", 0.0)
+            if transition_prob > 0.30 and gross > 1.5:
+                component = min(1.0, (transition_prob - 0.2) * 2.0 + (gross - 1.0) * 0.5)
+                score_components.append(component)
+                drivers.append(f"regime_transition_risk: trans_prob={transition_prob:.2f}, gross={gross:.2f}x")
+        except Exception as exc:
+            log.debug("Fragility regime check: %s", exc)
+
+        # 3. Decay sleeves with high combined weight
+        try:
+            decay = risk_inputs.get("decay_status", {})
+            decay_level = decay.get("decay_level", "HEALTHY")
+            pw = risk_inputs.get("portfolio_weights", {})
+            proposed_weights = pw.get("weights", {})
+            if decay_level in ("EARLY_DECAY", "STRUCTURAL_DECAY"):
+                total_weight = sum(abs(v) for v in proposed_weights.values())
+                if total_weight > 0.30:
+                    component = min(1.0, total_weight * 1.5)
+                    score_components.append(component)
+                    drivers.append(f"decay_sleeves: level={decay_level}, combined_weight={total_weight:.2%}")
+        except Exception as exc:
+            log.debug("Fragility decay check: %s", exc)
+
+        # 4. Proposed turnover into bad regime
+        try:
+            regime = risk_inputs.get("regime_forecast", {})
+            predicted = regime.get("predicted_regime", "NORMAL")
+            if predicted in ("TENSION", "CRISIS"):
+                pw = risk_inputs.get("portfolio_weights", {})
+                proposed_weights = pw.get("weights", {})
+                current_weights = self._get_portfolio_weights()
+                if proposed_weights and current_weights:
+                    all_tickers = set(list(proposed_weights.keys()) + list(current_weights.keys()))
+                    turnover = sum(
+                        abs(proposed_weights.get(t, 0) - current_weights.get(t, 0))
+                        for t in all_tickers
+                    )
+                    if turnover > 0.30:
+                        component = min(1.0, turnover * 1.2)
+                        score_components.append(component)
+                        drivers.append(f"turnover_in_{predicted}: turnover={turnover:.2%}")
+        except Exception as exc:
+            log.debug("Fragility turnover check: %s", exc)
+
+        fragility_score = float(np.mean(score_components)) if score_components else 0.0
+        fragility_score = min(1.0, max(0.0, fragility_score))
+
+        if fragility_score >= 0.7:
+            fragility_state = "CRITICAL"
+        elif fragility_score >= 0.35:
+            fragility_state = "BUILDING"
+        else:
+            fragility_state = "STABLE"
+
+        result = {
+            "fragility_score": round(fragility_score, 4),
+            "fragility_drivers": drivers,
+            "fragility_state": fragility_state,
+        }
+        log.info("Fragility: score=%.3f, state=%s, drivers=%d",
+                 fragility_score, fragility_state, len(drivers))
+        return result
+
+    # -----------------------------------------------------------------
+    # 5. Proposed Portfolio Risk Assessment
+    # -----------------------------------------------------------------
+
+    def assess_proposed_portfolio(self, proposed_weights: Dict[str, float],
+                                  risk_inputs: Dict) -> Dict:
+        """
+        Assess whether a proposed portfolio allocation is acceptable.
+
+        Checks gross/net limits, concentration, governance compliance,
+        overweighting decaying sleeves, and turnover for current regime.
+        """
+        reject_reasons: List[str] = []
+        proposed_risk_score = 0.0
+
+        if not proposed_weights:
+            return {
+                "acceptable": True,
+                "haircut_required": False,
+                "reject_reasons": ["no_proposed_weights"],
+                "proposed_risk_score": 0.0,
+            }
+
+        # Gross / net
+        long_sum = sum(v for v in proposed_weights.values() if v > 0)
+        short_sum = sum(abs(v) for v in proposed_weights.values() if v < 0)
+        gross = long_sum + short_sum
+        net = abs(long_sum - short_sum)
+
+        gross_limit = self.thresholds["gross_exposure_limit"]
+        net_limit = self.thresholds["net_exposure_limit"]
+        conc_limit = self.thresholds["concentration_limit"]
+
+        if gross > gross_limit:
+            reject_reasons.append(f"proposed_gross={gross:.2f}x > {gross_limit:.1f}x")
+            proposed_risk_score += 0.3
+        if net > net_limit:
+            reject_reasons.append(f"proposed_net={net:.2%} > {net_limit:.0%}")
+            proposed_risk_score += 0.15
+
+        # Concentration
+        max_wt = max(abs(v) for v in proposed_weights.values()) if proposed_weights else 0.0
+        if max_wt > conc_limit:
+            max_ticker = max(proposed_weights.keys(), key=lambda t: abs(proposed_weights[t]))
+            reject_reasons.append(f"concentration: {max_ticker}={max_wt:.2%} > {conc_limit:.0%}")
+            proposed_risk_score += 0.2
+
+        # Overweight decaying sleeves?
+        decay = risk_inputs.get("decay_status", {})
+        decay_level = decay.get("decay_level", "HEALTHY")
+        if decay_level in ("EARLY_DECAY", "STRUCTURAL_DECAY"):
+            total_proposed = sum(abs(v) for v in proposed_weights.values())
+            if total_proposed > 0.50:
+                reject_reasons.append(f"overweight_decay: total={total_proposed:.2%}, decay={decay_level}")
+                proposed_risk_score += 0.15
+
+        # Turnover for regime
+        regime = risk_inputs.get("regime_forecast", {})
+        predicted = regime.get("predicted_regime", "NORMAL")
+        current_weights = self._get_portfolio_weights()
+        if current_weights and predicted in ("TENSION", "CRISIS"):
+            all_tickers = set(list(proposed_weights.keys()) + list(current_weights.keys()))
+            turnover = sum(
+                abs(proposed_weights.get(t, 0) - current_weights.get(t, 0))
+                for t in all_tickers
+            )
+            if turnover > 0.40:
+                reject_reasons.append(
+                    f"high_turnover_in_{predicted}: turnover={turnover:.2%}"
+                )
+                proposed_risk_score += 0.2
+
+        proposed_risk_score = min(1.0, proposed_risk_score)
+        acceptable = proposed_risk_score < 0.4
+        haircut_required = 0.2 <= proposed_risk_score < 0.4
+
+        result = {
+            "acceptable": acceptable,
+            "haircut_required": haircut_required,
+            "reject_reasons": reject_reasons,
+            "proposed_risk_score": round(proposed_risk_score, 4),
+            "proposed_gross": round(gross, 4),
+            "proposed_net": round(net, 4),
+            "proposed_max_weight": round(max_wt, 4),
+        }
+        log.info("Proposed portfolio assessment: acceptable=%s, risk_score=%.3f",
+                 acceptable, proposed_risk_score)
+        return result
+
+    # -----------------------------------------------------------------
+    # 6. Sleeve-Level Risk Analysis
+    # -----------------------------------------------------------------
+
+    def analyze_sleeve_risk(self, risk_inputs: Dict) -> List[Dict]:
+        """
+        For each position/sleeve, compute risk contribution, decay health,
+        regime mismatch, governance quality, and recommended action.
+
+        Returns list sorted by risk_contribution desc.
+        """
+        positions = self._get_positions()
+        capital = self._get_capital()
+        if not positions or capital <= 0:
+            return []
+
+        decay = risk_inputs.get("decay_status", {})
+        decay_level = decay.get("decay_level", "HEALTHY")
+        regime = risk_inputs.get("regime_forecast", {})
+        predicted_regime = regime.get("predicted_regime", "NORMAL")
+        methodology_ms = risk_inputs.get("methodology_machine_summary", {})
+
+        sleeves: List[Dict] = []
+        total_notional = sum(abs(float(p.get("notional", 0))) for p in positions)
+
+        for pos in positions:
+            ticker = pos.get("ticker", "UNKNOWN")
+            notional = abs(float(pos.get("notional", 0)))
+            direction = pos.get("direction", "LONG")
+            capital_weight = notional / capital if capital > 0 else 0.0
+
+            # Risk contribution (simple proportional)
+            risk_contribution = notional / total_notional if total_notional > 0 else 0.0
+
+            # Decay health
+            if decay_level in ("STRUCTURAL_DECAY",):
+                decay_health = "POOR"
+            elif decay_level in ("EARLY_DECAY",):
+                decay_health = "DEGRADING"
+            else:
+                decay_health = "HEALTHY"
+
+            # Regime mismatch: long in CRISIS is riskier
+            regime_mismatch = False
+            if predicted_regime in ("CRISIS",) and direction == "LONG" and capital_weight > 0.10:
+                regime_mismatch = True
+            elif predicted_regime in ("TENSION",) and capital_weight > 0.20:
+                regime_mismatch = True
+
+            # Governance quality — check methodology
+            governance_quality = "approved"
+            if methodology_ms:
+                disabled = methodology_ms.get("strategies_to_disable", [])
+                if ticker in disabled:
+                    governance_quality = "rejected"
+
+            # Determine action
+            if governance_quality == "rejected":
+                action = "DISABLE"
+            elif decay_health == "POOR" and regime_mismatch:
+                action = "CUT"
+            elif decay_health == "DEGRADING" or regime_mismatch:
+                action = "HAIRCUT"
+            else:
+                action = "KEEP"
+
+            sleeves.append({
+                "ticker": ticker,
+                "direction": direction,
+                "capital_weight": round(capital_weight, 4),
+                "risk_contribution": round(risk_contribution, 4),
+                "decay_health": decay_health,
+                "regime_mismatch": regime_mismatch,
+                "governance_quality": governance_quality,
+                "action": action,
+            })
+
+        sleeves.sort(key=lambda s: s["risk_contribution"], reverse=True)
+        log.info("Sleeve risk analysis: %d sleeves, actions=%s",
+                 len(sleeves), [s["action"] for s in sleeves])
+        return sleeves
+
+    # -----------------------------------------------------------------
+    # 7. Veto Engine
+    # -----------------------------------------------------------------
+
+    def compute_veto_status(self, all_checks: Dict, fragility: Dict,
+                            proposed_assessment: Dict) -> Dict:
+        """
+        Compute veto status — determines what actions are allowed/blocked.
+
+        Rules:
+          - BLACK/EMERGENCY -> emergency_unwind + can't allocate + can't execute
+          - RED/HALT_REQUIRED -> can't allocate, can't execute new, must reduce
+          - FRAGILE with fragility > 0.7 -> can't allocate new
+          - INSUFFICIENT_EVIDENCE -> can't allocate (be conservative)
+        """
+        legacy_level = all_checks.get("level", RISK_GREEN)
+        fragility_score = fragility.get("fragility_score", 0.0)
+        fragility_state = fragility.get("fragility_state", "STABLE")
+
+        can_allocate = True
+        can_execute = True
+        must_reduce = False
+        emergency_unwind = False
+        veto_reasons: List[str] = []
+        veto_scope = "none"
+        vetoed_sleeves: List[str] = []
+
+        # BLACK / EMERGENCY
+        if legacy_level == RISK_BLACK:
+            emergency_unwind = True
+            can_allocate = False
+            can_execute = False
+            must_reduce = True
+            veto_reasons.append("BLACK_LEVEL: emergency unwind required")
+            veto_scope = "portfolio_wide"
+
+        # RED / HALT_REQUIRED
+        elif legacy_level == RISK_RED:
+            can_allocate = False
+            can_execute = False
+            must_reduce = True
+            veto_reasons.append("RED_LEVEL: halt new trades, reduce risk")
+            veto_scope = "portfolio_wide"
+
+        # FRAGILE with high score
+        if fragility_score > 0.7:
+            can_allocate = False
+            veto_reasons.append(f"FRAGILE: fragility_score={fragility_score:.2f} > 0.7")
+            if veto_scope == "none":
+                veto_scope = "regime_specific"
+
+        # INSUFFICIENT_EVIDENCE from proposed assessment or data sufficiency
+        if not proposed_assessment.get("acceptable", True) and proposed_assessment.get("reject_reasons"):
+            can_allocate = False
+            veto_reasons.extend([f"proposed_rejected: {r}" for r in proposed_assessment["reject_reasons"]])
+            if veto_scope == "none":
+                veto_scope = "sleeve_specific"
+
+        # Collect vetoed sleeves from proposed assessment
+        if proposed_assessment.get("reject_reasons"):
+            for reason in proposed_assessment["reject_reasons"]:
+                if "concentration" in reason:
+                    # Extract ticker from reason string
+                    parts = reason.split(":")
+                    if len(parts) > 1:
+                        ticker_part = parts[1].strip().split("=")[0].strip()
+                        if ticker_part:
+                            vetoed_sleeves.append(ticker_part)
+
+        result = {
+            "can_allocate_new_risk": can_allocate,
+            "can_execute_new_trades": can_execute,
+            "must_reduce_existing_risk": must_reduce,
+            "emergency_unwind_required": emergency_unwind,
+            "veto_reasons": veto_reasons,
+            "veto_scope": veto_scope if veto_reasons else "none",
+            "vetoed_sleeves": vetoed_sleeves,
+        }
+        log.info("Veto status: allocate=%s, execute=%s, reduce=%s, emergency=%s",
+                 can_allocate, can_execute, must_reduce, emergency_unwind)
+        return result
+
+    # -----------------------------------------------------------------
+    # 8. Deterministic Action Engine
+    # -----------------------------------------------------------------
+
+    def generate_risk_actions(self, risk_state: str, checks: Dict,
+                              fragility: Dict, veto: Dict) -> List[Dict]:
+        """
+        Generate deterministic risk actions based on current state.
+
+        Actions: APPROVE_CURRENT, APPROVE_PROPOSED, HAIRCUT_PROPOSED,
+        REDUCE_GROSS, REDUCE_NET, CAP_CONCENTRATION, DISABLE_SLEEVE,
+        REGIME_BLOCK, FREEZE_NEW_RISK, HALT_NEW_TRADES, FORCE_DELEVER,
+        EMERGENCY_UNWIND
+        """
+        actions: List[Dict] = []
+        legacy = RISK_STATE_TO_LEGACY.get(risk_state, "YELLOW")
+        fragility_score = fragility.get("fragility_score", 0.0)
+
+        if risk_state == "EMERGENCY" or legacy == RISK_BLACK:
+            actions.append({
+                "action": "EMERGENCY_UNWIND",
+                "target": "portfolio_wide",
+                "urgency": "IMMEDIATE",
+                "rationale": "BLACK/EMERGENCY state requires full unwind",
+                "confidence": 1.0,
+                "downstream_agents": ["execution", "portfolio_construction"],
+            })
+            return actions
+
+        if risk_state in ("HALT_REQUIRED",) or legacy == RISK_RED:
+            actions.append({
+                "action": "HALT_NEW_TRADES",
+                "target": "portfolio_wide",
+                "urgency": "HIGH",
+                "rationale": f"Risk state {risk_state}: no new trades allowed",
+                "confidence": 0.95,
+                "downstream_agents": ["execution"],
+            })
+            actions.append({
+                "action": "FORCE_DELEVER",
+                "target": "portfolio_wide",
+                "urgency": "HIGH",
+                "rationale": "RED-level requires deleveraging",
+                "confidence": 0.90,
+                "downstream_agents": ["execution", "portfolio_construction"],
+            })
+
+        if fragility_score > 0.7:
+            actions.append({
+                "action": "FREEZE_NEW_RISK",
+                "target": "portfolio_wide",
+                "urgency": "HIGH",
+                "rationale": f"Fragility critical: {fragility_score:.2f}",
+                "confidence": 0.85,
+                "downstream_agents": ["optimizer", "portfolio_construction"],
+            })
+
+        if fragility_score > 0.35:
+            actions.append({
+                "action": "REDUCE_GROSS",
+                "target": "portfolio_wide",
+                "urgency": "MEDIUM",
+                "rationale": f"Fragility building: {fragility_score:.2f}",
+                "confidence": 0.75,
+                "downstream_agents": ["portfolio_construction"],
+            })
+
+        if risk_state == "INSUFFICIENT_EVIDENCE":
+            actions.append({
+                "action": "FREEZE_NEW_RISK",
+                "target": "portfolio_wide",
+                "urgency": "MEDIUM",
+                "rationale": "Insufficient evidence — conservative stance",
+                "confidence": 0.80,
+                "downstream_agents": ["optimizer", "portfolio_construction", "execution"],
+            })
+
+        # Check individual breaches
+        for check in checks.get("checks", []):
+            if check.get("level") == RISK_RED and check.get("check") == "concentration":
+                actions.append({
+                    "action": "CAP_CONCENTRATION",
+                    "target": check.get("detail", "unknown"),
+                    "urgency": "HIGH",
+                    "rationale": check.get("detail", "concentration breach"),
+                    "confidence": 0.90,
+                    "downstream_agents": ["portfolio_construction"],
+                })
+
+        # If nothing flagged, approve current
+        if not actions and risk_state in ("SAFE", "CAUTION"):
+            actions.append({
+                "action": "APPROVE_CURRENT",
+                "target": "portfolio_wide",
+                "urgency": "LOW",
+                "rationale": f"Risk state {risk_state}: portfolio within limits",
+                "confidence": 0.90,
+                "downstream_agents": [],
+            })
+
+        log.info("Generated %d risk actions for state %s", len(actions), risk_state)
+        return actions
+
+    # -----------------------------------------------------------------
+    # 9. Scenario Stress Engine
+    # -----------------------------------------------------------------
+
+    def run_stress_scenarios(self) -> Dict:
+        """
+        Run 6 stress scenarios:
+          1. Crisis correlation convergence (all corr -> 0.9)
+          2. Volatility shock (vol x 2)
+          3. Gap-down (-5% SPY)
+          4. Liquidity deterioration (ADV x 0.3)
+          5. Regime transition stress (instant CRISIS)
+          6. Combined (corr + vol + liquidity)
+
+        Returns dict of scenario results.
+        """
+        scenarios: Dict[str, Any] = {}
+        weights = self._get_portfolio_weights()
+
+        if not weights or self._prices is None:
+            return {"detail": "Insufficient data for stress scenarios", "scenarios": {}}
+
+        tickers = [t for t in weights if t in self._prices.columns]
+        if len(tickers) < 1:
+            return {"detail": "No matching tickers for stress", "scenarios": {}}
+
+        try:
+            log_rets = np.log(
+                self._prices[tickers] / self._prices[tickers].shift(1)
+            ).iloc[1:].dropna()
+            if len(log_rets) < 30:
+                return {"detail": "Insufficient history for stress scenarios", "scenarios": {}}
+
+            w = np.array([weights[t] for t in tickers])
+            vols = log_rets.std().values
+            cov_normal = log_rets.cov().values
+            capital = self._get_capital()
+
+            def _portfolio_var(cov: np.ndarray) -> float:
+                return float(np.sqrt(w @ cov @ w) * 1.645)
+
+            normal_var = _portfolio_var(cov_normal)
+
+            # 1. Crisis correlation convergence
+            n = len(tickers)
+            stressed_corr = np.full((n, n), 0.9)
+            np.fill_diagonal(stressed_corr, 1.0)
+            cov_crisis_corr = np.outer(vols, vols) * stressed_corr
+            crisis_corr_var = _portfolio_var(cov_crisis_corr)
+            scenarios["crisis_correlation"] = {
+                "estimated_loss": round(crisis_corr_var * capital, 2),
+                "stressed_var": round(crisis_corr_var, 6),
+                "multiplier": round(crisis_corr_var / normal_var if normal_var > 1e-10 else 1.0, 2),
+                "top_drivers": tickers[:3],
+            }
+
+            # 2. Volatility shock (vol x 2)
+            cov_vol_shock = np.outer(vols * 2, vols * 2) * log_rets.corr().values
+            vol_shock_var = _portfolio_var(cov_vol_shock)
+            scenarios["volatility_shock"] = {
+                "estimated_loss": round(vol_shock_var * capital, 2),
+                "stressed_var": round(vol_shock_var, 6),
+                "multiplier": round(vol_shock_var / normal_var if normal_var > 1e-10 else 1.0, 2),
+                "top_drivers": tickers[:3],
+            }
+
+            # 3. Gap-down (-5% SPY)
+            port_beta = 1.0
+            if "SPY" in self._prices.columns:
+                spy_rets = np.log(self._prices["SPY"] / self._prices["SPY"].shift(1)).iloc[1:].dropna()
+                port_rets_hist = log_rets.values @ w
+                if len(spy_rets) >= 30 and len(port_rets_hist) >= 30:
+                    min_len = min(len(spy_rets), len(port_rets_hist))
+                    cov_spy = np.cov(port_rets_hist[-min_len:], spy_rets.values[-min_len:])
+                    if cov_spy[1, 1] > 1e-10:
+                        port_beta = float(cov_spy[0, 1] / cov_spy[1, 1])
+            gap_loss = abs(0.05 * port_beta * capital * sum(abs(ww) for ww in w))
+            scenarios["gap_down_5pct"] = {
+                "estimated_loss": round(gap_loss, 2),
+                "portfolio_beta": round(port_beta, 3),
+                "top_drivers": tickers[:3],
+            }
+
+            # 4. Liquidity deterioration (ADV x 0.3)
+            liquidity_impact = 0.0
+            for t in tickers:
+                pos_notional = abs(weights[t]) * capital
+                px = self._prices[t].dropna()
+                if len(px) > 20:
+                    daily_vol = float(px.pct_change().iloc[-20:].std())
+                    est_adv = float(px.iloc[-1]) * max(daily_vol, 0.005) * 1e6
+                    reduced_adv = est_adv * 0.3
+                    if reduced_adv > 0:
+                        days_to_unwind = pos_notional / (reduced_adv * 0.10)
+                        if days_to_unwind > 5:
+                            liquidity_impact += pos_notional * 0.02  # slippage estimate
+            scenarios["liquidity_deterioration"] = {
+                "estimated_loss": round(liquidity_impact, 2),
+                "impact_pct": round(liquidity_impact / capital if capital > 0 else 0.0, 4),
+                "top_drivers": tickers[:3],
+            }
+
+            # 5. Regime transition stress (instant CRISIS)
+            crisis_var = _portfolio_var(cov_crisis_corr)  # Use crisis corr as proxy
+            crisis_loss = crisis_var * capital * 1.5  # amplified
+            scenarios["regime_transition"] = {
+                "estimated_loss": round(crisis_loss, 2),
+                "stressed_var": round(crisis_var * 1.5, 6),
+                "top_drivers": tickers[:3],
+            }
+
+            # 6. Combined
+            cov_combined = np.outer(vols * 2, vols * 2) * stressed_corr
+            combined_var = _portfolio_var(cov_combined)
+            combined_loss = combined_var * capital + liquidity_impact
+            scenarios["combined"] = {
+                "estimated_loss": round(combined_loss, 2),
+                "stressed_var": round(combined_var, 6),
+                "multiplier": round(combined_var / normal_var if normal_var > 1e-10 else 1.0, 2),
+                "top_drivers": tickers[:3],
+            }
+
+        except Exception as exc:
+            log.error("Stress scenarios failed: %s", exc)
+            return {"detail": f"Stress scenario error: {exc}", "scenarios": scenarios}
+
+        log.info("Stress scenarios completed: %d scenarios", len(scenarios))
+        return {"scenarios": scenarios, "normal_var": round(normal_var, 6)}
+
+    # -----------------------------------------------------------------
+    # 10. Risk Scoring Framework
+    # -----------------------------------------------------------------
+
+    def compute_risk_scores(self, all_checks: Dict, fragility: Dict,
+                            scenarios: Dict) -> Dict:
+        """
+        Compute composite risk scores and classify final risk_state.
+
+        Scores: market_risk, fragility, concentration, liquidity,
+        governance, regime, implementation, overall.
+        """
+        checks = all_checks.get("checks", [])
+
+        def _check_level_score(check_name: str) -> float:
+            for c in checks:
+                if c.get("check") == check_name:
+                    lvl = c.get("level", RISK_GREEN)
+                    return {RISK_GREEN: 0.0, RISK_YELLOW: 0.4, RISK_RED: 0.8, RISK_BLACK: 1.0}.get(lvl, 0.0)
+            return 0.0
+
+        market_risk = max(
+            _check_level_score("var_breach"),
+            _check_level_score("drawdown"),
+            _check_level_score("vix_regime"),
+        )
+        concentration_risk = _check_level_score("concentration")
+        liquidity_risk = _check_level_score("liquidity_risk")
+        fragility_score = fragility.get("fragility_score", 0.0)
+
+        # Governance risk from methodology
+        governance_risk = 0.0  # default: no governance issues
+
+        # Regime risk
+        regime_risk = max(
+            _check_level_score("vix_regime"),
+            _check_level_score("correlation_spike"),
+        )
+
+        # Implementation risk from stress scenarios
+        implementation_risk = 0.0
+        scenario_data = scenarios.get("scenarios", {})
+        if scenario_data:
+            worst_multiplier = max(
+                s.get("multiplier", 1.0) for s in scenario_data.values()
+                if isinstance(s, dict) and "multiplier" in s
+            ) if any("multiplier" in s for s in scenario_data.values() if isinstance(s, dict)) else 1.0
+            implementation_risk = min(1.0, (worst_multiplier - 1.0) * 0.3)
+
+        # Weighted overall
+        weights_map = {
+            "market_risk": 0.25,
+            "fragility": 0.20,
+            "concentration": 0.15,
+            "liquidity": 0.10,
+            "governance": 0.10,
+            "regime": 0.10,
+            "implementation": 0.10,
+        }
+        overall = (
+            market_risk * weights_map["market_risk"]
+            + fragility_score * weights_map["fragility"]
+            + concentration_risk * weights_map["concentration"]
+            + liquidity_risk * weights_map["liquidity"]
+            + governance_risk * weights_map["governance"]
+            + regime_risk * weights_map["regime"]
+            + implementation_risk * weights_map["implementation"]
+        )
+        overall = min(1.0, max(0.0, overall))
+
+        # Classify risk state from overall score
+        if overall >= 0.85:
+            risk_state = "EMERGENCY"
+        elif overall >= 0.65:
+            risk_state = "HALT_REQUIRED"
+        elif overall >= 0.50:
+            risk_state = "ELEVATED_RISK"
+        elif overall >= 0.35:
+            risk_state = "FRAGILE"
+        elif overall >= 0.15:
+            risk_state = "CAUTION"
+        else:
+            risk_state = "SAFE"
+
+        result = {
+            "market_risk_score": round(market_risk, 4),
+            "fragility_score": round(fragility_score, 4),
+            "concentration_risk_score": round(concentration_risk, 4),
+            "liquidity_risk_score": round(liquidity_risk, 4),
+            "governance_risk_score": round(governance_risk, 4),
+            "regime_risk_score": round(regime_risk, 4),
+            "implementation_risk_score": round(implementation_risk, 4),
+            "overall_risk_score": round(overall, 4),
+            "risk_state": risk_state,
+        }
+        log.info("Risk scores: overall=%.3f -> state=%s", overall, risk_state)
+        return result
+
+    # -----------------------------------------------------------------
+    # 11. Risk History / Escalation
+    # -----------------------------------------------------------------
+
+    def track_escalation(self, risk_state: str) -> Dict:
+        """
+        Track risk state history and escalation patterns.
+
+        Appends to risk_history.json (capped at 365 entries).
+        Returns consecutive_elevated_days, escalation_events, recovery_events.
+        """
+        history: List[Dict] = []
+        try:
+            if _RISK_HISTORY_PATH.exists():
+                history = json.loads(_RISK_HISTORY_PATH.read_text(encoding="utf-8"))
+                if not isinstance(history, list):
+                    history = []
+        except Exception:
+            history = []
+
+        entry = {
+            "date": date.today().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "risk_state": risk_state,
+            "legacy_level": RISK_STATE_TO_LEGACY.get(risk_state, "YELLOW"),
+        }
+        history.append(entry)
+
+        # Cap at 365
+        if len(history) > 365:
+            history = history[-365:]
+
+        # Save
+        try:
+            _RISK_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _RISK_HISTORY_PATH.write_text(
+                json.dumps(history, indent=2, default=str, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            log.warning("Failed to save risk history: %s", exc)
+
+        # Compute escalation metrics
+        elevated_states = {"ELEVATED_RISK", "HALT_REQUIRED", "EMERGENCY"}
+        consecutive_elevated = 0
+        for h in reversed(history):
+            if h.get("risk_state") in elevated_states:
+                consecutive_elevated += 1
+            else:
+                break
+
+        escalation_events = 0
+        recovery_events = 0
+        for i in range(1, len(history)):
+            prev_state = history[i - 1].get("risk_state", "SAFE")
+            curr_state = history[i].get("risk_state", "SAFE")
+            prev_elevated = prev_state in elevated_states
+            curr_elevated = curr_state in elevated_states
+            if not prev_elevated and curr_elevated:
+                escalation_events += 1
+            elif prev_elevated and not curr_elevated:
+                recovery_events += 1
+
+        result = {
+            "consecutive_elevated_days": consecutive_elevated,
+            "escalation_events": escalation_events,
+            "recovery_events": recovery_events,
+            "history_length": len(history),
+        }
+        log.info("Escalation tracking: consecutive_elevated=%d, escalations=%d, recoveries=%d",
+                 consecutive_elevated, escalation_events, recovery_events)
+        return result
+
+    def get_recent_status_history(self, n: int = 30) -> List[Dict]:
+        """Return last n entries from risk history."""
+        try:
+            if _RISK_HISTORY_PATH.exists():
+                history = json.loads(_RISK_HISTORY_PATH.read_text(encoding="utf-8"))
+                if isinstance(history, list):
+                    return history[-n:]
+        except Exception:
+            pass
+        return []
+
+    def time_in_elevated_risk(self) -> Dict:
+        """Compute time spent in elevated risk states."""
+        history = self.get_recent_status_history(365)
+        elevated_states = {"ELEVATED_RISK", "HALT_REQUIRED", "EMERGENCY"}
+        total = len(history)
+        elevated = sum(1 for h in history if h.get("risk_state") in elevated_states)
+        return {
+            "total_days": total,
+            "elevated_days": elevated,
+            "elevated_pct": round(elevated / total, 4) if total > 0 else 0.0,
+        }
+
+    def repeated_breach_summary(self) -> Dict:
+        """Summarize repeated breaches from history."""
+        history = self.get_recent_status_history(90)
+        state_counts: Dict[str, int] = {}
+        for h in history:
+            st = h.get("risk_state", "SAFE")
+            state_counts[st] = state_counts.get(st, 0) + 1
+        return {"state_distribution_90d": state_counts, "total_entries": len(history)}
+
+    # -----------------------------------------------------------------
+    # 12. Enhanced machine_summary builder
+    # -----------------------------------------------------------------
+
+    def _build_institutional_machine_summary(
+        self,
+        legacy_level: str,
+        risk_state: str,
+        risk_scores: Dict,
+        fragility: Dict,
+        veto: Dict,
+        risk_inputs: Dict,
+        sleeve_risk: List[Dict],
+        data_sufficiency: Dict,
+    ) -> Dict:
+        """Build the enhanced machine_summary for downstream agents."""
+        regime = risk_inputs.get("regime_forecast", {})
+        exp_check = self.check_exposure_limits()
+
+        # Top risk drivers
+        top_drivers: List[str] = []
+        if fragility.get("fragility_drivers"):
+            top_drivers.extend(fragility["fragility_drivers"][:3])
+        if veto.get("veto_reasons"):
+            top_drivers.extend(veto["veto_reasons"][:2])
+        if not top_drivers:
+            top_drivers.append("none")
+
+        # Top flagged sleeves
+        flagged_sleeves: List[Dict] = []
+        for s in sleeve_risk[:3]:
+            if s.get("action") in ("CUT", "DISABLE", "HAIRCUT"):
+                flagged_sleeves.append({
+                    s["ticker"]: f"{s.get('decay_health', 'UNKNOWN')}, {s['capital_weight']:.0%} weight"
+                })
+
+        # Transition state
+        transition_prob = regime.get("transition_probability", 0.0)
+        if transition_prob > 0.5:
+            transition_state = "ACTIVE_TRANSITION"
+        elif transition_prob > 0.3:
+            transition_state = "EARLY_WARNING"
+        else:
+            transition_state = "STABLE"
+
+        # Implementation caution level
+        overall = risk_scores.get("overall_risk_score", 0.0)
+        if overall >= 0.6:
+            caution = "CRITICAL"
+        elif overall >= 0.4:
+            caution = "HIGH"
+        elif overall >= 0.2:
+            caution = "MODERATE"
+        else:
+            caution = "LOW"
+
+        return {
+            "legacy_level": legacy_level,
+            "risk_state": risk_state,
+            "overall_risk_score": risk_scores.get("overall_risk_score", 0.0),
+            "fragility_score": fragility.get("fragility_score", 0.0),
+            "can_allocate_new_risk": veto.get("can_allocate_new_risk", True),
+            "can_execute_new_trades": veto.get("can_execute_new_trades", True),
+            "must_reduce_existing_risk": veto.get("must_reduce_existing_risk", False),
+            "emergency_unwind_required": veto.get("emergency_unwind_required", False),
+            "active_regime": regime.get("predicted_regime", "UNKNOWN"),
+            "transition_state": transition_state,
+            "gross_exposure": exp_check.get("gross_exposure", 0.0),
+            "net_exposure": exp_check.get("net_exposure", 0.0),
+            "top_risk_drivers": top_drivers,
+            "top_flagged_sleeves": flagged_sleeves,
+            "missing_critical_inputs": data_sufficiency.get("missing_inputs", []),
+            "implementation_caution_level": caution,
+        }
+
+    # -----------------------------------------------------------------
+    # Aggregate checks (original)
     # -----------------------------------------------------------------
 
     def run_all_checks(self) -> dict:
@@ -1098,6 +2139,90 @@ class RiskGuardian:
         status["alert_message"] = alert_msg
         if status["level"] != RISK_GREEN:
             log.warning("Alert:\n%s", alert_msg)
+
+        # =============================================================
+        # INSTITUTIONAL CRO DESK — additional pipeline steps
+        # =============================================================
+        try:
+            # Step CRO-1: Assemble risk inputs
+            risk_inputs = self.assemble_risk_inputs()
+            status["risk_inputs_available"] = risk_inputs.get("available_inputs", [])
+
+            # Step CRO-2: Check data sufficiency
+            data_sufficiency = self.check_data_sufficiency(risk_inputs)
+            status["data_sufficiency"] = data_sufficiency
+
+            # Step CRO-3: Detect fragility
+            fragility = self.detect_fragility(risk_inputs)
+            status["fragility"] = fragility
+
+            # Step CRO-4: Assess proposed portfolio (if available)
+            proposed_assessment: Dict[str, Any] = {}
+            pw = risk_inputs.get("portfolio_weights", {})
+            proposed_weights = pw.get("weights", {}) if isinstance(pw, dict) else {}
+            if proposed_weights:
+                proposed_assessment = self.assess_proposed_portfolio(proposed_weights, risk_inputs)
+            status["proposed_assessment"] = proposed_assessment
+
+            # Step CRO-5: Analyze sleeve risk
+            sleeve_risk = self.analyze_sleeve_risk(risk_inputs)
+            status["sleeve_risk"] = sleeve_risk
+
+            # Step CRO-6: Run stress scenarios
+            scenarios = self.run_stress_scenarios()
+            status["stress_scenarios"] = scenarios
+
+            # Step CRO-7: Compute risk scores + classify institutional state
+            risk_scores = self.compute_risk_scores(status, fragility, scenarios)
+            status["risk_scores"] = risk_scores
+            institutional_risk_state = risk_scores.get("risk_state", "CAUTION")
+
+            # Override with INSUFFICIENT_EVIDENCE if data not sufficient
+            if not data_sufficiency.get("sufficient", True):
+                institutional_risk_state = "INSUFFICIENT_EVIDENCE"
+            status["institutional_risk_state"] = institutional_risk_state
+
+            # Step CRO-8: Compute veto status
+            veto = self.compute_veto_status(status, fragility, proposed_assessment)
+            # Also apply INSUFFICIENT_EVIDENCE veto
+            if institutional_risk_state == "INSUFFICIENT_EVIDENCE":
+                veto["can_allocate_new_risk"] = False
+                if "INSUFFICIENT_EVIDENCE: conservative stance" not in veto.get("veto_reasons", []):
+                    veto["veto_reasons"].append("INSUFFICIENT_EVIDENCE: conservative stance")
+            status["veto"] = veto
+
+            # Step CRO-9: Generate risk actions
+            risk_actions = self.generate_risk_actions(
+                institutional_risk_state, status, fragility, veto,
+            )
+            status["risk_actions"] = risk_actions
+
+            # Step CRO-10: Track escalation
+            escalation = self.track_escalation(institutional_risk_state)
+            status["escalation"] = escalation
+
+            # Step CRO-11: Build machine_summary
+            machine_summary = self._build_institutional_machine_summary(
+                legacy_level=status["level"],
+                risk_state=institutional_risk_state,
+                risk_scores=risk_scores,
+                fragility=fragility,
+                veto=veto,
+                risk_inputs=risk_inputs,
+                sleeve_risk=sleeve_risk,
+                data_sufficiency=data_sufficiency,
+            )
+            status["machine_summary"] = machine_summary
+            log.info(
+                "CRO desk complete: state=%s, overall=%.3f, allocate=%s",
+                institutional_risk_state,
+                risk_scores.get("overall_risk_score", 0.0),
+                veto.get("can_allocate_new_risk", True),
+            )
+
+        except Exception as exc:
+            log.error("Institutional CRO pipeline failed (legacy checks preserved): %s", exc)
+            status["cro_error"] = str(exc)
 
         # Save status to JSON
         self._save_status(status)

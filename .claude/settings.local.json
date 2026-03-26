@@ -54,7 +54,8 @@
       "Bash(ls -d agents/*/agent_*.py)",
       "Bash(for f:*)",
       "Bash(do echo:*)",
-      "Read(//c/Users/omrib/OneDrive/Desktop/srv_quant_system/**)"
+      "Read(//c/Users/omrib/OneDrive/Desktop/srv_quant_system/**)",
+      "Bash(wc -l /c/Users/omrib/OneDrive/Desktop/srv_quant_system/ui/*.py)"
     ]
   }
 }

@@ -1,6 +1,6 @@
 {
   "level": "GREEN",
-  "timestamp": "2026-03-26T13:38:01.208937+00:00",
+  "timestamp": "2026-03-26T14:15:25.763096+00:00",
   "date": "2026-03-26",
   "breaches": [],
   "recommendations": [],
@@ -70,5 +70,107 @@
   ],
   "n_positions": 0,
   "capital": 1000000.0,
-  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-26T13:38:01\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ==="
+  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-26T14:15:25\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ===",
+  "risk_inputs_available": [
+    "portfolio_weights",
+    "regime_forecast",
+    "decay_status"
+  ],
+  "data_sufficiency": {
+    "evidence_quality_score": 0.6,
+    "missing_inputs": [
+      "positions",
+      "prices"
+    ],
+    "stale_data_flags": [],
+    "sufficient": false,
+    "risk_state": "INSUFFICIENT_EVIDENCE"
+  },
+  "fragility": {
+    "fragility_score": 0.0,
+    "fragility_drivers": [],
+    "fragility_state": "STABLE"
+  },
+  "proposed_assessment": {
+    "acceptable": true,
+    "haircut_required": false,
+    "reject_reasons": [
+      "proposed_net=40.13% > 40%"
+    ],
+    "proposed_risk_score": 0.15,
+    "proposed_gross": 0.4013,
+    "proposed_net": 0.4013,
+    "proposed_max_weight": 0.1047
+  },
+  "sleeve_risk": [],
+  "stress_scenarios": {
+    "detail": "Insufficient data for stress scenarios",
+    "scenarios": {}
+  },
+  "risk_scores": {
+    "market_risk_score": 0.0,
+    "fragility_score": 0.0,
+    "concentration_risk_score": 0.0,
+    "liquidity_risk_score": 0.0,
+    "governance_risk_score": 0.0,
+    "regime_risk_score": 0.0,
+    "implementation_risk_score": 0.0,
+    "overall_risk_score": 0.0,
+    "risk_state": "SAFE"
+  },
+  "institutional_risk_state": "INSUFFICIENT_EVIDENCE",
+  "veto": {
+    "can_allocate_new_risk": false,
+    "can_execute_new_trades": true,
+    "must_reduce_existing_risk": false,
+    "emergency_unwind_required": false,
+    "veto_reasons": [
+      "INSUFFICIENT_EVIDENCE: conservative stance"
+    ],
+    "veto_scope": "none",
+    "vetoed_sleeves": []
+  },
+  "risk_actions": [
+    {
+      "action": "FREEZE_NEW_RISK",
+      "target": "portfolio_wide",
+      "urgency": "MEDIUM",
+      "rationale": "Insufficient evidence — conservative stance",
+      "confidence": 0.8,
+      "downstream_agents": [
+        "optimizer",
+        "portfolio_construction",
+        "execution"
+      ]
+    }
+  ],
+  "escalation": {
+    "consecutive_elevated_days": 0,
+    "escalation_events": 0,
+    "recovery_events": 0,
+    "history_length": 3
+  },
+  "machine_summary": {
+    "legacy_level": "GREEN",
+    "risk_state": "INSUFFICIENT_EVIDENCE",
+    "overall_risk_score": 0.0,
+    "fragility_score": 0.0,
+    "can_allocate_new_risk": false,
+    "can_execute_new_trades": true,
+    "must_reduce_existing_risk": false,
+    "emergency_unwind_required": false,
+    "active_regime": "CRISIS",
+    "transition_state": "ACTIVE_TRANSITION",
+    "gross_exposure": 0.0,
+    "net_exposure": 0.0,
+    "top_risk_drivers": [
+      "INSUFFICIENT_EVIDENCE: conservative stance"
+    ],
+    "top_flagged_sleeves": [],
+    "missing_critical_inputs": [
+      "positions",
+      "prices"
+    ],
+    "implementation_caution_level": "LOW"
+  }
 }
