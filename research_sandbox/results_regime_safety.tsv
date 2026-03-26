@@ -1,0 +1,2 @@
+run_id	sharpe	annual_return	pass_rate	n_trades	win_rate	max_dd	gated_off_days	change	guardrails_ok
+0	6.5572	0.013096	0.8991	393	0.7328	-0.003985	237	baseline	true
