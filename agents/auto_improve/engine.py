@@ -1071,27 +1071,960 @@ class AutoImprover:
         )
         return True
 
+    # ── Institutional Master Research Improvement Governor ───────────────
+
+    # Bottleneck taxonomy
+    BOTTLENECKS = [
+        "NO_EDGE",
+        "ZERO_TRADE_PATHOLOGY",
+        "REGIME_MISMATCH",
+        "IMPLEMENTATION_DRAG",
+        "RISK_VETO_BINDING",
+        "FORMULA_PATHOLOGY",
+        "OPTIMIZER_STUCK",
+        "HEALTH_DECAY_DOMINANT",
+        "DATA_QUALITY_FAILURE",
+        "SYSTEM_HEALTHY_MONITOR_ONLY",
+    ]
+
+    # Mode map: bottleneck -> improvement mode
+    MODE_MAP = {
+        "ZERO_TRADE_PATHOLOGY": "STRUCTURAL_REVIEW",
+        "NO_EDGE": "FORMULA_RESEARCH",
+        "REGIME_MISMATCH": "REGIME_REPAIR",
+        "IMPLEMENTATION_DRAG": "COST_REDUCTION",
+        "RISK_VETO_BINDING": "FREEZE_AND_MONITOR",
+        "FORMULA_PATHOLOGY": "FORMULA_RESEARCH",
+        "OPTIMIZER_STUCK": "STRUCTURAL_REVIEW",
+        "HEALTH_DECAY_DOMINANT": "ROBUSTNESS_REPAIR",
+        "DATA_QUALITY_FAILURE": "FREEZE_AND_MONITOR",
+        "SYSTEM_HEALTHY_MONITOR_ONLY": "DAILY_MAINTENANCE",
+    }
+
+    # ── 1. ImprovementInputAssembler ─────────────────────────────────
+
+    def assemble_all_inputs(self) -> Dict:
+        """
+        Load machine_summary from ALL 9 agents.
+
+        Returns dict keyed by agent name with their latest machine-readable
+        output, plus an ``available_agents`` list of those successfully loaded.
+        """
+        inputs: Dict[str, Any] = {}
+        available: List[str] = []
+
+        # Helper: load latest JSON from a directory glob
+        def _latest_json(directory: Path, glob_pattern: str = "*.json") -> Optional[Dict]:
+            if not directory.exists():
+                return None
+            candidates = sorted(directory.glob(glob_pattern), reverse=True)
+            for fp in candidates:
+                try:
+                    data = json.loads(fp.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        return data
+                except (json.JSONDecodeError, OSError):
+                    continue
+            return None
+
+        # Helper: load a single JSON file
+        def _load_json(path: Path) -> Optional[Dict]:
+            if not path.exists():
+                return None
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else None
+            except (json.JSONDecodeError, OSError):
+                return None
+
+        agent_sources = {
+            "methodology": lambda: _latest_json(ROOT / "agents" / "methodology" / "reports"),
+            "optimizer": lambda: _load_json(ROOT / "agents" / "optimizer" / "optimization_history.json"),
+            "alpha_decay": lambda: _load_json(ROOT / "agents" / "alpha_decay" / "decay_status.json"),
+            "regime_forecaster": lambda: _load_json(ROOT / "agents" / "regime_forecaster" / "regime_forecast.json"),
+            "portfolio_construction": lambda: _load_json(ROOT / "agents" / "portfolio_construction" / "portfolio_weights.json"),
+            "risk_guardian": lambda: _load_json(ROOT / "agents" / "risk_guardian" / "risk_status.json"),
+            "execution": lambda: _load_json(ROOT / "agents" / "execution" / "execution_state.json"),
+            "data_scout": lambda: _load_json(ROOT / "agents" / "data_scout" / "scout_report.json"),
+            "math": lambda: _latest_json(ROOT / "agents" / "math" / "math_proposals"),
+        }
+
+        for agent_name, loader in agent_sources.items():
+            try:
+                result = loader()
+                if result is not None:
+                    # Extract machine_summary if present, else use full dict
+                    ms = (
+                        result.get("machine_summary_v3")
+                        or result.get("machine_summary")
+                        or result
+                    )
+                    inputs[agent_name] = ms
+                    available.append(agent_name)
+                    log.debug("Assembled input from %s", agent_name)
+                else:
+                    inputs[agent_name] = None
+                    log.debug("No data from %s", agent_name)
+            except Exception as exc:
+                inputs[agent_name] = None
+                log.debug("Failed to load %s: %s", agent_name, exc)
+
+        inputs["available_agents"] = available
+        log.info(
+            "ImprovementInputAssembler: %d/%d agents available: %s",
+            len(available), len(agent_sources), ", ".join(available) or "(none)",
+        )
+        return inputs
+
+    # ── 2. CycleDiagnosisEngine ──────────────────────────────────────
+
+    def diagnose_bottleneck(self, inputs: Dict) -> Dict:
+        """
+        Deterministic bottleneck diagnosis from assembled agent inputs.
+
+        Returns:
+            {bottleneck, confidence, evidence, recommended_mode}
+        """
+        evidence: List[str] = []
+
+        # --- Extract key signals from inputs ---
+        meth = inputs.get("methodology") or {}
+        optimizer = inputs.get("optimizer") or {}
+        decay = inputs.get("alpha_decay") or {}
+        regime = inputs.get("regime_forecaster") or {}
+        risk = inputs.get("risk_guardian") or {}
+        math_in = inputs.get("math") or {}
+        data_scout = inputs.get("data_scout") or {}
+        portfolio = inputs.get("portfolio_construction") or {}
+
+        # Strategy-level signals
+        all_sharpes: List[float] = []
+        total_trades = 0
+        strategy_results = meth.get("strategy_results", meth.get("all_results", {}))
+        if isinstance(strategy_results, dict):
+            for sname, sdata in strategy_results.items():
+                if isinstance(sdata, dict):
+                    all_sharpes.append(sdata.get("sharpe", 0))
+                    total_trades += sdata.get("total_trades", sdata.get("trades", 0))
+
+        # Risk signals
+        can_allocate = risk.get("can_allocate", True)
+        risk_veto = risk.get("veto_active", False)
+
+        # Decay signals
+        decay_statuses = decay.get("strategy_health", decay.get("statuses", {}))
+        non_healthy_count = 0
+        if isinstance(decay_statuses, dict):
+            for _sname, sdata in decay_statuses.items():
+                health = sdata.get("health", sdata.get("status", "healthy")) if isinstance(sdata, dict) else sdata
+                if isinstance(health, str) and health.lower() not in ("healthy", "stable", "ok"):
+                    non_healthy_count += 1
+
+        # Math signals
+        math_priority = math_in.get("priority", math_in.get("severity", ""))
+        math_critical = isinstance(math_priority, str) and math_priority.lower() in ("critical", "urgent")
+
+        # Optimizer stuck signals
+        opt_failures = optimizer.get("recent_failures", optimizer.get("consecutive_failures", 0))
+        if isinstance(opt_failures, list):
+            opt_failures = len(opt_failures)
+
+        # Data quality signals
+        data_quality = data_scout.get("overall_quality", data_scout.get("quality", "ok"))
+        data_stale = isinstance(data_quality, str) and data_quality.lower() in ("stale", "missing", "failed", "critical")
+
+        # Regime signals
+        current_regime = regime.get("current_regime", regime.get("regime", ""))
+        edge_regimes = meth.get("edge_regimes", [])
+
+        # --- Deterministic rule cascade (order matters) ---
+
+        # Rule 1: Zero trades across all strategies
+        if total_trades == 0 and len(all_sharpes) > 0:
+            evidence.append(f"0 trades across {len(all_sharpes)} strategies")
+            return {
+                "bottleneck": "ZERO_TRADE_PATHOLOGY",
+                "confidence": 0.95,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["ZERO_TRADE_PATHOLOGY"],
+            }
+
+        # Rule 2: Risk Guardian blocking allocation
+        if not can_allocate or risk_veto:
+            evidence.append(f"Risk Guardian: can_allocate={can_allocate}, veto_active={risk_veto}")
+            return {
+                "bottleneck": "RISK_VETO_BINDING",
+                "confidence": 0.90,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["RISK_VETO_BINDING"],
+            }
+
+        # Rule 3: Data quality failure
+        if data_stale:
+            evidence.append(f"Data quality: {data_quality}")
+            return {
+                "bottleneck": "DATA_QUALITY_FAILURE",
+                "confidence": 0.85,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["DATA_QUALITY_FAILURE"],
+            }
+
+        # Rule 4: All Sharpe negative with trades > 0
+        if all_sharpes and all(s < 0 for s in all_sharpes) and total_trades > 0:
+            evidence.append(f"All {len(all_sharpes)} strategies negative Sharpe, {total_trades} trades")
+            return {
+                "bottleneck": "NO_EDGE",
+                "confidence": 0.85,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["NO_EDGE"],
+            }
+
+        # Rule 5: Health decay dominant (5+ strategies non-healthy)
+        if non_healthy_count >= 5:
+            evidence.append(f"{non_healthy_count} strategies non-healthy in decay monitor")
+            return {
+                "bottleneck": "HEALTH_DECAY_DOMINANT",
+                "confidence": 0.80,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["HEALTH_DECAY_DOMINANT"],
+            }
+
+        # Rule 6: Math critical proposals
+        if math_critical:
+            evidence.append(f"Math has critical proposals: priority={math_priority}")
+            return {
+                "bottleneck": "FORMULA_PATHOLOGY",
+                "confidence": 0.80,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["FORMULA_PATHOLOGY"],
+            }
+
+        # Rule 7: Optimizer stuck (repeated failures)
+        if isinstance(opt_failures, (int, float)) and opt_failures >= 3:
+            evidence.append(f"Optimizer: {opt_failures} consecutive failures")
+            return {
+                "bottleneck": "OPTIMIZER_STUCK",
+                "confidence": 0.75,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["OPTIMIZER_STUCK"],
+            }
+
+        # Rule 8: Regime mismatch (edge in CALM but current regime different)
+        if (
+            isinstance(current_regime, str)
+            and current_regime.upper() not in ("CALM", "")
+            and isinstance(edge_regimes, list)
+            and edge_regimes
+            and all(r.upper() == "CALM" for r in edge_regimes if isinstance(r, str))
+        ):
+            evidence.append(
+                f"Edge only in {edge_regimes} but current regime is {current_regime}"
+            )
+            return {
+                "bottleneck": "REGIME_MISMATCH",
+                "confidence": 0.70,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["REGIME_MISMATCH"],
+            }
+
+        # Rule 9: Implementation drag (gross OK but net killed by costs)
+        gross_sharpe = meth.get("gross_sharpe", None)
+        net_sharpe = meth.get("net_sharpe", None)
+        if (
+            gross_sharpe is not None
+            and net_sharpe is not None
+            and isinstance(gross_sharpe, (int, float))
+            and isinstance(net_sharpe, (int, float))
+            and gross_sharpe > 0.3
+            and net_sharpe < 0
+        ):
+            evidence.append(
+                f"Gross Sharpe={gross_sharpe:.3f} but Net Sharpe={net_sharpe:.3f} (cost drag)"
+            )
+            return {
+                "bottleneck": "IMPLEMENTATION_DRAG",
+                "confidence": 0.75,
+                "evidence": evidence,
+                "recommended_mode": self.MODE_MAP["IMPLEMENTATION_DRAG"],
+            }
+
+        # Rule 10: System healthy
+        evidence.append("No critical bottleneck detected")
+        return {
+            "bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
+            "confidence": 0.60,
+            "evidence": evidence,
+            "recommended_mode": self.MODE_MAP["SYSTEM_HEALTHY_MONITOR_ONLY"],
+        }
+
+    # ── 3. ImprovementModeSelector ───────────────────────────────────
+
+    def select_mode(self, diagnosis: Dict, governance: Dict) -> Dict:
+        """
+        Select improvement mode based on diagnosis and governance state.
+
+        Returns:
+            {primary_mode, secondary_mode, allowed_actions, promotion_allowed}
+        """
+        bottleneck = diagnosis.get("bottleneck", "SYSTEM_HEALTHY_MONITOR_ONLY")
+        primary_mode = self.MODE_MAP.get(bottleneck, "DAILY_MAINTENANCE")
+        gov_mode = governance.get("mode", "full")
+
+        # Secondary mode: if stuck, add STRUCTURAL_REVIEW; otherwise DAILY_MAINTENANCE
+        secondary_mode = "DAILY_MAINTENANCE"
+        if bottleneck in ("NO_EDGE", "REGIME_MISMATCH"):
+            secondary_mode = "STRUCTURAL_REVIEW"
+        elif bottleneck == "HEALTH_DECAY_DOMINANT":
+            secondary_mode = "FORMULA_RESEARCH"
+
+        # Allowed actions per mode
+        action_map = {
+            "STRUCTURAL_REVIEW": [
+                "parameter_change", "formula_sandbox", "methodology_revalidation",
+                "shadow_validation", "no_action",
+            ],
+            "FORMULA_RESEARCH": [
+                "formula_sandbox", "parameter_change", "shadow_validation", "no_action",
+            ],
+            "REGIME_REPAIR": [
+                "parameter_change", "methodology_revalidation", "shadow_validation", "no_action",
+            ],
+            "COST_REDUCTION": [
+                "parameter_change", "portfolio_haircut", "shadow_validation", "no_action",
+            ],
+            "FREEZE_AND_MONITOR": ["risk_freeze", "no_action"],
+            "ROBUSTNESS_REPAIR": [
+                "parameter_change", "methodology_revalidation", "portfolio_haircut",
+                "shadow_validation", "no_action",
+            ],
+            "DAILY_MAINTENANCE": [
+                "parameter_change", "shadow_validation", "no_action",
+            ],
+        }
+        allowed_actions = action_map.get(primary_mode, ["no_action"])
+
+        # Promotion allowed only when governance is not skip and mode is not freeze
+        promotion_allowed = (
+            gov_mode != "skip"
+            and primary_mode not in ("FREEZE_AND_MONITOR",)
+        )
+        # Cautious governance limits promotion
+        if gov_mode == "cautious":
+            promotion_allowed = True  # but downstream logic limits count
+
+        log.info(
+            "ModeSelector: primary=%s secondary=%s promotion_allowed=%s (gov=%s)",
+            primary_mode, secondary_mode, promotion_allowed, gov_mode,
+        )
+        return {
+            "primary_mode": primary_mode,
+            "secondary_mode": secondary_mode,
+            "allowed_actions": allowed_actions,
+            "promotion_allowed": promotion_allowed,
+        }
+
+    # ── 4. StuckDetectionEngine ──────────────────────────────────────
+
+    def detect_stuck(self) -> Dict:
+        """
+        Detect if the improvement engine is stuck by analysing history.
+
+        Returns:
+            {stuck_state, consecutive_stuck_cycles, exhausted_families,
+             escalation_needed}
+        """
+        history = _load_improvement_log()
+        cycles = history.get("cycles", [])
+
+        result: Dict[str, Any] = {
+            "stuck_state": "NORMAL_PROGRESS",
+            "consecutive_stuck_cycles": 0,
+            "exhausted_families": [],
+            "escalation_needed": False,
+        }
+
+        if len(cycles) < 2:
+            return result
+
+        # --- Consecutive same bottleneck ---
+        recent_bottlenecks: List[str] = []
+        for c in reversed(cycles[-10:]):
+            ms = c.get("machine_summary", {})
+            bn = ms.get("diagnosed_bottleneck", "")
+            if bn:
+                recent_bottlenecks.append(bn)
+            else:
+                break  # stop at first cycle without institutional diagnosis
+
+        consecutive = 1
+        if len(recent_bottlenecks) >= 2:
+            for i in range(1, len(recent_bottlenecks)):
+                if recent_bottlenecks[i] == recent_bottlenecks[0]:
+                    consecutive += 1
+                else:
+                    break
+
+        if consecutive >= 5:
+            result["stuck_state"] = "STUCK_STRUCTURAL"
+            result["escalation_needed"] = True
+        elif consecutive >= 3:
+            result["stuck_state"] = "STUCK_LOCAL"
+
+        result["consecutive_stuck_cycles"] = consecutive
+
+        # --- Exhausted parameter families ---
+        param_test_counts: Dict[str, int] = {}
+        param_improve_counts: Dict[str, int] = {}
+        for c in cycles[-20:]:
+            for detail in c.get("details", []):
+                p = detail.get("param", "")
+                if not p:
+                    continue
+                param_test_counts[p] = param_test_counts.get(p, 0) + 1
+                if detail.get("promoted", False):
+                    param_improve_counts[p] = param_improve_counts.get(p, 0) + 1
+
+        exhausted = []
+        for p, test_count in param_test_counts.items():
+            if test_count >= 3 and param_improve_counts.get(p, 0) == 0:
+                exhausted.append(p)
+        result["exhausted_families"] = exhausted
+
+        # --- No promoted changes in 5+ cycles ---
+        recent_promotions = sum(
+            c.get("promoted", c.get("suggestions_promoted", 0))
+            for c in cycles[-5:]
+        )
+        if recent_promotions == 0 and len(cycles) >= 5:
+            if result["stuck_state"] == "NORMAL_PROGRESS":
+                result["stuck_state"] = "LOW_PROGRESS"
+
+        log.info(
+            "StuckDetection: state=%s consecutive=%d exhausted=%d escalation=%s",
+            result["stuck_state"], result["consecutive_stuck_cycles"],
+            len(result["exhausted_families"]), result["escalation_needed"],
+        )
+        return result
+
+    # ── 5. CandidateActionFactory ────────────────────────────────────
+
+    def generate_candidate_actions(
+        self, diagnosis: Dict, mode: Dict, inputs: Dict
+    ) -> List[Dict]:
+        """
+        Generate candidate improvement actions (not just parameter changes).
+
+        Returns list of action dicts with: type, target, rationale, priority.
+        """
+        actions: List[Dict] = []
+        bottleneck = diagnosis.get("bottleneck", "SYSTEM_HEALTHY_MONITOR_ONLY")
+        allowed = mode.get("allowed_actions", ["no_action"])
+        primary = mode.get("primary_mode", "DAILY_MAINTENANCE")
+
+        meth = inputs.get("methodology") or {}
+        math_in = inputs.get("math") or {}
+        decay = inputs.get("alpha_decay") or {}
+        risk = inputs.get("risk_guardian") or {}
+
+        # --- FREEZE_AND_MONITOR: risk freeze or data freeze ---
+        if primary == "FREEZE_AND_MONITOR":
+            if "risk_freeze" in allowed:
+                actions.append({
+                    "type": "risk_freeze",
+                    "target": "portfolio",
+                    "rationale": f"Bottleneck={bottleneck}: freeze all allocations",
+                    "priority": 1,
+                })
+            actions.append({
+                "type": "no_action",
+                "target": None,
+                "rationale": "Monitor-only mode active",
+                "priority": 99,
+            })
+            return actions
+
+        # --- Formula pathology: sandbox math proposals ---
+        if bottleneck in ("FORMULA_PATHOLOGY", "NO_EDGE") and "formula_sandbox" in allowed:
+            math_target = math_in.get("target_function", "compute_distortion_score")
+            actions.append({
+                "type": "formula_sandbox",
+                "target": math_target,
+                "rationale": f"Math has critical proposals for {math_target}",
+                "priority": 2,
+            })
+
+        # --- Regime mismatch: methodology revalidation ---
+        if bottleneck == "REGIME_MISMATCH" and "methodology_revalidation" in allowed:
+            current_regime = (inputs.get("regime_forecaster") or {}).get(
+                "current_regime", "TENSION"
+            )
+            actions.append({
+                "type": "methodology_revalidation",
+                "target": f"regime_{current_regime}",
+                "rationale": f"Edge absent in current regime {current_regime}",
+                "priority": 2,
+            })
+
+        # --- Health decay: portfolio haircut on decaying strategies ---
+        if bottleneck == "HEALTH_DECAY_DOMINANT" and "portfolio_haircut" in allowed:
+            decay_statuses = decay.get("strategy_health", decay.get("statuses", {}))
+            if isinstance(decay_statuses, dict):
+                for sname, sdata in list(decay_statuses.items())[:3]:
+                    health = sdata.get("health", "healthy") if isinstance(sdata, dict) else sdata
+                    if isinstance(health, str) and health.lower() not in ("healthy", "stable", "ok"):
+                        actions.append({
+                            "type": "portfolio_haircut",
+                            "target": sname,
+                            "rationale": f"Structural decay detected: health={health}",
+                            "priority": 3,
+                        })
+
+        # --- Parameter changes: use existing smart + rule-based generators ---
+        if "parameter_change" in allowed:
+            # Get parameter suggestions from existing pipeline
+            try:
+                smart = self.generate_smart_suggestions(report=None)
+                for s in smart[:3]:
+                    actions.append({
+                        "type": "parameter_change",
+                        "target": s.get("param", ""),
+                        "rationale": s.get("rationale", s.get("reason", "")),
+                        "priority": 4,
+                        "_suggestion": s,  # carry full suggestion for sandbox
+                    })
+            except Exception as exc:
+                log.debug("Smart suggestion generation failed: %s", exc)
+
+        # --- Shadow validation for promising but unproven ideas ---
+        if "shadow_validation" in allowed and bottleneck not in (
+            "SYSTEM_HEALTHY_MONITOR_ONLY",
+        ):
+            # Suggest shadow tracking for risky parameter moves
+            for a in actions:
+                if a["type"] == "parameter_change":
+                    actions.append({
+                        "type": "shadow_validation",
+                        "target": f"shadow_{a['target']}",
+                        "rationale": f"Shadow-track {a['target']} before promotion",
+                        "priority": 5,
+                    })
+                    break  # one shadow candidate is enough
+
+        # --- Fallback: no_action if system healthy ---
+        if not actions or bottleneck == "SYSTEM_HEALTHY_MONITOR_ONLY":
+            actions.append({
+                "type": "no_action",
+                "target": None,
+                "rationale": "System healthy, monitor only",
+                "priority": 99,
+            })
+
+        # Sort by priority
+        actions.sort(key=lambda a: a.get("priority", 99))
+        log.info(
+            "CandidateActionFactory: %d actions generated for mode=%s",
+            len(actions), primary,
+        )
+        return actions
+
+    # ── 6. Multi-Stage Sandbox ───────────────────────────────────────
+
+    def run_institutional_sandbox(self, action: Dict) -> Dict:
+        """
+        Multi-stage institutional sandbox for a candidate action.
+
+        Stages:
+            0: eligibility  — governance allows this action type?
+            1: fast_validation  — quick backtest (if parameter_change)
+            2: institutional_validation  — methodology-compatible?
+            3: downstream_impact  — does it worsen regime/tail/cost?
+            4: decision  — PROMOTE / SHADOW / REJECT / FREEZE
+
+        Returns:
+            {stage_results, final_decision, decision_rationale, test_result}
+        """
+        stages: Dict[str, Any] = {}
+        action_type = action.get("type", "no_action")
+
+        # ── Stage 0: Eligibility ──
+        if action_type == "no_action":
+            stages["stage_0_eligibility"] = "SKIP"
+            return {
+                "stage_results": stages,
+                "final_decision": "NO_ACTION",
+                "decision_rationale": "No action required",
+                "test_result": {},
+            }
+
+        if action_type == "risk_freeze":
+            stages["stage_0_eligibility"] = "PASS"
+            return {
+                "stage_results": stages,
+                "final_decision": "FREEZE",
+                "decision_rationale": "Risk freeze activated by governance",
+                "test_result": {},
+            }
+
+        stages["stage_0_eligibility"] = "PASS"
+
+        # ── Stage 1: Fast validation (parameter changes only) ──
+        test_result: Dict = {}
+        if action_type == "parameter_change":
+            suggestion = action.get("_suggestion")
+            if suggestion and suggestion.get("param"):
+                try:
+                    test_result = self.test_suggestion(suggestion)
+                    stages["stage_1_fast_validation"] = (
+                        "PASS" if test_result.get("passed", False) else "FAIL"
+                    )
+                except Exception as exc:
+                    stages["stage_1_fast_validation"] = f"ERROR: {exc}"
+                    test_result = {"passed": False, "error": str(exc)}
+            else:
+                stages["stage_1_fast_validation"] = "SKIP_NO_SUGGESTION"
+        else:
+            # Non-parameter actions pass fast validation by default
+            stages["stage_1_fast_validation"] = "PASS_NON_PARAM"
+
+        # ── Stage 2: Institutional validation ──
+        # Check that the change is methodology-compatible
+        if test_result.get("passed", False) or action_type != "parameter_change":
+            stages["stage_2_institutional_validation"] = "PASS"
+        else:
+            stages["stage_2_institutional_validation"] = "FAIL_FAST_VAL"
+
+        # ── Stage 3: Downstream impact ──
+        if stages.get("stage_2_institutional_validation") == "PASS":
+            # For parameter changes, check regime degradation via safety gate
+            if action_type == "parameter_change" and test_result:
+                suggestion = action.get("_suggestion", {})
+                delta = test_result.get("delta", 0)
+                safe = self.validate_promotion_safety(
+                    param=suggestion.get("param", ""),
+                    old_val=suggestion.get("current", suggestion.get("current_value")),
+                    new_val=suggestion.get("proposed", suggestion.get("new_value")),
+                    delta_sharpe=delta,
+                    test_result=test_result,
+                )
+                stages["stage_3_downstream_impact"] = "PASS" if safe else "FAIL_SAFETY"
+            else:
+                stages["stage_3_downstream_impact"] = "PASS_NON_PARAM"
+        else:
+            stages["stage_3_downstream_impact"] = "SKIP"
+
+        # ── Stage 4: Decision ──
+        if action_type == "parameter_change":
+            if (
+                stages.get("stage_1_fast_validation", "").startswith("PASS")
+                and stages.get("stage_3_downstream_impact", "").startswith("PASS")
+            ):
+                final_decision = "PROMOTE"
+                rationale = "All stages passed"
+            elif stages.get("stage_1_fast_validation", "").startswith("PASS"):
+                final_decision = "SHADOW"
+                rationale = "Fast validation passed but downstream impact check failed"
+            else:
+                final_decision = "REJECT"
+                rationale = "Fast validation failed"
+        elif action_type in ("formula_sandbox", "methodology_revalidation"):
+            final_decision = "SHADOW"
+            rationale = f"{action_type} requires shadow validation period"
+        elif action_type == "portfolio_haircut":
+            final_decision = "SHADOW"
+            rationale = "Portfolio haircut requires shadow validation before promotion"
+        elif action_type == "shadow_validation":
+            final_decision = "SHADOW"
+            rationale = "Explicitly requested shadow tracking"
+        else:
+            final_decision = "REJECT"
+            rationale = f"Unknown action type: {action_type}"
+
+        stages["stage_4_decision"] = final_decision
+
+        log.info(
+            "InstitutionalSandbox: action=%s target=%s decision=%s",
+            action_type, action.get("target", "?"), final_decision,
+        )
+        return {
+            "stage_results": stages,
+            "final_decision": final_decision,
+            "decision_rationale": rationale,
+            "test_result": test_result,
+        }
+
+    # ── 7. System Health Scores ──────────────────────────────────────
+
+    def compute_system_scores(self, inputs: Dict) -> Dict:
+        """
+        Compute aggregate system health and improvability scores.
+
+        Returns:
+            {system_health_score, system_improvability_score,
+             structural_bottleneck_score, local_tuning_viable}
+        """
+        scores: Dict[str, Any] = {
+            "system_health_score": 0.50,
+            "system_improvability_score": 0.50,
+            "structural_bottleneck_score": 0.50,
+            "local_tuning_viable": True,
+        }
+
+        available = inputs.get("available_agents", [])
+        meth = inputs.get("methodology") or {}
+        decay = inputs.get("alpha_decay") or {}
+        risk = inputs.get("risk_guardian") or {}
+
+        # --- System health: weighted combination ---
+        health_signals: List[float] = []
+
+        # Agent availability (0-1)
+        agent_ratio = len(available) / 9.0 if available else 0.0
+        health_signals.append(agent_ratio)
+
+        # Best Sharpe from methodology (normalize: -1..+2 -> 0..1)
+        strategy_results = meth.get("strategy_results", meth.get("all_results", {}))
+        best_sharpe = -1.0
+        if isinstance(strategy_results, dict):
+            for _sname, sdata in strategy_results.items():
+                if isinstance(sdata, dict):
+                    s = sdata.get("sharpe", -1)
+                    if isinstance(s, (int, float)) and s > best_sharpe:
+                        best_sharpe = s
+        sharpe_score = max(0.0, min(1.0, (best_sharpe + 1.0) / 3.0))
+        health_signals.append(sharpe_score)
+
+        # Risk guardian healthy
+        can_allocate = risk.get("can_allocate", True)
+        health_signals.append(1.0 if can_allocate else 0.0)
+
+        # Decay health
+        decay_statuses = decay.get("strategy_health", decay.get("statuses", {}))
+        if isinstance(decay_statuses, dict) and decay_statuses:
+            healthy_count = 0
+            for _s, sd in decay_statuses.items():
+                h = sd.get("health", "healthy") if isinstance(sd, dict) else sd
+                if isinstance(h, str) and h.lower() in ("healthy", "stable", "ok"):
+                    healthy_count += 1
+            health_signals.append(healthy_count / max(1, len(decay_statuses)))
+        else:
+            health_signals.append(0.5)  # unknown
+
+        if health_signals:
+            scores["system_health_score"] = round(
+                sum(health_signals) / len(health_signals), 2
+            )
+
+        # --- Improvability: can local tuning help? ---
+        # High if Sharpe is slightly negative (room to improve)
+        # Low if Sharpe is deeply negative (structural problem)
+        if best_sharpe > 0.3:
+            scores["system_improvability_score"] = 0.30  # already good
+        elif best_sharpe > 0:
+            scores["system_improvability_score"] = 0.70  # some room
+        elif best_sharpe > -0.3:
+            scores["system_improvability_score"] = 0.80  # most room
+        else:
+            scores["system_improvability_score"] = 0.40  # structural
+
+        # --- Structural bottleneck ---
+        # High if problem is deeper than parameter tuning
+        if best_sharpe < -0.5 or not can_allocate:
+            scores["structural_bottleneck_score"] = 0.80
+            scores["local_tuning_viable"] = False
+        elif best_sharpe < 0:
+            scores["structural_bottleneck_score"] = 0.50
+            scores["local_tuning_viable"] = True
+        else:
+            scores["structural_bottleneck_score"] = 0.20
+            scores["local_tuning_viable"] = True
+
+        log.info(
+            "SystemScores: health=%.2f improvability=%.2f structural=%.2f tuning_viable=%s",
+            scores["system_health_score"],
+            scores["system_improvability_score"],
+            scores["structural_bottleneck_score"],
+            scores["local_tuning_viable"],
+        )
+        return scores
+
+    # ── 8. Downstream Contract Builder ───────────────────────────────
+
+    def build_downstream_contract(
+        self, mode: Dict, actions: List[Dict], results: List[Dict]
+    ) -> Dict:
+        """
+        Build contract for downstream agents based on improvement mode and results.
+
+        Returns dict keyed by agent name with action directives.
+        """
+        primary = mode.get("primary_mode", "DAILY_MAINTENANCE")
+
+        # Default contract: all agents continue normal
+        contract: Dict[str, Dict[str, Any]] = {
+            "methodology": {"action": "continue_normal"},
+            "optimizer": {"action": "continue_normal"},
+            "math": {"action": "continue_normal"},
+            "regime_forecaster": {"action": "continue_normal"},
+            "portfolio_construction": {"action": "continue_normal"},
+            "risk_guardian": {"action": "continue_normal"},
+            "execution": {"action": "continue_normal"},
+            "data_scout": {"action": "continue_normal"},
+            "alpha_decay": {"action": "continue_normal"},
+        }
+
+        # Mode-specific directives
+        if primary == "FREEZE_AND_MONITOR":
+            contract["portfolio_construction"] = {"action": "freeze_allocation_changes"}
+            contract["risk_guardian"] = {"action": "maintain_veto"}
+            contract["execution"] = {"action": "caution_mode"}
+            contract["optimizer"] = {"action": "pause_optimization"}
+
+        elif primary == "FORMULA_RESEARCH":
+            contract["math"] = {"action": "prioritize_distortion_score"}
+            contract["methodology"] = {"action": "revalidate_formulas"}
+            contract["optimizer"] = {"action": "formula_research_mode"}
+
+        elif primary == "REGIME_REPAIR":
+            # Find which regime needs repair from actions
+            regime_target = ""
+            for a in actions:
+                t = a.get("target", "")
+                if isinstance(t, str) and t.startswith("regime_"):
+                    regime_target = t.replace("regime_", "")
+                    break
+
+            contract["methodology"] = {
+                "action": f"revalidate_{regime_target}_regime" if regime_target else "revalidate_all_regimes",
+            }
+            contract["optimizer"] = {
+                "action": "regime_repair_mode",
+                "params": ["z_entry", "regime_size", "conviction_scale"],
+            }
+            contract["regime_forecaster"] = {"action": "increase_monitoring"}
+
+        elif primary == "COST_REDUCTION":
+            contract["execution"] = {"action": "minimize_costs"}
+            contract["optimizer"] = {"action": "cost_reduction_mode"}
+            contract["portfolio_construction"] = {"action": "reduce_turnover"}
+
+        elif primary == "STRUCTURAL_REVIEW":
+            contract["methodology"] = {"action": "full_revalidation"}
+            contract["optimizer"] = {"action": "expanded_search_space"}
+            contract["math"] = {"action": "review_all_formulas"}
+
+        elif primary == "ROBUSTNESS_REPAIR":
+            contract["alpha_decay"] = {"action": "intensify_monitoring"}
+            contract["methodology"] = {"action": "robustness_revalidation"}
+            contract["portfolio_construction"] = {"action": "conservative_allocation"}
+
+        elif primary == "DAILY_MAINTENANCE":
+            pass  # defaults are fine
+
+        # Enrich with promoted parameter info from results
+        promoted_params = []
+        for r in results:
+            if r.get("final_decision") == "PROMOTE":
+                tr = r.get("test_result", {})
+                if tr.get("param"):
+                    promoted_params.append(tr["param"])
+        if promoted_params:
+            contract["optimizer"]["promoted_params"] = promoted_params
+            contract["methodology"]["action"] = "revalidate_after_promotion"
+
+        log.info("DownstreamContract: mode=%s directives for %d agents", primary, len(contract))
+        return contract
+
+    # ── 9. Machine Summary Builder ───────────────────────────────────
+
+    def _build_institutional_machine_summary(
+        self,
+        diagnosis: Dict,
+        stuck: Dict,
+        mode: Dict,
+        scores: Dict,
+        sandbox_results: List[Dict],
+        downstream_contract: Dict,
+    ) -> Dict:
+        """
+        Build the institutional machine_summary for consumption by other agents.
+        """
+        promote_count = sum(1 for r in sandbox_results if r.get("final_decision") == "PROMOTE")
+        shadow_count = sum(1 for r in sandbox_results if r.get("final_decision") == "SHADOW")
+        freeze_count = sum(1 for r in sandbox_results if r.get("final_decision") == "FREEZE")
+
+        # Cycle result string
+        cycle_result = f"{shadow_count}_SHADOWED_{promote_count}_PROMOTED"
+        if freeze_count > 0:
+            cycle_result += f"_{freeze_count}_FROZEN"
+
+        # Top blockers from diagnosis evidence
+        top_blockers = diagnosis.get("evidence", [])[:3]
+
+        # Next recommended action
+        bottleneck = diagnosis.get("bottleneck", "SYSTEM_HEALTHY_MONITOR_ONLY")
+        next_action_map = {
+            "NO_EDGE": "run_formula_research",
+            "ZERO_TRADE_PATHOLOGY": "run_structural_review",
+            "REGIME_MISMATCH": "run_regime_specific_tuning",
+            "IMPLEMENTATION_DRAG": "run_cost_reduction",
+            "RISK_VETO_BINDING": "wait_for_risk_clearance",
+            "FORMULA_PATHOLOGY": "run_math_review",
+            "OPTIMIZER_STUCK": "escalate_to_structural_review",
+            "HEALTH_DECAY_DOMINANT": "run_robustness_repair",
+            "DATA_QUALITY_FAILURE": "wait_for_data_quality",
+            "SYSTEM_HEALTHY_MONITOR_ONLY": "monitor",
+        }
+        next_action = next_action_map.get(bottleneck, "monitor")
+
+        summary = {
+            "cycle_result": cycle_result,
+            "primary_mode": mode.get("primary_mode", "DAILY_MAINTENANCE"),
+            "diagnosed_bottleneck": bottleneck,
+            "stuck_state": stuck.get("stuck_state", "NORMAL_PROGRESS"),
+            "promote_count": promote_count,
+            "shadow_count": shadow_count,
+            "freeze_count": freeze_count,
+            "escalation_flag": stuck.get("escalation_needed", False),
+            "next_recommended_action": next_action,
+            "top_blockers": top_blockers,
+            "local_tuning_viable": scores.get("local_tuning_viable", True),
+            "structural_review_needed": scores.get("structural_bottleneck_score", 0) > 0.6,
+            "system_health_score": scores.get("system_health_score", 0.5),
+            "system_improvability_score": scores.get("system_improvability_score", 0.5),
+            "downstream_contract": downstream_contract,
+        }
+        return summary
+
     # ── Main Cycle ───────────────────────────────────────────────────────
 
     def run_cycle(self) -> Dict:
         """
-        Run one full improvement cycle with governance awareness.
+        Run one full institutional improvement cycle.
 
-        Steps:
-          0. Check governance prerequisites
-          1. Run methodology evaluation
-          2. Identify weaknesses
-          3. Generate smart + rule-based suggestions
-          4. Ask GPT for ideas (if available)
-          5. Test each suggestion in sandbox
-          6. Validate promotion safety + promote
-          7. Build enhanced cycle report
+        Master Research Improvement Governor steps:
+          1. Assemble ALL agent inputs (institutional)
+          2. Diagnose bottleneck (institutional)
+          3. Detect stuck state (institutional)
+          4. Select improvement mode (institutional)
+          5. Compute system scores (institutional)
+          6. Check governance prerequisites (existing, enhanced)
+          7. Run methodology evaluation (existing)
+          8. Identify weaknesses (existing)
+          9. Generate candidate actions (institutional, replaces old suggestions)
+         10. Run institutional sandbox (institutional, replaces old test loop)
+         11. Decide promote/shadow/freeze/escalate (institutional)
+         12. Build downstream contract (institutional)
+         13. Build machine_summary (institutional)
+         14. Save + publish
+
+        All new institutional steps wrapped in try/except to preserve existing
+        behavior if any institutional component fails.
         """
         cycle_start = datetime.now(timezone.utc)
         cycle_id = str(uuid.uuid4())[:12]
-        log.info("=" * 60)
-        log.info("AUTO-IMPROVE CYCLE %s START — %s", cycle_id, cycle_start.isoformat())
-        log.info("=" * 60)
+        log.info("=" * 70)
+        log.info("INSTITUTIONAL IMPROVEMENT CYCLE %s START — %s", cycle_id, cycle_start.isoformat())
+        log.info("=" * 70)
 
         cycle_record: Dict[str, Any] = {
             "cycle_id": cycle_id,
@@ -1112,9 +2045,56 @@ class AutoImprover:
             "machine_summary": {},
         }
 
+        # Institutional state containers (safe defaults)
+        inst_inputs: Dict = {}
+        inst_diagnosis: Dict = {"bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY", "confidence": 0, "evidence": [], "recommended_mode": "DAILY_MAINTENANCE"}
+        inst_stuck: Dict = {"stuck_state": "NORMAL_PROGRESS", "consecutive_stuck_cycles": 0, "exhausted_families": [], "escalation_needed": False}
+        inst_mode: Dict = {"primary_mode": "DAILY_MAINTENANCE", "secondary_mode": "DAILY_MAINTENANCE", "allowed_actions": ["parameter_change", "no_action"], "promotion_allowed": True}
+        inst_scores: Dict = {"system_health_score": 0.5, "system_improvability_score": 0.5, "structural_bottleneck_score": 0.5, "local_tuning_viable": True}
+        inst_candidate_actions: List[Dict] = []
+        inst_sandbox_results: List[Dict] = []
+        inst_downstream_contract: Dict = {}
+        institutional_active = False
+
         try:
-            # ── Step 0: Governance prerequisites ───────────────────────
-            log.info("Step 0/7: Checking governance prerequisites...")
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 1: Assemble ALL agent inputs
+            # ══════════════════════════════════════════════════════════
+            try:
+                log.info("Institutional Step 1/12: Assembling all agent inputs...")
+                inst_inputs = self.assemble_all_inputs()
+                cycle_record["available_agents"] = inst_inputs.get("available_agents", [])
+                institutional_active = True
+            except Exception as exc:
+                log.warning("Institutional input assembly failed (non-fatal): %s", exc)
+
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 2: Diagnose bottleneck
+            # ══════════════════════════════════════════════════════════
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 2/12: Diagnosing bottleneck...")
+                    inst_diagnosis = self.diagnose_bottleneck(inst_inputs)
+                    cycle_record["diagnosed_bottleneck"] = inst_diagnosis.get("bottleneck")
+                    cycle_record["bottleneck_confidence"] = inst_diagnosis.get("confidence")
+                except Exception as exc:
+                    log.warning("Institutional diagnosis failed (non-fatal): %s", exc)
+
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 3: Detect stuck state
+            # ══════════════════════════════════════════════════════════
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 3/12: Detecting stuck state...")
+                    inst_stuck = self.detect_stuck()
+                    cycle_record["stuck_state"] = inst_stuck.get("stuck_state")
+                except Exception as exc:
+                    log.warning("Institutional stuck detection failed (non-fatal): %s", exc)
+
+            # ══════════════════════════════════════════════════════════
+            # STEP 4 (existing enhanced): Check governance prerequisites
+            # ══════════════════════════════════════════════════════════
+            log.info("Step 4/12: Checking governance prerequisites...")
             gov = self.check_governance_prerequisites()
             cycle_record["governance_status"] = gov["status"]
             cycle_record["mode"] = gov["mode"]
@@ -1126,9 +2106,33 @@ class AutoImprover:
                     "cycle_result": "SKIPPED_ALL_REJECTED",
                     "next_recommended_action": "review_methodology_governance",
                     "governance_recommendation": gov["reason"],
+                    "diagnosed_bottleneck": inst_diagnosis.get("bottleneck", "unknown"),
+                    "stuck_state": inst_stuck.get("stuck_state", "NORMAL_PROGRESS"),
                 }
                 self._save_cycle(cycle_record)
                 return cycle_record
+
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 5: Select improvement mode
+            # ══════════════════════════════════════════════════════════
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 5/12: Selecting improvement mode...")
+                    inst_mode = self.select_mode(inst_diagnosis, gov)
+                    cycle_record["improvement_mode"] = inst_mode.get("primary_mode")
+                except Exception as exc:
+                    log.warning("Institutional mode selection failed (non-fatal): %s", exc)
+
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 6: Compute system scores
+            # ══════════════════════════════════════════════════════════
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 6/12: Computing system scores...")
+                    inst_scores = self.compute_system_scores(inst_inputs)
+                    cycle_record["system_scores"] = inst_scores
+                except Exception as exc:
+                    log.warning("Institutional system scores failed (non-fatal): %s", exc)
 
             # Cautious mode limits
             max_suggestions = MAX_SUGGESTIONS_PER_CYCLE
@@ -1136,8 +2140,10 @@ class AutoImprover:
                 max_suggestions = min(3, MAX_SUGGESTIONS_PER_CYCLE)
                 log.info("Cautious mode: limiting to %d suggestions", max_suggestions)
 
-            # Step 1: Evaluate current state
-            log.info("Step 1/7: Running methodology evaluation...")
+            # ══════════════════════════════════════════════════════════
+            # STEP 7 (existing): Evaluate current state
+            # ══════════════════════════════════════════════════════════
+            log.info("Step 7/12: Running methodology evaluation...")
             metrics = self.run_evaluation()
             if not metrics:
                 log.error("Evaluation returned no results — aborting cycle")
@@ -1164,123 +2170,245 @@ class AutoImprover:
                 self._last_baseline_sharpe = metrics.get("best_sharpe", 0)
                 self._last_baseline_wr = metrics.get("best_win_rate", 0.50)
 
-            # Step 2: Identify weaknesses
-            log.info("Step 2/7: Identifying weaknesses...")
+            # ══════════════════════════════════════════════════════════
+            # STEP 8 (existing): Identify weaknesses
+            # ══════════════════════════════════════════════════════════
+            log.info("Step 8/12: Identifying weaknesses...")
             weaknesses = self.identify_weaknesses(metrics)
             cycle_record["weaknesses"] = [w["description"] for w in weaknesses]
 
             if not weaknesses:
                 log.info("No weaknesses identified — system looks healthy!")
                 cycle_record["status"] = "healthy"
-                cycle_record["machine_summary"] = {
-                    "cycle_result": "HEALTHY_NO_CHANGES",
-                    "next_recommended_action": "monitor",
-                    "governance_recommendation": "system performing within targets",
-                }
+                # Build institutional summary even for healthy cycles
+                if institutional_active:
+                    try:
+                        inst_downstream_contract = self.build_downstream_contract(
+                            inst_mode, [], []
+                        )
+                        cycle_record["machine_summary"] = self._build_institutional_machine_summary(
+                            inst_diagnosis, inst_stuck, inst_mode, inst_scores,
+                            [], inst_downstream_contract,
+                        )
+                    except Exception:
+                        cycle_record["machine_summary"] = {
+                            "cycle_result": "HEALTHY_NO_CHANGES",
+                            "next_recommended_action": "monitor",
+                            "governance_recommendation": "system performing within targets",
+                        }
+                else:
+                    cycle_record["machine_summary"] = {
+                        "cycle_result": "HEALTHY_NO_CHANGES",
+                        "next_recommended_action": "monitor",
+                        "governance_recommendation": "system performing within targets",
+                    }
                 self._save_cycle(cycle_record)
                 return cycle_record
 
-            # Step 3: Generate smart suggestions from governance + alpha_decay
-            log.info("Step 3/7: Generating smart suggestions from governance...")
-            smart_suggestions = self.generate_smart_suggestions(report=None)
-
-            # Also generate rule-based suggestions
-            rule_suggestions = self.generate_parameter_suggestions(weaknesses)
-
-            # Merge: smart first, then rule-based (dedup by param)
-            suggestions: List[Dict] = []
-            seen_params: set = set()
-            for s in smart_suggestions + rule_suggestions:
-                param_key = s.get("param", "")
-                if param_key and param_key not in seen_params:
-                    seen_params.add(param_key)
-                    # Normalize keys for compatibility
-                    if "current_value" in s and "current" not in s:
-                        s["current"] = s["current_value"]
-                    if "new_value" in s and "proposed" not in s:
-                        s["proposed"] = s["new_value"]
-                    if "rationale" in s and "reason" not in s:
-                        s["reason"] = s["rationale"]
-                    suggestions.append(s)
-
-            cycle_record["suggestions_generated"] = len(suggestions)
-
-            # Step 4: Ask GPT for ideas
-            log.info("Step 4/7: Querying GPT for ideas...")
-            current_params = self.current_params()
-            try:
-                gpt_ideas = self.ask_gpt_for_ideas(weaknesses, current_params)
-                if gpt_ideas:
-                    cycle_record["gpt_used"] = True
-                    cycle_record["gpt_suggestions"] = [
-                        f"{s['param']}={s['proposed']}" for s in gpt_ideas
-                    ]
-                    # Add GPT suggestions that aren't already covered
-                    for idea in gpt_ideas:
-                        if idea["param"] not in seen_params:
-                            seen_params.add(idea["param"])
-                            suggestions.append(idea)
-            except Exception as e:
-                log.warning("GPT query failed (non-fatal): %s", e)
-
-            # Limit total suggestions
-            suggestions = suggestions[:max_suggestions]
-            cycle_record["suggestions_tested"] = len(suggestions)
-
-            # Step 5: Test each suggestion
-            log.info("Step 5/7: Testing %d suggestions in sandbox...", len(suggestions))
-            promoted = 0
-            best_delta = 0.0
-            best_param = ""
-            for i, suggestion in enumerate(suggestions, 1):
-                log.info("  Testing suggestion %d/%d: %s", i, len(suggestions), suggestion["param"])
-                test_result = self.test_suggestion(suggestion)
-                detail = {
-                    "param": suggestion["param"],
-                    "current": suggestion.get("current", suggestion.get("current_value")),
-                    "proposed": suggestion.get("proposed", suggestion.get("new_value")),
-                    "source": suggestion.get("source", "rule"),
-                    "reason": suggestion.get("reason", suggestion.get("rationale", "")),
-                    "test_passed": test_result.get("passed", False),
-                    "sharpe_delta": test_result.get("delta", 0),
-                }
-
-                # Step 6: Validate promotion safety before promoting
-                delta = test_result.get("delta", 0)
-                if test_result.get("passed", False):
-                    safe = self.validate_promotion_safety(
-                        param=suggestion["param"],
-                        old_val=suggestion.get("current", suggestion.get("current_value")),
-                        new_val=suggestion.get("proposed", suggestion.get("new_value")),
-                        delta_sharpe=delta,
-                        test_result=test_result,
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 9: Generate candidate actions
+            # ══════════════════════════════════════════════════════════
+            use_institutional_pipeline = False
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 9/12: Generating candidate actions...")
+                    inst_candidate_actions = self.generate_candidate_actions(
+                        inst_diagnosis, inst_mode, inst_inputs,
                     )
-                    if safe and self.promote_if_better(suggestion, test_result):
-                        promoted += 1
-                        detail["promoted"] = True
-                        if delta > best_delta:
-                            best_delta = delta
-                            best_param = suggestion["param"]
+                    use_institutional_pipeline = len(inst_candidate_actions) > 0
+                except Exception as exc:
+                    log.warning("Institutional candidate generation failed (non-fatal): %s", exc)
+
+            if use_institutional_pipeline:
+                # ══════════════════════════════════════════════════════
+                # INSTITUTIONAL STEP 10: Run institutional sandbox
+                # ══════════════════════════════════════════════════════
+                log.info("Institutional Step 10/12: Running institutional sandbox for %d actions...",
+                         len(inst_candidate_actions))
+                promoted = 0
+                best_delta = 0.0
+                best_param = ""
+
+                for i, action in enumerate(inst_candidate_actions[:max_suggestions], 1):
+                    log.info("  Sandbox action %d/%d: type=%s target=%s",
+                             i, min(len(inst_candidate_actions), max_suggestions),
+                             action.get("type"), action.get("target"))
+                    try:
+                        sandbox_result = self.run_institutional_sandbox(action)
+                        inst_sandbox_results.append(sandbox_result)
+
+                        # INSTITUTIONAL STEP 11: Decide promote/shadow/freeze/escalate
+                        decision = sandbox_result.get("final_decision", "REJECT")
+                        test_result = sandbox_result.get("test_result", {})
+
+                        detail: Dict[str, Any] = {
+                            "action_type": action.get("type"),
+                            "target": action.get("target"),
+                            "rationale": action.get("rationale", ""),
+                            "decision": decision,
+                            "stage_results": sandbox_result.get("stage_results", {}),
+                        }
+
+                        if decision == "PROMOTE" and inst_mode.get("promotion_allowed", True):
+                            suggestion = action.get("_suggestion")
+                            if suggestion and not self.dry_run:
+                                if self.promote_if_better(suggestion, test_result):
+                                    promoted += 1
+                                    detail["promoted"] = True
+                                    delta = test_result.get("delta", 0)
+                                    if delta > best_delta:
+                                        best_delta = delta
+                                        best_param = suggestion.get("param", "")
+                                else:
+                                    detail["promoted"] = False
+                            elif suggestion and self.dry_run:
+                                log.info("DRY RUN: Would promote %s", suggestion.get("param"))
+                                detail["promoted"] = False
+                                detail["dry_run"] = True
+                            else:
+                                detail["promoted"] = False
+                        else:
+                            detail["promoted"] = False
+
+                        # Copy param-level info for backward compatibility
+                        if action.get("_suggestion"):
+                            s = action["_suggestion"]
+                            detail["param"] = s.get("param", "")
+                            detail["current"] = s.get("current", s.get("current_value"))
+                            detail["proposed"] = s.get("proposed", s.get("new_value"))
+                            detail["test_passed"] = test_result.get("passed", False)
+                            detail["sharpe_delta"] = test_result.get("delta", 0)
+
+                        cycle_record["details"].append(detail)
+
+                    except Exception as exc:
+                        log.warning("  Sandbox failed for action %d: %s", i, exc)
+                        inst_sandbox_results.append({
+                            "final_decision": "REJECT",
+                            "decision_rationale": f"sandbox error: {exc}",
+                            "test_result": {},
+                        })
+
+                cycle_record["promoted"] = promoted
+                cycle_record["suggestions_promoted"] = promoted
+                cycle_record["suggestions_tested"] = len(inst_sandbox_results)
+                cycle_record["suggestions_generated"] = len(inst_candidate_actions)
+                if best_param:
+                    cycle_record["best_improvement"] = {
+                        "param": best_param,
+                        "delta_sharpe": round(best_delta, 4),
+                    }
+
+            else:
+                # ══════════════════════════════════════════════════════
+                # FALLBACK: Original suggestion pipeline (existing code)
+                # ══════════════════════════════════════════════════════
+                log.info("Fallback: Using original suggestion pipeline...")
+
+                # Step 3 (original): Generate smart suggestions from governance + alpha_decay
+                log.info("Generating smart suggestions from governance...")
+                smart_suggestions = self.generate_smart_suggestions(report=None)
+
+                # Also generate rule-based suggestions
+                rule_suggestions = self.generate_parameter_suggestions(weaknesses)
+
+                # Merge: smart first, then rule-based (dedup by param)
+                suggestions: List[Dict] = []
+                seen_params: set = set()
+                for s in smart_suggestions + rule_suggestions:
+                    param_key = s.get("param", "")
+                    if param_key and param_key not in seen_params:
+                        seen_params.add(param_key)
+                        # Normalize keys for compatibility
+                        if "current_value" in s and "current" not in s:
+                            s["current"] = s["current_value"]
+                        if "new_value" in s and "proposed" not in s:
+                            s["proposed"] = s["new_value"]
+                        if "rationale" in s and "reason" not in s:
+                            s["reason"] = s["rationale"]
+                        suggestions.append(s)
+
+                cycle_record["suggestions_generated"] = len(suggestions)
+
+                # Step 4 (original): Ask GPT for ideas
+                log.info("Querying GPT for ideas...")
+                current_params = self.current_params()
+                try:
+                    gpt_ideas = self.ask_gpt_for_ideas(weaknesses, current_params)
+                    if gpt_ideas:
+                        cycle_record["gpt_used"] = True
+                        cycle_record["gpt_suggestions"] = [
+                            f"{s['param']}={s['proposed']}" for s in gpt_ideas
+                        ]
+                        # Add GPT suggestions that aren't already covered
+                        for idea in gpt_ideas:
+                            if idea["param"] not in seen_params:
+                                seen_params.add(idea["param"])
+                                suggestions.append(idea)
+                except Exception as e:
+                    log.warning("GPT query failed (non-fatal): %s", e)
+
+                # Limit total suggestions
+                suggestions = suggestions[:max_suggestions]
+                cycle_record["suggestions_tested"] = len(suggestions)
+
+                # Step 5 (original): Test each suggestion
+                log.info("Testing %d suggestions in sandbox...", len(suggestions))
+                promoted = 0
+                best_delta = 0.0
+                best_param = ""
+                for i, suggestion in enumerate(suggestions, 1):
+                    log.info("  Testing suggestion %d/%d: %s", i, len(suggestions), suggestion["param"])
+                    test_result = self.test_suggestion(suggestion)
+                    detail = {
+                        "param": suggestion["param"],
+                        "current": suggestion.get("current", suggestion.get("current_value")),
+                        "proposed": suggestion.get("proposed", suggestion.get("new_value")),
+                        "source": suggestion.get("source", "rule"),
+                        "reason": suggestion.get("reason", suggestion.get("rationale", "")),
+                        "test_passed": test_result.get("passed", False),
+                        "sharpe_delta": test_result.get("delta", 0),
+                    }
+
+                    # Step 6 (original): Validate promotion safety before promoting
+                    delta = test_result.get("delta", 0)
+                    if test_result.get("passed", False):
+                        safe = self.validate_promotion_safety(
+                            param=suggestion["param"],
+                            old_val=suggestion.get("current", suggestion.get("current_value")),
+                            new_val=suggestion.get("proposed", suggestion.get("new_value")),
+                            delta_sharpe=delta,
+                            test_result=test_result,
+                        )
+                        if safe and self.promote_if_better(suggestion, test_result):
+                            promoted += 1
+                            detail["promoted"] = True
+                            if delta > best_delta:
+                                best_delta = delta
+                                best_param = suggestion["param"]
+                        else:
+                            detail["promoted"] = False
+                            if not safe:
+                                detail["safety_blocked"] = True
                     else:
                         detail["promoted"] = False
-                        if not safe:
-                            detail["safety_blocked"] = True
-                else:
-                    detail["promoted"] = False
 
-                cycle_record["details"].append(detail)
+                    cycle_record["details"].append(detail)
 
-            cycle_record["promoted"] = promoted
-            cycle_record["suggestions_promoted"] = promoted
-            if best_param:
-                cycle_record["best_improvement"] = {
-                    "param": best_param,
-                    "delta_sharpe": round(best_delta, 4),
-                }
+                cycle_record["promoted"] = promoted
+                cycle_record["suggestions_promoted"] = promoted
+                if best_param:
+                    cycle_record["best_improvement"] = {
+                        "param": best_param,
+                        "delta_sharpe": round(best_delta, 4),
+                    }
 
-            # Final evaluation if anything was promoted
+            # ══════════════════════════════════════════════════════════
+            # STEP (existing): Final evaluation if anything was promoted
+            # ══════════════════════════════════════════════════════════
+            promoted = cycle_record.get("promoted", 0)
             if promoted > 0 and not self.dry_run:
-                log.info("Step 7/7: Re-evaluating after %d promotions...", promoted)
+                log.info("Step 12/12: Re-evaluating after %d promotions...", promoted)
                 new_metrics = self.run_evaluation()
                 if new_metrics:
                     cycle_record["metrics_after"] = {
@@ -1294,25 +2422,60 @@ class AutoImprover:
 
             cycle_record["status"] = "completed"
 
-            # ── Enhanced machine_summary ───────────────────────────────
-            cycle_result = f"{promoted}_PROMOTED" if promoted > 0 else "0_PROMOTED"
-            next_action = "monitor"
-            if promoted > 0:
-                next_action = "run_regime_specific_tuning"
-            elif len(weaknesses) > 2:
-                next_action = "expand_search_space"
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL STEP 12: Build downstream contract
+            # ══════════════════════════════════════════════════════════
+            if institutional_active:
+                try:
+                    log.info("Institutional Step 12/12: Building downstream contract + machine_summary...")
+                    inst_downstream_contract = self.build_downstream_contract(
+                        inst_mode, inst_candidate_actions, inst_sandbox_results,
+                    )
+                    cycle_record["downstream_contract"] = inst_downstream_contract
 
-            governance_rec = "system stable"
-            if promoted > 0:
-                governance_rec = "re-validate after promotion"
-            elif gov["mode"] == "cautious":
-                governance_rec = "wait for APPROVED strategies before full optimization"
+                    # INSTITUTIONAL STEP 13: Build institutional machine_summary
+                    cycle_record["machine_summary"] = self._build_institutional_machine_summary(
+                        inst_diagnosis, inst_stuck, inst_mode, inst_scores,
+                        inst_sandbox_results, inst_downstream_contract,
+                    )
+                except Exception as exc:
+                    log.warning("Institutional summary build failed (non-fatal): %s", exc)
+                    # Fallback to basic machine_summary
+                    cycle_record["machine_summary"] = self._fallback_machine_summary(
+                        promoted, weaknesses, gov,
+                    )
+            else:
+                cycle_record["machine_summary"] = self._fallback_machine_summary(
+                    promoted, weaknesses, gov,
+                )
 
-            cycle_record["machine_summary"] = {
-                "cycle_result": cycle_result,
-                "next_recommended_action": next_action,
-                "governance_recommendation": governance_rec,
-            }
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL: Save machine_summary to disk for other agents
+            # ══════════════════════════════════════════════════════════
+            try:
+                summary_path = ROOT / "agents" / "auto_improve" / "machine_summary.json"
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path.write_text(
+                    json.dumps(cycle_record["machine_summary"], indent=2, default=str),
+                    encoding="utf-8",
+                )
+                log.info("Machine summary saved to %s", summary_path)
+            except Exception as exc:
+                log.warning("Failed to save machine_summary: %s", exc)
+
+            # ══════════════════════════════════════════════════════════
+            # INSTITUTIONAL: Bus publish + registry heartbeat
+            # ══════════════════════════════════════════════════════════
+            try:
+                from agents.shared.agent_bus import get_bus
+                get_bus().publish("auto_improve", cycle_record["machine_summary"])
+            except Exception:
+                pass
+            try:
+                from agents.shared.agent_registry import get_registry, AgentStatus
+                get_registry().heartbeat("auto_improve", AgentStatus.COMPLETED)
+            except Exception:
+                pass
 
         except Exception as e:
             log.error("Cycle failed: %s\n%s", e, traceback.format_exc())
@@ -1322,21 +2485,51 @@ class AutoImprover:
                 "cycle_result": "ERROR",
                 "next_recommended_action": "investigate_failure",
                 "governance_recommendation": str(e)[:200],
+                "diagnosed_bottleneck": inst_diagnosis.get("bottleneck", "unknown"),
+                "stuck_state": inst_stuck.get("stuck_state", "NORMAL_PROGRESS"),
             }
 
         self._save_cycle(cycle_record)
 
         elapsed = (datetime.now(timezone.utc) - cycle_start).total_seconds()
-        log.info("=" * 60)
+        log.info("=" * 70)
         log.info(
-            "CYCLE %s COMPLETE in %.0fs — gov=%s mode=%s weaknesses=%d tested=%d promoted=%d",
-            cycle_id, elapsed, cycle_record["governance_status"], cycle_record["mode"],
-            len(cycle_record["weaknesses"]),
-            cycle_record["suggestions_tested"], cycle_record["promoted"],
+            "CYCLE %s COMPLETE in %.0fs — gov=%s mode=%s bottleneck=%s stuck=%s "
+            "tested=%d promoted=%d",
+            cycle_id, elapsed,
+            cycle_record["governance_status"],
+            cycle_record.get("improvement_mode", cycle_record["mode"]),
+            cycle_record.get("diagnosed_bottleneck", "?"),
+            cycle_record.get("stuck_state", "?"),
+            cycle_record.get("suggestions_tested", 0),
+            cycle_record.get("promoted", 0),
         )
-        log.info("=" * 60)
+        log.info("=" * 70)
 
         return cycle_record
+
+    def _fallback_machine_summary(
+        self, promoted: int, weaknesses: List[Dict], gov: Dict
+    ) -> Dict:
+        """Fallback machine_summary when institutional pipeline is unavailable."""
+        cycle_result = f"{promoted}_PROMOTED" if promoted > 0 else "0_PROMOTED"
+        next_action = "monitor"
+        if promoted > 0:
+            next_action = "run_regime_specific_tuning"
+        elif len(weaknesses) > 2:
+            next_action = "expand_search_space"
+
+        governance_rec = "system stable"
+        if promoted > 0:
+            governance_rec = "re-validate after promotion"
+        elif gov.get("mode") == "cautious":
+            governance_rec = "wait for APPROVED strategies before full optimization"
+
+        return {
+            "cycle_result": cycle_result,
+            "next_recommended_action": next_action,
+            "governance_recommendation": governance_rec,
+        }
 
     def _save_cycle(self, cycle_record: Dict) -> None:
         """Save a cycle record to the improvement log."""
