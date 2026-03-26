@@ -110,6 +110,7 @@ GOVERNANCE_MODES = (
     "PARAM_TUNING_ONLY",
     "PARAM_PLUS_CODE",
     "REGIME_SPECIFIC_TUNING",
+    "COST_REDUCTION",
     "FREEZE_AND_MONITOR",
     "DISABLE_CANDIDATE",
 )
@@ -169,6 +170,12 @@ class OptimizationGovernanceEngine:
                 f"Strategies flagged for disable: {strategies_to_disable}. "
                 "Recommending disable rather than optimization."
             )
+        elif float(machine_summary.get("cost_drag_pct", 0)) > 15.0:
+            self._mode = "COST_REDUCTION"
+            self._rationale = (
+                f"Cost drag at {machine_summary.get('cost_drag_pct', 0):.1f}% exceeds 15% "
+                "threshold — focusing optimization on reducing turnover and execution drag."
+            )
         elif n_approved > 0:
             self._mode = "PARAM_TUNING_ONLY"
             self._rationale = (
@@ -206,7 +213,7 @@ class OptimizationGovernanceEngine:
         return self._mode == "PARAM_PLUS_CODE"
 
     def allows_param_changes(self) -> bool:
-        return self._mode in ("PARAM_TUNING_ONLY", "PARAM_PLUS_CODE", "REGIME_SPECIFIC_TUNING")
+        return self._mode in ("PARAM_TUNING_ONLY", "PARAM_PLUS_CODE", "REGIME_SPECIFIC_TUNING", "COST_REDUCTION")
 
     def should_freeze(self) -> bool:
         return self._mode in ("FREEZE_AND_MONITOR", "DISABLE_CANDIDATE")
@@ -1165,6 +1172,65 @@ class ChampionChallengerManager:
             "challenger_wins": challenger_objective.composite_score > 0,
         }
 
+    def compare_to_champion(
+        self, candidate_metrics: Dict[str, Any], champion_metrics: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Compare candidate metrics against champion and return a status string.
+
+        Statuses:
+            REJECTED            — candidate is clearly worse
+            SANDBOX_PASSED      — candidate survived sandbox but does not beat champion
+            SHADOW_APPROVED     — marginal improvement, needs shadow monitoring
+            PROMOTED            — clear improvement over champion
+            ROLLED_BACK         — previously promoted but reverted (not set here)
+
+        Parameters
+        ----------
+        candidate_metrics : dict
+            Metrics from the candidate backtest.
+        champion_metrics : dict, optional
+            Override champion metrics (defaults to loaded champion).
+
+        Returns
+        -------
+        str
+            One of the status strings above.
+        """
+        champ = champion_metrics or self._champion_metrics or {}
+        champ_sharpe = float(champ.get("sharpe", 0))
+        cand_sharpe = float(candidate_metrics.get("sharpe", 0))
+
+        champ_robustness = float(champ.get("robustness", 0))
+        cand_robustness = float(candidate_metrics.get("robustness", 0))
+
+        champ_stability = float(champ.get("stability", champ.get("stability_score", 0)))
+        cand_stability = float(candidate_metrics.get("stability", candidate_metrics.get("stability_score", 0)))
+
+        # Hard reject: Sharpe dropped more than 20% or went negative when champion is positive
+        if champ_sharpe > 0 and cand_sharpe < champ_sharpe * 0.80:
+            return "REJECTED"
+        if cand_sharpe < -0.3:
+            return "REJECTED"
+
+        # Robustness must not degrade significantly
+        if cand_robustness < champ_robustness - 0.10:
+            return "REJECTED"
+
+        # Compute composite improvement
+        objective = compute_objective(champ, candidate_metrics)
+
+        if objective.composite_score < -0.02:
+            return "REJECTED"
+
+        if objective.composite_score < 0.0:
+            return "SANDBOX_PASSED"
+
+        if objective.composite_score < 0.05:
+            return "SHADOW_APPROVED"
+
+        return "PROMOTED"
+
 
 # ═════════════════════════════════════════════════════════════════════════
 # F. PromotionDecisionEngine — Deterministic Rules
@@ -1926,6 +1992,250 @@ class OptimizerAgent:
         # Build minimal default
         return MachineSummary().to_dict()
 
+    # ── Institutional Governance: determine_optimization_mode ──────────
+
+    def determine_optimization_mode(self, machine_summary: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Read Methodology report machine_summary and decide the optimization mode.
+
+        Delegates to the GovernanceEngine but provides a convenient single-call
+        interface that loads the machine_summary from the bus if not supplied.
+
+        Modes
+        -----
+        PARAM_TUNING_ONLY      — normal mode, adjust parameters
+        REGIME_SPECIFIC_TUNING — optimize for weak regime only
+        COST_REDUCTION         — focus on reducing turnover / drag
+        FREEZE_AND_MONITOR     — methodology evidence says don't touch
+        DISABLE_CANDIDATE      — strategy should be retired, not optimized
+
+        Returns
+        -------
+        str
+            The selected governance mode.
+        """
+        if machine_summary is None:
+            machine_summary = self._load_machine_summary()
+        mode = self.governance.determine_mode(machine_summary)
+        log.info("determine_optimization_mode -> %s", mode)
+        return mode
+
+    # ── Institutional Objective Function ──────────────────────────────
+
+    def compute_institutional_objective(
+        self, before_metrics: Dict[str, Any], after_metrics: Dict[str, Any],
+    ) -> float:
+        """
+        Compute the institutional composite objective from before/after metrics.
+
+        Score formula::
+
+            score = (
+                0.30 * delta_net_sharpe +
+                0.20 * delta_robustness +
+                0.15 * delta_stability +
+                0.15 * delta_regime_fitness -
+                0.10 * overfitting_penalty -
+                0.05 * tail_penalty -
+                0.05 * cost_drag_penalty
+            )
+
+        Never approve if institutional quality worsened even if one metric
+        improved — the composite score will be negative in that case.
+
+        Parameters
+        ----------
+        before_metrics : dict
+            Metrics before the optimization change.
+        after_metrics : dict
+            Metrics after the optimization change.
+
+        Returns
+        -------
+        float
+            The composite institutional objective score.
+        """
+        breakdown = compute_objective(before_metrics, after_metrics)
+        return breakdown.composite_score
+
+    # ── Multi-Stage Sandbox Validation ────────────────────────────────
+
+    def validate_candidate(self, params_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate a candidate parameter set through the full 4-stage sandbox.
+
+        Stages
+        ------
+        Stage 0 : Static validation (bounds check, type check)
+        Stage 1 : Quick screen (fast backtest, reject obviously bad)
+        Stage 2 : Institutional sandbox (run methodology lab, check promotion gate)
+        Stage 3 : Promotion decision (compare vs champion)
+
+        Parameters
+        ----------
+        params_dict : dict
+            Mapping of parameter names to proposed new values.
+
+        Returns
+        -------
+        dict
+            Validation result with keys:
+            - candidate_id : str
+            - stage_results : dict  (stage0..stage3 outcomes)
+            - decision : str  (REJECTED / SANDBOX_PASSED / SHADOW_APPROVED / PROMOTED)
+            - institutional_score : float
+            - objective_breakdown : dict
+            - champion_comparison : dict or None
+        """
+        # Build candidate from params_dict
+        params_changed: Dict[str, Tuple[Any, Any]] = {}
+        for param_name, new_val in params_dict.items():
+            current = getattr(self.settings, param_name, None)
+            if current is None:
+                log.warning("validate_candidate: unknown param %s, skipping", param_name)
+                continue
+            params_changed[param_name] = (current, new_val)
+
+        if not params_changed:
+            return {
+                "candidate_id": "",
+                "stage_results": {},
+                "decision": "REJECTED",
+                "reason": "no valid parameters provided",
+                "institutional_score": 0.0,
+                "objective_breakdown": ObjectiveBreakdown().to_dict(),
+                "champion_comparison": None,
+            }
+
+        candidate = OptimizationCandidate(
+            candidate_type="param",
+            source="manual_validation",
+            params_changed=params_changed,
+            rationale=f"Manual validation of {len(params_changed)} parameter(s)",
+        )
+
+        # Get current metrics as baseline
+        current_metrics = _load_backtest_cache() or _run_backtest()
+
+        # Load champion
+        self.champion_mgr.load_champion(current_metrics)
+
+        # Run full pipeline
+        decision, objective, after_metrics = self.sandbox.run_full_pipeline(
+            candidate, current_metrics, _run_backtest,
+        )
+
+        # Stage 3 champion comparison
+        champion_comparison = None
+        if decision != "REJECTED" and after_metrics:
+            champion_status = self.champion_mgr.compare_to_champion(after_metrics)
+            champion_comparison = self.champion_mgr.compare(after_metrics, objective)
+            champion_comparison["status"] = champion_status
+
+            # Override decision based on champion comparison
+            if champion_status == "REJECTED":
+                decision = "REJECTED"
+            elif champion_status == "SHADOW_APPROVED" and decision != "REJECTED":
+                decision = "SHADOW_APPROVED"
+            elif champion_status == "PROMOTED" and decision not in ("REJECTED",):
+                decision = "PROMOTED"
+
+        candidate.evaluation_status = decision
+
+        return {
+            "candidate_id": candidate.candidate_id,
+            "stage_results": dict(candidate.validation_stages),
+            "decision": decision,
+            "institutional_score": objective.composite_score,
+            "objective_breakdown": objective.to_dict(),
+            "champion_comparison": champion_comparison,
+        }
+
+    # ── Machine Summary for Downstream ────────────────────────────────
+
+    def build_machine_summary(
+        self,
+        mode: str,
+        candidates: List[OptimizationCandidate],
+        best_candidate: Optional[OptimizationCandidate],
+        best_objective: Optional[ObjectiveBreakdown],
+        champion_metrics: Dict[str, Any],
+        machine_summary_in: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build the optimizer machine_summary for downstream agents.
+
+        Parameters
+        ----------
+        mode : str
+            Current governance mode.
+        candidates : list[OptimizationCandidate]
+            All candidates evaluated this cycle.
+        best_candidate : OptimizationCandidate or None
+            The best-ranked candidate (may still be REJECTED).
+        best_objective : ObjectiveBreakdown or None
+            Objective breakdown of best candidate.
+        champion_metrics : dict
+            Champion baseline metrics.
+        machine_summary_in : dict
+            Input machine_summary from methodology.
+
+        Returns
+        -------
+        dict
+            Structured machine_summary for bus publication.
+        """
+        n_promoted = sum(1 for c in candidates if c.evaluation_status == "PROMOTED")
+        n_shadowed = sum(1 for c in candidates if c.evaluation_status in ("SHADOW", "SHADOW_APPROVED"))
+        n_rejected = sum(1 for c in candidates if c.evaluation_status == "REJECTED")
+
+        champion_sharpe = float(champion_metrics.get("sharpe", 0))
+
+        best_challenger_sharpe = 0.0
+        if candidates:
+            for c in candidates:
+                if c.objective_breakdown and c.objective_breakdown.composite_score > 0:
+                    # Estimate challenger sharpe from champion + delta
+                    est = champion_sharpe + c.objective_breakdown.delta_net_sharpe
+                    if est > best_challenger_sharpe:
+                        best_challenger_sharpe = est
+
+        obj_delta = best_objective.composite_score if best_objective else 0.0
+
+        # Determine regime repair target from methodology input
+        regime_repair_target = None
+        weakest_regime = machine_summary_in.get("weakest_regime")
+        if weakest_regime:
+            regime_repair_target = weakest_regime
+        elif mode == "REGIME_SPECIFIC_TUNING":
+            regime_repair_target = "UNKNOWN"
+
+        # Determine next recommended action
+        if best_candidate is None or best_candidate.evaluation_status == "REJECTED":
+            next_action = "no_viable_candidates — maintain current champion"
+        elif best_candidate.evaluation_status in ("SHADOW", "SHADOW_APPROVED"):
+            next_action = f"shadow_candidate_{best_candidate.candidate_id} for 5 cycles"
+        elif best_candidate.evaluation_status == "PROMOTED":
+            next_action = f"promoted_{best_candidate.candidate_id} — monitor for regression"
+        else:
+            next_action = "review_candidates_manually"
+
+        return {
+            "optimization_mode": mode,
+            "candidates_tested": len(candidates),
+            "candidates_promoted": n_promoted,
+            "candidates_shadowed": n_shadowed,
+            "candidates_rejected": n_rejected,
+            "champion_sharpe": round(champion_sharpe, 4),
+            "best_challenger_sharpe": round(best_challenger_sharpe, 4),
+            "institutional_objective_delta": round(obj_delta, 4),
+            "regime_repair_target": regime_repair_target,
+            "next_recommended_action": next_action,
+            "governance_rationale": self.governance.rationale,
+            "best_candidate_id": best_candidate.candidate_id if best_candidate else None,
+            "best_candidate_source": best_candidate.source if best_candidate else None,
+        }
+
     # ── GPT Strategy Brainstorming (advisory only) ──────────────────────
 
     def brainstorm_with_gpt(self, context: Dict) -> Dict:
@@ -2010,7 +2320,7 @@ class OptimizerAgent:
         """
         report: Dict[str, Any] = {
             "agent": "optimizer",
-            "version": "2.0-institutional",
+            "version": "3.0-governed-committee",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -2030,6 +2340,21 @@ class OptimizerAgent:
                 log.info("[OPT 3/12] FROZEN — %s. Logging and exiting.", mode)
                 report["outcome"] = "frozen"
                 report["reason"] = self.governance.rationale
+                report["machine_summary"] = {
+                    "optimization_mode": mode,
+                    "candidates_tested": 0,
+                    "candidates_promoted": 0,
+                    "candidates_shadowed": 0,
+                    "candidates_rejected": 0,
+                    "champion_sharpe": round(float(metrics.get("sharpe", 0)), 4),
+                    "best_challenger_sharpe": 0.0,
+                    "institutional_objective_delta": 0.0,
+                    "regime_repair_target": None,
+                    "next_recommended_action": f"frozen:{mode} — no optimization allowed",
+                    "governance_rationale": self.governance.rationale,
+                    "best_candidate_id": None,
+                    "best_candidate_source": None,
+                }
 
                 self.lineage.log_record(OptimizationRecord(
                     candidate_type="none",
@@ -2167,6 +2492,18 @@ class OptimizerAgent:
                 log.info("SHADOW: candidate %s entering shadow monitoring",
                          best_candidate.candidate_id)
                 report["shadow_candidate"] = best_candidate.to_dict()
+
+            # Step 10b: Build machine_summary for downstream agents
+            log.info("[OPT 10b] Building machine_summary for downstream...")
+            opt_machine_summary = self.build_machine_summary(
+                mode=mode,
+                candidates=candidates,
+                best_candidate=best_candidate,
+                best_objective=best_objective,
+                champion_metrics=champion_metrics,
+                machine_summary_in=machine_summary,
+            )
+            report["machine_summary"] = opt_machine_summary
 
             # Step 11: Log to lineage tracker
             log.info("[OPT 11/12] Logging to lineage tracker...")
@@ -2322,7 +2659,7 @@ def run(once: bool = False) -> None:
                 "candidates_evaluated": institutional_result.get("candidates_evaluated", 0),
             })
 
-            # 8. Publish to bus
+            # 8. Publish to bus (with machine_summary for downstream)
             bus.publish("agent_optimizer", {
                 "status": "completed",
                 "outcome": outcome,
@@ -2334,6 +2671,7 @@ def run(once: bool = False) -> None:
                 "best_candidate": institutional_result.get("best_candidate", {}),
                 "candidates_generated": institutional_result.get("candidates_generated", 0),
                 "campaign_summary": institutional_result.get("campaign_summary", {}),
+                "machine_summary": institutional_result.get("machine_summary", {}),
                 "math_proposals_used": len(math_proposals),
             })
 
