@@ -13,12 +13,13 @@ agents/math/llm_bridge.py
 """
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 # ── נתיבי שורש ─────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -302,6 +303,171 @@ class DualLLMBridge:
             score += 1
 
         return score
+
+
+    # ── Formula Extraction — multiple code blocks ─────────────────────────
+    def extract_multiple_formulas(self, response_text: str) -> List[Dict[str, Any]]:
+        """
+        Parse LLM response and extract all Python code blocks as candidate formulas.
+
+        For each code block:
+          - Extract the raw code
+          - Detect function signatures (def ...)
+          - Tag the formula family based on keyword heuristics
+
+        Returns
+        -------
+        list[dict]
+            Each dict has keys: code, family, description, has_function.
+        """
+        blocks = re.findall(r"```python\s*\n(.*?)```", response_text, re.DOTALL)
+        if not blocks:
+            # Fallback: generic code fences
+            blocks = re.findall(r"```\s*\n(.*?)```", response_text, re.DOTALL)
+
+        formulas: List[Dict[str, Any]] = []
+        for raw_code in blocks:
+            code = raw_code.strip()
+            if not code:
+                continue
+
+            # Detect function signature
+            func_match = re.search(r"def\s+(\w+)\s*\(", code)
+            has_function = func_match is not None
+            func_name = func_match.group(1) if func_match else ""
+
+            # Tag formula family by keywords in the code
+            family = self._detect_formula_family(code)
+
+            # Build a short description from the first docstring or comment
+            description = ""
+            doc_match = re.search(r'"""(.*?)"""', code, re.DOTALL)
+            if doc_match:
+                description = doc_match.group(1).strip().split("\n")[0][:200]
+            elif func_name:
+                description = f"Function: {func_name}"
+
+            formulas.append({
+                "code": code,
+                "family": family,
+                "description": description,
+                "has_function": has_function,
+                "function_name": func_name,
+            })
+
+        return formulas
+
+    @staticmethod
+    def _detect_formula_family(code: str) -> str:
+        """Heuristic family detection from code keywords."""
+        code_lower = code.lower()
+        # Order matters — check specific patterns first
+        family_keywords = [
+            ("logistic", ["sigmoid", "1.0 / (1.0 + ", "1/(1+exp", "logistic"]),
+            ("tanh", ["tanh", "np.tanh", "math.tanh"]),
+            ("probit", ["erf", "probit", "norm.cdf"]),
+            ("gaussian", ["exp(-((", "gaussian", "bell", "normal"]),
+            ("beta_like", ["beta", "x**a", "x ** a"]),
+            ("piecewise", ["np.where", "np.clip", "if ", "piecewise"]),
+            ("exponential", ["exp(-k", "exp(-lambda", "exponential"]),
+        ]
+        for family, keywords in family_keywords:
+            if any(kw in code_lower for kw in keywords):
+                return family
+        return "unknown"
+
+    def score_response_quality(self, response: str) -> Dict[str, Any]:
+        """
+        Assess the *response quality* of an LLM answer (NOT mathematical validity).
+
+        Scores four dimensions:
+          - narrative_quality: presence of mathematical reasoning / explanation
+          - code_quality:      parseable Python with no syntax errors
+          - specificity:       concrete parameter values vs vague suggestions
+          - structure:         organized output (headings, JSON, numbered steps)
+
+        NOTE: This is NOT mathematical validity — that is the validation lab's job.
+
+        Returns
+        -------
+        dict
+            {narrative_quality, code_quality, specificity, structure,
+             overall, details}
+        """
+        details: List[str] = []
+
+        # 1. Narrative quality — math reasoning terms
+        reasoning_terms = [
+            "derivative", "proof", "monoton", "bounded", "limit",
+            "convex", "concave", "continuous", "differentiable",
+            "asymptot", "converge", "gradient", "inflection",
+            "domain", "codomain", "range", "injective",
+        ]
+        reasoning_hits = sum(1 for t in reasoning_terms if t.lower() in response.lower())
+        narrative_quality = min(1.0, reasoning_hits / 5.0)
+        if reasoning_hits == 0:
+            details.append("No mathematical reasoning detected")
+
+        # 2. Code quality — parseable Python
+        code_blocks = re.findall(r"```python\s*\n(.*?)```", response, re.DOTALL)
+        code_quality = 0.0
+        if code_blocks:
+            parseable = 0
+            for block in code_blocks:
+                try:
+                    ast.parse(block.strip())
+                    parseable += 1
+                except SyntaxError:
+                    details.append(f"Syntax error in code block ({block[:40]}...)")
+            code_quality = parseable / len(code_blocks) if code_blocks else 0.0
+        else:
+            details.append("No Python code blocks found")
+
+        # 3. Specificity — concrete numbers
+        numbers = re.findall(r"(?<!\w)\d+\.?\d*(?!\w)", response)
+        has_params = any(kw in response.lower() for kw in [
+            "k=", "k =", "x0=", "x0 =", "sigma=", "mu=", "threshold=",
+            "alpha=", "beta=", "lambda=",
+        ])
+        specificity = 0.0
+        if has_params:
+            specificity += 0.5
+        if len(numbers) >= 5:
+            specificity += 0.3
+        elif len(numbers) >= 2:
+            specificity += 0.15
+        # JSON block with parameter_values
+        if '"parameter_values"' in response or "'parameter_values'" in response:
+            specificity += 0.2
+        specificity = min(1.0, specificity)
+        if specificity < 0.3:
+            details.append("Vague — lacks concrete parameter values")
+
+        # 4. Structure
+        structure_signals = [
+            "## " in response,
+            "```json" in response,
+            bool(re.search(r"\n\d+\.\s", response)),
+            "- " in response,
+        ]
+        structure = sum(structure_signals) / len(structure_signals)
+
+        overall = round(
+            0.30 * narrative_quality
+            + 0.30 * code_quality
+            + 0.25 * specificity
+            + 0.15 * structure,
+            3,
+        )
+
+        return {
+            "narrative_quality": round(narrative_quality, 3),
+            "code_quality": round(code_quality, 3),
+            "specificity": round(specificity, 3),
+            "structure": round(structure, 3),
+            "overall": overall,
+            "details": details,
+        }
 
 
 # ── CLI — בדיקה מהירה ────────────────────────────────────────────────────────

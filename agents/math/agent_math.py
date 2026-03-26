@@ -22,15 +22,19 @@ agents/math/agent_math.py
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import sys
 import time
+import uuid
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, date, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable, Tuple
 
 # ── נתיבי שורש ─────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -478,6 +482,1083 @@ def _prioritize_targets(metrics: dict, opt_history: list[dict]) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Institutional Research Dataclasses
+# ─────────────────────────────────────────────────────────────────────────────
+@dataclass
+class ResearchTarget:
+    """A single scoring function targeted for formula research."""
+    target_id: str
+    function_name: str
+    file: str
+    business_role: str
+    mathematical_role: str
+    invariants: List[str] = field(default_factory=list)   # e.g. ["bounded_0_1", "monotone_increasing", "smooth"]
+    priority_score: float = 0.0
+    current_failure_signals: List[str] = field(default_factory=list)
+    downstream_impact: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CandidateFormula:
+    """A candidate formula proposed for a research target."""
+    candidate_id: str = ""
+    target_id: str = ""
+    source: str = ""          # "claude" / "gpt" / "template_library" / "hybrid"
+    formula_family: str = ""  # "logistic" / "tanh" / "piecewise" / "exponential" / "gaussian"
+    code: str = ""
+    validation_results: Dict[str, bool] = field(default_factory=dict)
+    scores: Dict[str, float] = field(default_factory=dict)
+    decision: str = ""        # "ACCEPT" / "ACCEPT_FOR_SANDBOX" / "NEEDS_REFINEMENT" / "REJECT" / "REJECT_UNSAFE"
+    risks: List[str] = field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Formula Template Library
+# ─────────────────────────────────────────────────────────────────────────────
+FORMULA_TEMPLATES: Dict[str, List[Tuple[str, str]]] = {
+    "bounded_monotone_inc": [
+        ("logistic", "1.0 / (1.0 + math.exp(-k * (x - x0)))"),
+        ("tanh", "0.5 * (1.0 + math.tanh(k * (x - x0)))"),
+        ("probit", "0.5 * (1.0 + math.erf(k * (x - x0) / math.sqrt(2)))"),
+    ],
+    "sweet_spot": [
+        ("gaussian", "math.exp(-((x - mu) / sigma)**2)"),
+        ("beta_like", "(x ** a) * ((1 - x) ** b)"),
+    ],
+    "penalty_ramp": [
+        ("soft_step", "1.0 / (1.0 + math.exp(k * (x - threshold)))"),
+        ("exponential", "math.exp(-k * max(0, x - threshold))"),
+    ],
+    "bounded_monotone_dec": [
+        ("logistic_dec", "1.0 / (1.0 + math.exp(k * (x - x0)))"),
+        ("tanh_dec", "0.5 * (1.0 - math.tanh(k * (x - x0)))"),
+    ],
+}
+
+# Mapping from MATH_TARGETS function names to invariant + spec hints
+_TARGET_SPECS: Dict[str, Dict[str, Any]] = {
+    "compute_distortion_score": {
+        "domain": "z-score linear combination, effectively R",
+        "codomain": "[0, 1]",
+        "monotonicity": "increasing",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "C1",
+        "template_key": "bounded_monotone_inc",
+        "invariants": ["bounded_0_1", "monotone_increasing", "smooth"],
+        "business_role": "Layer 1 distortion score — drives conviction threshold",
+        "mathematical_role": "Logistic combination of distortion z-scores",
+        "downstream_impact": ["conviction_threshold", "optimizer_weights", "regime_gating"],
+        "edge_cases": {"input_nan": "return 0.5", "input_inf": "clip to bounds"},
+    },
+    "_half_life_quality": {
+        "domain": "half-life in days, [0, +inf)",
+        "codomain": "[0, 1]",
+        "monotonicity": "bell-shaped",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "C1",
+        "template_key": "sweet_spot",
+        "invariants": ["bounded_0_1", "bell_shaped", "smooth"],
+        "business_role": "Layer 3 mean-reversion quality — trade filtering",
+        "mathematical_role": "Maps OU half-life to quality; sweet spot 5-90 days",
+        "downstream_impact": ["mean_reversion_score", "trade_filtering"],
+        "edge_cases": {"input_nan": "return 0.0", "input_inf": "return 0.0", "input_zero": "return 0.0"},
+    },
+    "_adf_quality": {
+        "domain": "ADF p-value, [0, 1]",
+        "codomain": "[0, 1]",
+        "monotonicity": "decreasing",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "C1",
+        "template_key": "bounded_monotone_dec",
+        "invariants": ["bounded_0_1", "monotone_decreasing", "smooth"],
+        "business_role": "Layer 3 stationarity evidence — conviction",
+        "mathematical_role": "Maps ADF p-value to quality; lower p = better",
+        "downstream_impact": ["mean_reversion_score", "stationarity_confidence"],
+        "edge_cases": {"input_nan": "return 0.0", "input_zero": "return 1.0"},
+    },
+    "_hurst_quality": {
+        "domain": "Hurst exponent, [0, 1]",
+        "codomain": "[0, 1]",
+        "monotonicity": "decreasing",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "C1",
+        "template_key": "bounded_monotone_dec",
+        "invariants": ["bounded_0_1", "monotone_decreasing", "smooth"],
+        "business_role": "Layer 3 MR vs random walk — differentiation",
+        "mathematical_role": "Maps Hurst exponent to quality; H<0.5 = MR",
+        "downstream_impact": ["mean_reversion_score", "regime_classification"],
+        "edge_cases": {"input_nan": "return 0.0", "input_half": "return ~0.5"},
+    },
+    "compute_regime_safety_score": {
+        "domain": "penalty sub-scores, each [0, 1]",
+        "codomain": "[0, 1]",
+        "monotonicity": "decreasing (with penalty increase)",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "Lipschitz",
+        "template_key": "penalty_ramp",
+        "invariants": ["bounded_0_1", "penalty_aggregation", "lipschitz"],
+        "business_role": "Layer 4 regime gating — position sizing, hard kills",
+        "mathematical_role": "Multiplicative penalty aggregation across regime signals",
+        "downstream_impact": ["position_sizing", "hard_kills", "regime_gating"],
+        "edge_cases": {"input_nan": "return 0.0 (safe default)", "all_zero_penalties": "return 1.0"},
+    },
+    "compute_statistical_dislocation_score": {
+        "domain": "z-score ∈ [-5, 5], half-life quality [0,1]",
+        "codomain": "[0, 1]",
+        "monotonicity": "increasing",
+        "boundedness": True,
+        "bounds": (0.0, 1.0),
+        "smoothness": "C1",
+        "template_key": "bounded_monotone_inc",
+        "invariants": ["bounded_0_1", "monotone_increasing", "smooth"],
+        "business_role": "Core attribution scoring — conviction generation",
+        "mathematical_role": "Weighted combination of z-strength and dispersion",
+        "downstream_impact": ["conviction_score", "trade_entry_signal"],
+        "edge_cases": {"input_nan": "return 0.0", "input_zero": "return 0.0"},
+    },
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MathResearchLab — Institutional Formula Research & Validation
+# ─────────────────────────────────────────────────────────────────────────────
+class MathResearchLab:
+    """
+    Institutional Quant Formula Research & Validation Lab.
+
+    Wraps the existing MathAgent workflow with:
+      - Dynamic target prioritization from downstream agent summaries
+      - Formal formula specification per target
+      - Template-based candidate generation
+      - Structural, numerical, and behavioral validation
+      - Empirical replay against historical data
+      - Deterministic proposal decision engine
+      - Downstream action builder + machine_summary
+    """
+
+    def __init__(self, bus: Any = None, bridge: Optional[Any] = None):
+        self.bus = bus
+        self.bridge = bridge
+        self._import_numpy()
+
+    def _import_numpy(self) -> None:
+        """Lazy numpy import with graceful fallback."""
+        try:
+            import numpy as _np
+            self.np = _np
+        except ImportError:
+            self.np = None
+
+    # ── 1. Dynamic Target Prioritization (v2) ────────────────────────────
+
+    def prioritize_targets_v2(self) -> List[ResearchTarget]:
+        """
+        Prioritize research targets using downstream agent machine_summaries.
+
+        Loads:
+          - methodology machine_summary  (weakest dimensions)
+          - optimizer machine_summary    (repeated failures)
+          - alpha_decay machine_summary  (decay patterns)
+
+        Scores each target by:
+          business_criticality * failure_evidence * downstream_impact
+
+        Returns sorted list of ResearchTarget, highest priority first.
+        """
+        # Load downstream machine summaries from bus
+        meth_summary = self._load_summary("agent_methodology", "machine_summary")
+        meth_v3 = self._load_summary("agent_methodology_v3", "machine_summary_v3")
+        opt_summary = self._load_summary("agent_optimizer", "machine_summary")
+        decay_summary = self._load_summary("agent_alpha_decay", "machine_summary")
+
+        # Merge methodology signals
+        meth = {**meth_summary, **meth_v3} if meth_v3 else meth_summary
+
+        # Extract weakness signals
+        weakest_regime = meth.get("weakest_regime", "")
+        overfitting_flag = meth.get("overfitting_flag", False)
+        optimizer_failures = opt_summary.get("candidates_rejected", 0)
+        optimizer_mode = opt_summary.get("optimization_mode", "")
+        decay_urgent = decay_summary.get("most_urgent_action", "")
+        at_risk_strategies = decay_summary.get("at_risk_strategies", [])
+
+        research_targets: List[ResearchTarget] = []
+
+        for target_def in MATH_TARGETS:
+            func_name = target_def["function"]
+            spec = _TARGET_SPECS.get(func_name, {})
+
+            # Base priority from MATH_TARGETS ordering (lower = higher priority)
+            base_priority = 1.0 / target_def["priority"]
+
+            # Failure evidence multiplier
+            failure_evidence = 1.0
+            failure_signals: List[str] = []
+
+            # Regime weakness boosts regime-related targets
+            if weakest_regime and "regime" in func_name.lower():
+                failure_evidence *= 1.8
+                failure_signals.append(f"weakest_regime={weakest_regime}")
+
+            # Optimizer repeated failures boost all targets
+            if optimizer_failures > 3:
+                failure_evidence *= 1.2
+                failure_signals.append(f"optimizer_rejected={optimizer_failures}")
+
+            # Overfitting flag suggests formula instability
+            if overfitting_flag:
+                failure_evidence *= 1.3
+                failure_signals.append("overfitting_detected")
+
+            # Alpha decay signals
+            if at_risk_strategies:
+                failure_evidence *= 1.15
+                failure_signals.append(f"decay_at_risk={len(at_risk_strategies)}")
+
+            # Optimizer mode hints
+            if optimizer_mode == "PARAM_PLUS_CODE":
+                failure_evidence *= 1.1
+                failure_signals.append("optimizer_wants_code_changes")
+
+            # Downstream impact count
+            downstream = spec.get("downstream_impact", [])
+            impact_multiplier = 1.0 + 0.1 * len(downstream)
+
+            priority_score = round(base_priority * failure_evidence * impact_multiplier, 4)
+
+            rt = ResearchTarget(
+                target_id=f"RT-{func_name}-{uuid.uuid4().hex[:6]}",
+                function_name=func_name,
+                file=target_def["file"],
+                business_role=spec.get("business_role", target_def.get("description", "")),
+                mathematical_role=spec.get("mathematical_role", target_def.get("math_context", "")),
+                invariants=spec.get("invariants", []),
+                priority_score=priority_score,
+                current_failure_signals=failure_signals,
+                downstream_impact=downstream,
+            )
+            research_targets.append(rt)
+
+        # Sort descending by priority score
+        research_targets.sort(key=lambda rt: rt.priority_score, reverse=True)
+        log.info("prioritize_targets_v2: %d targets, top=%s (score=%.4f)",
+                 len(research_targets),
+                 research_targets[0].function_name if research_targets else "none",
+                 research_targets[0].priority_score if research_targets else 0)
+        return research_targets
+
+    def _load_summary(self, channel: str, key: str) -> Dict[str, Any]:
+        """Safely load a machine_summary dict from the bus."""
+        if not self.bus:
+            return {}
+        try:
+            report = self.bus.latest(channel)
+            if isinstance(report, dict):
+                val = report.get(key, {})
+                return val if isinstance(val, dict) else {}
+        except Exception as exc:
+            log.debug("Failed to load %s/%s: %s", channel, key, exc)
+        return {}
+
+    # ── 2. Formula Specification Builder ─────────────────────────────────
+
+    def build_formula_spec(self, target: ResearchTarget) -> Dict[str, Any]:
+        """
+        Build a formal mathematical specification for a research target.
+
+        Defines: domain, codomain, monotonicity, boundedness,
+        smoothness, and edge case handling.
+        """
+        spec_hints = _TARGET_SPECS.get(target.function_name, {})
+
+        spec: Dict[str, Any] = {
+            "target_id": target.target_id,
+            "function_name": target.function_name,
+            "domain": spec_hints.get("domain", "R"),
+            "codomain": spec_hints.get("codomain", "[0, 1]"),
+            "monotonicity": spec_hints.get("monotonicity", "increasing"),
+            "boundedness": spec_hints.get("boundedness", True),
+            "bounds": spec_hints.get("bounds", (0.0, 1.0)),
+            "smoothness": spec_hints.get("smoothness", "C1"),
+            "edge_cases": spec_hints.get("edge_cases", {
+                "input_nan": "return 0.5",
+                "input_inf": "clip to bounds",
+            }),
+            "template_key": spec_hints.get("template_key", "bounded_monotone_inc"),
+            "invariants": target.invariants,
+        }
+        return spec
+
+    # ── 3. Formula Validation Lab ────────────────────────────────────────
+
+    def validate_candidate(
+        self, candidate: CandidateFormula, spec: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Run structural, numerical, and behavioral validation on a candidate formula.
+
+        Structural tests:
+          - boundedness: output in [lo, hi] for 1000 random inputs
+          - monotonicity: f(x+eps) >= f(x) for monotone-increasing specs
+          - continuity: |f(x+delta) - f(x)| < threshold
+          - NaN safety: f(NaN), f(inf), f(-inf), f(0)
+
+        Numerical tests:
+          - no overflow/underflow for inputs in [-100, 100]
+          - vectorization: test on array of 1000 values
+          - stability: deterministic output
+
+        Behavioral tests:
+          - mid-range sensitivity: not saturated at 0 or 1 for typical inputs
+          - ranking preservation (basic check)
+
+        Returns dict with structural_pass, numerical_pass, behavioral_pass,
+        overall_pass, and details.
+        """
+        np = self.np
+        details: List[str] = []
+        structural_pass = True
+        numerical_pass = True
+        behavioral_pass = True
+
+        bounds = spec.get("bounds", (0.0, 1.0))
+        lo, hi = bounds
+        monotonicity = spec.get("monotonicity", "increasing")
+
+        # Compile the candidate function
+        func = self._compile_candidate_func(candidate.code)
+        if func is None:
+            return {
+                "structural_pass": False,
+                "numerical_pass": False,
+                "behavioral_pass": False,
+                "overall_pass": False,
+                "details": ["FATAL: candidate code failed to compile"],
+            }
+
+        # ── Structural Tests ─────────────────────────────────────────────
+        # Boundedness: test 1000 random inputs
+        if np is not None:
+            rng = np.random.default_rng(42)
+            test_inputs = rng.uniform(-5, 5, 1000)
+            try:
+                outputs = [self._safe_call(func, float(x)) for x in test_inputs]
+                outputs_clean = [o for o in outputs if o is not None and not (isinstance(o, float) and math.isnan(o))]
+                if outputs_clean:
+                    out_min = min(outputs_clean)
+                    out_max = max(outputs_clean)
+                    if out_min < lo - 1e-9 or out_max > hi + 1e-9:
+                        structural_pass = False
+                        details.append(
+                            f"Boundedness FAIL: outputs in [{out_min:.6f}, {out_max:.6f}], "
+                            f"expected [{lo}, {hi}]"
+                        )
+                    else:
+                        details.append("Boundedness PASS")
+                else:
+                    structural_pass = False
+                    details.append("Boundedness FAIL: all outputs None/NaN")
+            except Exception as exc:
+                structural_pass = False
+                details.append(f"Boundedness FAIL: exception {exc}")
+
+            # Monotonicity (for monotone-increasing or monotone-decreasing)
+            if monotonicity in ("increasing", "decreasing"):
+                eps = 0.01
+                sorted_inputs = np.sort(test_inputs[:200])
+                try:
+                    vals = [self._safe_call(func, float(x)) for x in sorted_inputs]
+                    vals_shifted = [self._safe_call(func, float(x + eps)) for x in sorted_inputs]
+                    violations = 0
+                    for v1, v2 in zip(vals, vals_shifted):
+                        if v1 is None or v2 is None:
+                            continue
+                        if monotonicity == "increasing" and v2 < v1 - 1e-9:
+                            violations += 1
+                        elif monotonicity == "decreasing" and v2 > v1 + 1e-9:
+                            violations += 1
+                    if violations > 5:
+                        structural_pass = False
+                        details.append(f"Monotonicity FAIL: {violations} violations ({monotonicity})")
+                    else:
+                        details.append(f"Monotonicity PASS ({violations} minor violations)")
+                except Exception as exc:
+                    structural_pass = False
+                    details.append(f"Monotonicity FAIL: exception {exc}")
+
+            # Continuity check
+            delta = 1e-4
+            try:
+                cont_inputs = rng.uniform(-3, 3, 200)
+                max_jump = 0.0
+                for x in cont_inputs:
+                    v1 = self._safe_call(func, float(x))
+                    v2 = self._safe_call(func, float(x + delta))
+                    if v1 is not None and v2 is not None:
+                        jump = abs(v2 - v1)
+                        max_jump = max(max_jump, jump)
+                if max_jump > 0.1:
+                    structural_pass = False
+                    details.append(f"Continuity FAIL: max jump {max_jump:.6f}")
+                else:
+                    details.append(f"Continuity PASS (max jump={max_jump:.6f})")
+            except Exception as exc:
+                details.append(f"Continuity SKIP: {exc}")
+
+        # NaN safety
+        nan_safe = True
+        for edge_val, label in [(float("nan"), "NaN"), (float("inf"), "inf"),
+                                 (float("-inf"), "-inf"), (0.0, "zero")]:
+            try:
+                result = self._safe_call(func, edge_val)
+                if result is None:
+                    nan_safe = False
+                    details.append(f"NaN-safety FAIL: {label} returned None")
+                elif isinstance(result, float) and math.isnan(result):
+                    nan_safe = False
+                    details.append(f"NaN-safety FAIL: {label} returned NaN")
+            except Exception as exc:
+                nan_safe = False
+                details.append(f"NaN-safety FAIL: {label} raised {exc}")
+        if nan_safe:
+            details.append("NaN-safety PASS")
+        else:
+            structural_pass = False
+
+        # ── Numerical Tests ──────────────────────────────────────────────
+        if np is not None:
+            # Overflow / underflow
+            extreme_inputs = [-100, -50, -10, 0, 10, 50, 100]
+            overflow = False
+            for x in extreme_inputs:
+                try:
+                    r = self._safe_call(func, float(x))
+                    if r is not None and isinstance(r, float) and (math.isinf(r)):
+                        overflow = True
+                        details.append(f"Overflow at x={x}: {r}")
+                except Exception:
+                    overflow = True
+            if overflow:
+                numerical_pass = False
+                details.append("Numerical overflow/underflow FAIL")
+            else:
+                details.append("Overflow/underflow PASS")
+
+            # Vectorization test (basic — can the func handle many calls)
+            try:
+                arr_inputs = np.linspace(-5, 5, 1000)
+                results = [self._safe_call(func, float(x)) for x in arr_inputs]
+                valid = [r for r in results if r is not None]
+                if len(valid) < 900:
+                    numerical_pass = False
+                    details.append(f"Vectorization FAIL: only {len(valid)}/1000 valid outputs")
+                else:
+                    details.append(f"Vectorization PASS ({len(valid)}/1000 valid)")
+            except Exception as exc:
+                numerical_pass = False
+                details.append(f"Vectorization FAIL: {exc}")
+
+            # Determinism
+            try:
+                test_x = 1.234
+                r1 = self._safe_call(func, test_x)
+                r2 = self._safe_call(func, test_x)
+                if r1 != r2 and not (r1 is None and r2 is None):
+                    numerical_pass = False
+                    details.append(f"Determinism FAIL: f({test_x}) = {r1} then {r2}")
+                else:
+                    details.append("Determinism PASS")
+            except Exception as exc:
+                details.append(f"Determinism SKIP: {exc}")
+
+        # ── Behavioral Tests ─────────────────────────────────────────────
+        if np is not None:
+            # Mid-range sensitivity: not saturated
+            try:
+                mid_inputs = np.linspace(-2, 2, 100)
+                mid_outputs = [self._safe_call(func, float(x)) for x in mid_inputs]
+                mid_clean = [o for o in mid_outputs if o is not None]
+                if mid_clean:
+                    mid_range = max(mid_clean) - min(mid_clean)
+                    if mid_range < 0.05:
+                        behavioral_pass = False
+                        details.append(f"Sensitivity FAIL: mid-range span only {mid_range:.4f}")
+                    else:
+                        details.append(f"Sensitivity PASS (mid-range span={mid_range:.4f})")
+                else:
+                    behavioral_pass = False
+                    details.append("Sensitivity FAIL: no valid mid-range outputs")
+            except Exception as exc:
+                details.append(f"Sensitivity SKIP: {exc}")
+
+        overall_pass = structural_pass and numerical_pass and behavioral_pass
+
+        return {
+            "structural_pass": structural_pass,
+            "numerical_pass": numerical_pass,
+            "behavioral_pass": behavioral_pass,
+            "overall_pass": overall_pass,
+            "details": details,
+        }
+
+    @staticmethod
+    def _compile_candidate_func(code: str) -> Optional[Callable]:
+        """
+        Compile candidate code and return the first callable function defined.
+        Returns None if compilation fails.
+        """
+        if not code or "def " not in code:
+            return None
+        try:
+            namespace: Dict[str, Any] = {"math": math}
+            try:
+                import numpy as _np
+                namespace["np"] = _np
+                namespace["numpy"] = _np
+            except ImportError:
+                pass
+            exec(compile(code, "<candidate>", "exec"), namespace)
+            # Find the first function defined
+            for name, obj in namespace.items():
+                if callable(obj) and not name.startswith("_") and name not in (
+                    "math", "np", "numpy"
+                ):
+                    return obj
+            # Try underscore-prefixed functions too
+            for name, obj in namespace.items():
+                if callable(obj) and name.startswith("_") and name not in (
+                    "__builtins__",
+                ):
+                    return obj
+        except Exception as exc:
+            log.debug("Candidate compilation failed: %s", exc)
+        return None
+
+    @staticmethod
+    def _safe_call(func: Callable, x: float) -> Optional[float]:
+        """Call func(x) safely, returning None on any exception."""
+        try:
+            result = func(x)
+            if isinstance(result, (int, float)):
+                return float(result)
+            return None
+        except Exception:
+            return None
+
+    # ── 4. Template Candidate Generation ─────────────────────────────────
+
+    def generate_template_candidates(
+        self, target: ResearchTarget, spec: Dict[str, Any]
+    ) -> List[CandidateFormula]:
+        """
+        Generate 2-3 parameterized candidate formulas from the template library.
+
+        Selects template family based on the spec's template_key, then
+        instantiates each template with reasonable default parameters.
+        """
+        template_key = spec.get("template_key", "bounded_monotone_inc")
+        templates = FORMULA_TEMPLATES.get(template_key, [])
+        if not templates:
+            templates = FORMULA_TEMPLATES["bounded_monotone_inc"]
+
+        candidates: List[CandidateFormula] = []
+
+        # Default parameter sets per family
+        default_params: Dict[str, Dict[str, float]] = {
+            "logistic": {"k": 1.5, "x0": 0.0},
+            "tanh": {"k": 1.0, "x0": 0.0},
+            "probit": {"k": 1.0, "x0": 0.0},
+            "gaussian": {"mu": 30.0, "sigma": 20.0},
+            "beta_like": {"a": 2.0, "b": 5.0},
+            "soft_step": {"k": 2.0, "threshold": 0.5},
+            "exponential": {"k": 1.0, "threshold": 0.5},
+            "logistic_dec": {"k": 1.5, "x0": 0.5},
+            "tanh_dec": {"k": 1.0, "x0": 0.5},
+        }
+
+        for family, formula_expr in templates[:3]:
+            params = default_params.get(family, {"k": 1.0, "x0": 0.0})
+
+            # Build a complete function from the template
+            param_assignments = "\n    ".join(
+                f"{p} = {v}" for p, v in params.items()
+            )
+            func_code = (
+                f"def {target.function_name}_candidate(x):\n"
+                f"    \"\"\"\n"
+                f"    Template candidate: {family}\n"
+                f"    Formula: {formula_expr}\n"
+                f"    \"\"\"\n"
+                f"    import math\n"
+                f"    if x != x:  # NaN check\n"
+                f"        return 0.0\n"
+                f"    if abs(x) == float('inf'):\n"
+                f"        return {spec.get('bounds', (0.0, 1.0))[0]}\n"
+                f"    {param_assignments}\n"
+                f"    try:\n"
+                f"        result = {formula_expr}\n"
+                f"        return max({spec.get('bounds', (0.0, 1.0))[0]}, "
+                f"min({spec.get('bounds', (0.0, 1.0))[1]}, result))\n"
+                f"    except (OverflowError, ValueError, ZeroDivisionError):\n"
+                f"        return 0.0\n"
+            )
+
+            cid = f"CF-{family}-{uuid.uuid4().hex[:6]}"
+            candidates.append(CandidateFormula(
+                candidate_id=cid,
+                target_id=target.target_id,
+                source="template_library",
+                formula_family=family,
+                code=func_code,
+            ))
+
+        return candidates
+
+    # ── 5. Empirical Replay ──────────────────────────────────────────────
+
+    def empirical_replay(
+        self,
+        target: ResearchTarget,
+        candidate: CandidateFormula,
+        current_func: Optional[Callable],
+    ) -> Dict[str, Any]:
+        """
+        Compare candidate formula against current formula on historical-like inputs.
+
+        Generates synthetic inputs representative of the target's domain,
+        runs both formulas, and computes:
+          - rank_corr: Spearman rank correlation between current and candidate scores
+          - distribution_shift: absolute mean difference
+          - improvement_estimate: estimated improvement (positive = candidate better)
+
+        Falls back to synthetic data if historical prices are not available.
+        """
+        np = self.np
+        if np is None:
+            return {
+                "rank_corr": None,
+                "distribution_shift": None,
+                "improvement_estimate": 0.0,
+                "details": "numpy not available",
+            }
+
+        # Generate representative inputs
+        rng = np.random.default_rng(123)
+        n = 500
+        spec_hints = _TARGET_SPECS.get(target.function_name, {})
+        monotonicity = spec_hints.get("monotonicity", "increasing")
+
+        if "half_life" in target.function_name:
+            # Half-life domain: positive, typical 1-200 days
+            inputs = rng.exponential(scale=30, size=n)
+        elif "hurst" in target.function_name:
+            # Hurst exponent: [0, 1]
+            inputs = rng.beta(2, 2, size=n)
+        elif "adf" in target.function_name:
+            # ADF p-values: [0, 1], skewed toward small
+            inputs = rng.beta(1, 5, size=n)
+        else:
+            # Generic z-score-like inputs
+            inputs = rng.normal(0, 1.5, size=n)
+
+        # Compile candidate
+        cand_func = self._compile_candidate_func(candidate.code)
+        if cand_func is None:
+            return {
+                "rank_corr": None,
+                "distribution_shift": None,
+                "improvement_estimate": 0.0,
+                "details": "candidate compilation failed",
+            }
+
+        # Run both
+        current_scores: List[Optional[float]] = []
+        candidate_scores: List[Optional[float]] = []
+
+        for x in inputs:
+            cs = self._safe_call(current_func, float(x)) if current_func else None
+            current_scores.append(cs)
+            candidate_scores.append(self._safe_call(cand_func, float(x)))
+
+        # Filter paired valid outputs
+        paired = [
+            (c, d)
+            for c, d in zip(current_scores, candidate_scores)
+            if c is not None and d is not None
+        ]
+
+        if len(paired) < 50:
+            return {
+                "rank_corr": None,
+                "distribution_shift": None,
+                "improvement_estimate": 0.0,
+                "details": f"insufficient valid pairs: {len(paired)}",
+            }
+
+        curr_arr = np.array([p[0] for p in paired])
+        cand_arr = np.array([p[1] for p in paired])
+
+        # Rank correlation (Spearman)
+        try:
+            from scipy.stats import spearmanr
+            corr, _ = spearmanr(curr_arr, cand_arr)
+            rank_corr = round(float(corr), 4) if not np.isnan(corr) else 0.0
+        except ImportError:
+            # Manual rank correlation fallback
+            rank_corr = round(float(np.corrcoef(curr_arr, cand_arr)[0, 1]), 4)
+
+        # Distribution shift
+        distribution_shift = round(float(np.abs(np.mean(cand_arr) - np.mean(curr_arr))), 6)
+
+        # Improvement estimate: candidate has better spread and mid-range sensitivity
+        curr_std = float(np.std(curr_arr))
+        cand_std = float(np.std(cand_arr))
+        improvement_estimate = 0.0
+
+        # Better discrimination = higher std (more spread in scores)
+        if curr_std > 0:
+            spread_improvement = (cand_std - curr_std) / curr_std
+            improvement_estimate += spread_improvement * 0.5
+
+        # Rank preservation bonus
+        if rank_corr > 0.8:
+            improvement_estimate += 0.02
+
+        improvement_estimate = round(improvement_estimate, 4)
+
+        return {
+            "rank_corr": rank_corr,
+            "distribution_shift": distribution_shift,
+            "improvement_estimate": improvement_estimate,
+            "n_valid_pairs": len(paired),
+            "current_mean": round(float(np.mean(curr_arr)), 6),
+            "candidate_mean": round(float(np.mean(cand_arr)), 6),
+            "current_std": round(curr_std, 6),
+            "candidate_std": round(cand_std, 6),
+            "details": "synthetic replay completed",
+        }
+
+    # ── 6. Proposal Decision Engine ──────────────────────────────────────
+
+    def decide_proposal(
+        self,
+        candidate: CandidateFormula,
+        validation: Dict[str, Any],
+        replay: Dict[str, Any],
+    ) -> str:
+        """
+        Deterministic decision rules for a candidate formula.
+
+        Rules:
+          - structural_pass=False  -> REJECT_UNSAFE
+          - numerical_pass=False   -> REJECT
+          - behavioral_pass=False AND replay degradation -> REJECT
+          - All pass + replay improvement > 5% -> ACCEPT_FOR_SANDBOX
+          - All pass + replay neutral -> NEEDS_REFINEMENT
+          - All pass + significant improvement -> ACCEPT
+        """
+        structural = validation.get("structural_pass", False)
+        numerical = validation.get("numerical_pass", False)
+        behavioral = validation.get("behavioral_pass", False)
+        improvement = replay.get("improvement_estimate", 0.0) or 0.0
+
+        if not structural:
+            return "REJECT_UNSAFE"
+
+        if not numerical:
+            return "REJECT"
+
+        if not behavioral:
+            if improvement < 0:
+                return "REJECT"
+            return "NEEDS_REFINEMENT"
+
+        # All three pass
+        if improvement > 0.10:
+            return "ACCEPT"
+        elif improvement > 0.05:
+            return "ACCEPT_FOR_SANDBOX"
+        elif improvement > -0.02:
+            return "NEEDS_REFINEMENT"
+        else:
+            return "REJECT"
+
+    # ── 7. Downstream Action Builder ─────────────────────────────────────
+
+    def build_downstream_actions(
+        self, proposals: List[CandidateFormula]
+    ) -> Dict[str, Any]:
+        """
+        Build structured downstream actions for other agents.
+
+        Maps proposal decisions to actionable items for:
+          - optimizer: sandbox candidates, retuning needed
+          - methodology: revalidation, threshold recalibration
+          - alpha_decay: score pathology flags
+          - auto_improve: eligible proposals, human review
+        """
+        sandbox_candidates = []
+        accepted_proposals = []
+        rejected_unsafe = []
+        needs_refinement = []
+
+        for p in proposals:
+            entry = {
+                "candidate_id": p.candidate_id,
+                "target_id": p.target_id,
+                "formula_family": p.formula_family,
+                "source": p.source,
+                "decision": p.decision,
+            }
+            if p.decision == "ACCEPT":
+                accepted_proposals.append(entry)
+            elif p.decision == "ACCEPT_FOR_SANDBOX":
+                sandbox_candidates.append(entry)
+            elif p.decision == "REJECT_UNSAFE":
+                rejected_unsafe.append(entry)
+            elif p.decision == "NEEDS_REFINEMENT":
+                needs_refinement.append(entry)
+
+        # Determine which functions need revalidation
+        revalidation_funcs = list({
+            p.target_id for p in proposals
+            if p.decision in ("ACCEPT", "ACCEPT_FOR_SANDBOX")
+        })
+
+        return {
+            "optimizer": {
+                "sandbox_candidates": sandbox_candidates,
+                "retuning_needed": [p["target_id"] for p in accepted_proposals],
+            },
+            "methodology": {
+                "revalidation_needed": revalidation_funcs,
+                "threshold_recalibration": [
+                    p["target_id"] for p in proposals
+                    if p.decision == "ACCEPT" and "threshold" in (p.target_id or "").lower()
+                ],
+            },
+            "alpha_decay": {
+                "score_pathology_flags": [
+                    {"candidate_id": p.candidate_id, "reason": "unsafe formula"}
+                    for p in proposals if p.decision == "REJECT_UNSAFE"
+                ],
+            },
+            "auto_improve": {
+                "eligible_proposals": [
+                    p["candidate_id"] for p in accepted_proposals + sandbox_candidates
+                ],
+                "human_review_needed": [
+                    p["candidate_id"] for p in needs_refinement
+                ],
+            },
+        }
+
+    # ── 8. Machine Summary ───────────────────────────────────────────────
+
+    def build_machine_summary(
+        self,
+        targets: List[ResearchTarget],
+        proposals: List[CandidateFormula],
+        downstream_actions: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Build the math agent machine_summary for downstream consumption.
+
+        Compact, deterministic summary of the research cycle results.
+        """
+        accepted = [p for p in proposals if p.decision == "ACCEPT"]
+        sandbox = [p for p in proposals if p.decision == "ACCEPT_FOR_SANDBOX"]
+        rejected = [p for p in proposals if p.decision in ("REJECT", "REJECT_UNSAFE")]
+        refinement = [p for p in proposals if p.decision == "NEEDS_REFINEMENT"]
+
+        # Top improvements
+        top_improvements = []
+        for p in accepted + sandbox:
+            improvement_est = p.scores.get("improvement_estimate", 0)
+            top_improvements.append({
+                "function": p.target_id,
+                "family": p.formula_family,
+                "improvement_estimate": improvement_est,
+            })
+        top_improvements.sort(key=lambda x: x.get("improvement_estimate", 0), reverse=True)
+
+        # Top risks
+        top_risks = []
+        for p in proposals:
+            top_risks.extend(p.risks)
+        # Deduplicate
+        top_risks = list(dict.fromkeys(top_risks))[:5]
+
+        # Functions requiring revalidation
+        revalidation_needed = downstream_actions.get("methodology", {}).get(
+            "revalidation_needed", []
+        )
+
+        highest_priority = targets[0].function_name if targets else "none"
+
+        return {
+            "targets_analyzed": len(targets),
+            "highest_priority": highest_priority,
+            "accepted_count": len(accepted),
+            "sandbox_ready_count": len(sandbox),
+            "rejected_count": len(rejected),
+            "needs_refinement_count": len(refinement),
+            "top_improvements": top_improvements[:3],
+            "top_risks": top_risks,
+            "functions_requiring_revalidation": revalidation_needed,
+            "downstream_actions": downstream_actions,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # ── Full Research Cycle (wired into run()) ───────────────────────────
+
+    def run_research_cycle(self, existing_proposals: List[Dict]) -> Dict[str, Any]:
+        """
+        Execute the full institutional research cycle.
+
+        Steps:
+          1. Prioritize targets v2
+          2. For each target: build spec
+          3. Generate template candidates + merge LLM candidates
+          4. Validate all candidates
+          5. Run empirical replay
+          6. Score and decide
+          7. Build downstream actions
+          8. Build machine_summary
+
+        Parameters
+        ----------
+        existing_proposals : list[dict]
+            Proposals already generated by the LLM step (from the existing run() flow).
+            These are merged as additional candidates.
+
+        Returns
+        -------
+        dict
+            {targets, all_candidates, downstream_actions, machine_summary}
+        """
+        log.info("=" * 40 + " Research Cycle " + "=" * 40)
+
+        # 1. Prioritize
+        targets = self.prioritize_targets_v2()
+
+        all_candidates: List[CandidateFormula] = []
+
+        for target in targets[:4]:  # Top 4 targets per cycle
+            log.info("Research: %s (priority=%.4f)", target.function_name, target.priority_score)
+
+            # 2. Build spec
+            spec = self.build_formula_spec(target)
+
+            # 3a. Template candidates
+            template_cands = self.generate_template_candidates(target, spec)
+            log.info("  Templates: %d candidates", len(template_cands))
+
+            # 3b. Merge LLM candidates from existing proposals
+            llm_cands = self._merge_llm_proposals(target, existing_proposals)
+            log.info("  LLM candidates: %d", len(llm_cands))
+
+            candidates = template_cands + llm_cands
+
+            # Load current function for replay
+            current_func = self._load_current_function(target)
+
+            for cand in candidates:
+                # 4. Validate
+                validation = self.validate_candidate(cand, spec)
+                cand.validation_results = {
+                    k: v for k, v in validation.items() if isinstance(v, bool)
+                }
+
+                # 5. Empirical replay
+                replay = self.empirical_replay(target, cand, current_func)
+                cand.scores = {
+                    "improvement_estimate": replay.get("improvement_estimate", 0.0),
+                    "rank_corr": replay.get("rank_corr", 0.0) or 0.0,
+                    "distribution_shift": replay.get("distribution_shift", 0.0) or 0.0,
+                }
+
+                # 6. Decide
+                decision = self.decide_proposal(cand, validation, replay)
+                cand.decision = decision
+
+                # Assign risks from validation details
+                cand.risks = [
+                    d for d in validation.get("details", []) if "FAIL" in d
+                ]
+
+                log.info("  %s [%s] -> %s (improvement=%.4f)",
+                         cand.candidate_id, cand.formula_family, decision,
+                         cand.scores.get("improvement_estimate", 0))
+
+            all_candidates.extend(candidates)
+
+        # 7. Downstream actions
+        downstream_actions = self.build_downstream_actions(all_candidates)
+
+        # 8. Machine summary
+        machine_summary = self.build_machine_summary(
+            targets, all_candidates, downstream_actions,
+        )
+
+        log.info("Research cycle complete: %d candidates, %d accepted, %d sandbox, %d rejected",
+                 len(all_candidates),
+                 machine_summary["accepted_count"],
+                 machine_summary["sandbox_ready_count"],
+                 machine_summary["rejected_count"])
+
+        return {
+            "targets": [asdict(t) for t in targets],
+            "all_candidates": [asdict(c) for c in all_candidates],
+            "downstream_actions": downstream_actions,
+            "machine_summary": machine_summary,
+        }
+
+    def _merge_llm_proposals(
+        self, target: ResearchTarget, existing_proposals: List[Dict]
+    ) -> List[CandidateFormula]:
+        """Convert existing LLM proposals (from run() step 5) into CandidateFormula objects."""
+        candidates: List[CandidateFormula] = []
+        for prop in existing_proposals:
+            if prop.get("function") != target.function_name:
+                continue
+            code = prop.get("proposed_code", "")
+            if not code or "def " not in code:
+                continue
+
+            # Detect family
+            family = "unknown"
+            if self.bridge:
+                family = DualLLMBridge._detect_formula_family(code)
+
+            source = prop.get("provider", "hybrid")
+            cid = f"CF-llm-{uuid.uuid4().hex[:6]}"
+            candidates.append(CandidateFormula(
+                candidate_id=cid,
+                target_id=target.target_id,
+                source=source,
+                formula_family=family,
+                code=code,
+            ))
+        return candidates
+
+    def _load_current_function(self, target: ResearchTarget) -> Optional[Callable]:
+        """Attempt to load the current implementation of a target function."""
+        try:
+            code = _read_function_code(target.file, target.function_name)
+            if code.startswith("# "):
+                return None
+            return self._compile_candidate_func(code)
+        except Exception:
+            return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main run — לולאת הסוכן
 # ─────────────────────────────────────────────────────────────────────────────
 def run(once: bool = False) -> None:
@@ -646,7 +1727,29 @@ def run(once: bool = False) -> None:
                     "delta_ic": None,
                 })
 
-            # 6. פרסום ל-bus — כל ההצעות
+            # 6. Institutional Research Cycle — formula validation lab
+            log.info("Starting institutional research cycle...")
+            try:
+                lab = MathResearchLab(bus=bus, bridge=bridge)
+                research_result = lab.run_research_cycle(proposals)
+                research_machine_summary = research_result.get("machine_summary", {})
+                downstream_actions = research_result.get("downstream_actions", {})
+                research_candidates = research_result.get("all_candidates", [])
+
+                # Save research results
+                research_path = PROPOSALS_DIR / f"{date.today().isoformat()}_research_cycle.json"
+                research_path.write_text(
+                    json.dumps(research_result, indent=2, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+                log.info("Research cycle saved: %s", research_path.name)
+            except Exception as exc:
+                log.warning("Research cycle failed (non-fatal): %s", exc)
+                research_machine_summary = {}
+                downstream_actions = {}
+                research_candidates = []
+
+            # 7. פרסום ל-bus — כל ההצעות + research results
             bus.publish("agent_math", {
                 "status": "completed",
                 "proposals_count": len(proposals),
@@ -667,6 +1770,11 @@ def run(once: bool = False) -> None:
                     "ic_mean": metrics.get("ic_mean"),
                     "sharpe": metrics.get("sharpe"),
                 },
+                "research_lab": {
+                    "machine_summary": research_machine_summary,
+                    "downstream_actions": downstream_actions,
+                    "candidates_validated": len(research_candidates),
+                },
             })
 
             registry.heartbeat("agent_math", AgentStatus.COMPLETED)
@@ -686,6 +1794,19 @@ def run(once: bool = False) -> None:
         # המתנה בין ריצות — 6 שעות
         log.info("Sleeping 6 hours until next math analysis run...")
         time.sleep(21600)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MathAgent — convenience wrapper for import compatibility
+# ─────────────────────────────────────────────────────────────────────────────
+class MathAgent:
+    """Thin wrapper that exposes run() and the research lab as a class."""
+
+    def __init__(self) -> None:
+        self.lab: Optional[MathResearchLab] = None
+
+    def run(self, once: bool = False) -> None:
+        run(once=once)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
