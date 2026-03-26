@@ -86,10 +86,17 @@ LEGACY_MAP = {
     "EARLY_DECAY": "EARLY_DECAY",
     "REGIME_SUPPRESSED": "EARLY_DECAY",
     "IMPLEMENTATION_DECAY": "DECAYING",
+    "ROBUSTNESS_DECAY": "DECAYING",
     "STRUCTURAL_DECAY": "DECAYING",
     "DEAD": "DEAD",
     "INSUFFICIENT_EVIDENCE": "HEALTHY",
 }
+
+# Regime-specific decay state constants
+REGIME_DECAY_STATES = [
+    "CALM_DECAY", "NORMAL_DECAY", "TENSION_BREAKDOWN",
+    "CRISIS_FAILURE", "TRANSITION_FRAGILITY", "HEALTHY",
+]
 
 SECTORS = ["XLC", "XLY", "XLP", "XLE", "XLF", "XLV", "XLI", "XLB", "XLRE", "XLK", "XLU"]
 MR_WHITELIST = {"XLC", "XLF", "XLI", "XLU"}
@@ -132,8 +139,21 @@ class StrategyHealthCard:
     failure_tags: List[str] = field(default_factory=list)
     actions: List[Dict[str, str]] = field(default_factory=list)
     confidence: float = 0.0
+    evidence_quality_score: float = 0.0
     legacy_decay_level: str = "HEALTHY"
     timestamp: str = ""
+    # Regime-specific decay states
+    regime_decay_states: Dict[str, str] = field(default_factory=dict)  # e.g. {"CALM": "CALM_DECAY", "TENSION": "TENSION_BREAKDOWN"}
+    strongest_regimes: List[str] = field(default_factory=list)
+    weakest_regimes: List[str] = field(default_factory=list)
+    # Lifecycle tracking
+    champion_watch: bool = False
+    shadow_watch: bool = False
+    post_promotion_watch: bool = False
+    under_watch: bool = False
+    near_retirement: bool = False
+    root_causes: List[str] = field(default_factory=list)
+    notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -451,6 +471,77 @@ class HealthScorer:
             evidence_count += 1
         return float(np.clip(evidence_count / 5.0, 0.0, 1.0))
 
+    def estimate_evidence_quality(self, name: str, data: Dict) -> float:
+        """Evidence quality score: how much data do we actually have?"""
+        score = 0.0
+        # Methodology report coverage
+        if self.ev.methodology_results and name in self.ev.methodology_results:
+            score += 0.25
+        # Trade count sufficiency
+        trades = data.get("total_trades", 0)
+        if trades >= 100:
+            score += 0.25
+        elif trades >= 50:
+            score += 0.15
+        elif trades >= 20:
+            score += 0.05
+        # Regime coverage
+        regimes = data.get("regime_performance") or data.get("regimes") or {}
+        if len(regimes) >= 3:
+            score += 0.25
+        elif len(regimes) >= 2:
+            score += 0.15
+        # Price history
+        if self.ev.prices is not None and len(self.ev.prices) >= 500:
+            score += 0.25
+        elif self.ev.prices is not None:
+            score += 0.10
+        return float(np.clip(score, 0.0, 1.0))
+
+    def classify_regime_decay(self, name: str, data: Dict) -> Dict[str, str]:
+        """Classify per-regime decay states: CALM_DECAY, TENSION_BREAKDOWN, etc."""
+        regime_states: Dict[str, str] = {}
+        regimes = data.get("regime_performance") or data.get("regimes") or {}
+        for regime_name, metrics in regimes.items():
+            if isinstance(metrics, dict):
+                wr = metrics.get("win_rate", metrics.get("wr", 0.5))
+                sh = metrics.get("sharpe", 0)
+            else:
+                continue
+            # Classify
+            regime_upper = str(regime_name).upper()
+            if sh < -0.5 or wr < 0.40:
+                if "CALM" in regime_upper:
+                    regime_states[regime_upper] = "CALM_DECAY"
+                elif "NORMAL" in regime_upper:
+                    regime_states[regime_upper] = "NORMAL_DECAY"
+                elif "TENSION" in regime_upper:
+                    regime_states[regime_upper] = "TENSION_BREAKDOWN"
+                elif "CRISIS" in regime_upper:
+                    regime_states[regime_upper] = "CRISIS_FAILURE"
+                else:
+                    regime_states[regime_upper] = "REGIME_DECAY"
+            elif sh < 0 or wr < 0.48:
+                regime_states[regime_upper] = "TRANSITION_FRAGILITY"
+            else:
+                regime_states[regime_upper] = "HEALTHY"
+        return regime_states
+
+    def identify_regime_strengths(self, name: str, data: Dict) -> tuple:
+        """Identify strongest and weakest regimes for a strategy."""
+        regimes = data.get("regime_performance") or data.get("regimes") or {}
+        scored = []
+        for rname, metrics in regimes.items():
+            if isinstance(metrics, dict):
+                sh = metrics.get("sharpe", 0)
+                wr = metrics.get("win_rate", metrics.get("wr", 0.5))
+                score = sh * 0.6 + (wr - 0.5) * 2.0 * 0.4
+                scored.append((str(rname).upper(), score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        strongest = [r for r, s in scored if s > 0][:3]
+        weakest = [r for r, s in scored if s <= 0][:3]
+        return strongest, weakest
+
 
 # ============================================================================
 # 3. Health State Classifier
@@ -476,6 +567,10 @@ class HealthStateClassifier:
         failing = sum(1 for v in dims.values() if v < 0.4)
         if failing >= 3:
             return "STRUCTURAL_DECAY"
+
+        # ROBUSTNESS_DECAY: robustness collapsing while alpha still OK
+        if dims.robustness < 0.30 and dims.alpha_quality >= 0.45:
+            return "ROBUSTNESS_DECAY"
 
         # IMPLEMENTATION_DECAY: gross OK but net collapsing
         if dims.implementation < 0.35 and dims.alpha_quality >= 0.5:
@@ -928,6 +1023,11 @@ class AlphaDecayMonitor:
             actions = self._action_policy.get_actions(state)
             legacy = LEGACY_MAP.get(state, "HEALTHY")
 
+            # Evidence quality and regime analysis
+            ev_quality = self._scorer.estimate_evidence_quality(name, data)
+            regime_decay_states = self._scorer.classify_regime_decay(name, data)
+            strongest, weakest = self._scorer.identify_regime_strengths(name, data)
+
             card = StrategyHealthCard(
                 name=name,
                 health_state=state,
@@ -938,8 +1038,18 @@ class AlphaDecayMonitor:
                 failure_tags=failure_tags,
                 actions=actions,
                 confidence=round(confidence, 2),
+                evidence_quality_score=round(ev_quality, 2),
                 legacy_decay_level=legacy,
                 timestamp=ts_iso,
+                regime_decay_states=regime_decay_states,
+                strongest_regimes=strongest,
+                weakest_regimes=weakest,
+                champion_watch=state in ("HEALTHY", "UNDER_OBSERVATION"),
+                shadow_watch=state in ("EARLY_DECAY", "REGIME_SUPPRESSED"),
+                post_promotion_watch=state in ("IMPLEMENTATION_DECAY", "ROBUSTNESS_DECAY"),
+                under_watch=state not in ("HEALTHY", "DEAD", "INSUFFICIENT_EVIDENCE"),
+                near_retirement=state in ("STRUCTURAL_DECAY", "DEAD"),
+                root_causes=failure_tags,
             )
             cards.append(card)
 
