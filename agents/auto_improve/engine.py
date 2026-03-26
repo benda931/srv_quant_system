@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -197,6 +198,283 @@ class AutoImprover:
         except Exception as e:
             log.info("GPT bridge unavailable: %s — using rule-based suggestions only", e)
         return self._gpt
+
+    # ── Institutional Methods ────────────────────────────────────────────
+
+    def check_governance_prerequisites(self) -> Dict:
+        """
+        Load latest methodology governance report and check strategy approvals.
+
+        Returns dict with:
+          loaded: bool — whether a governance report was found
+          status: "all_approved" | "some_conditional" | "all_rejected" | "no_report"
+          mode: "full" | "cautious" | "skip"
+          approved_strategies: list[str]
+          conditional_strategies: list[str]
+          rejected_strategies: list[str]
+          reason: str — human-readable explanation
+        """
+        result: Dict[str, Any] = {
+            "loaded": False,
+            "status": "no_report",
+            "mode": "full",
+            "approved_strategies": [],
+            "conditional_strategies": [],
+            "rejected_strategies": [],
+            "reason": "",
+        }
+
+        if not REPORTS_DIR.exists():
+            result["reason"] = "Methodology reports directory not found"
+            log.warning("Governance: %s", result["reason"])
+            return result
+
+        # Find latest report with approval data
+        report_data: Optional[Dict] = None
+        for fpath in sorted(REPORTS_DIR.glob("*.json"), reverse=True):
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and (
+                    "approval_matrix" in data or "approval_matrix_v3" in data
+                ):
+                    report_data = data
+                    log.info("Governance prerequisites: loaded %s", fpath.name)
+                    break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if report_data is None:
+            result["reason"] = "No methodology report with approval matrix found"
+            log.warning("Governance: %s", result["reason"])
+            return result
+
+        result["loaded"] = True
+        approval_matrix = (
+            report_data.get("approval_matrix_v3")
+            or report_data.get("approval_matrix", {})
+        )
+
+        for strat_name, decision in approval_matrix.items():
+            dec = decision if isinstance(decision, str) else decision.get("decision", "REJECTED")
+            if dec == "APPROVED":
+                result["approved_strategies"].append(strat_name)
+            elif dec == "CONDITIONAL":
+                result["conditional_strategies"].append(strat_name)
+            else:
+                result["rejected_strategies"].append(strat_name)
+
+        n_approved = len(result["approved_strategies"])
+        n_conditional = len(result["conditional_strategies"])
+        n_rejected = len(result["rejected_strategies"])
+        total = n_approved + n_conditional + n_rejected
+
+        if total == 0:
+            result["status"] = "no_report"
+            result["mode"] = "full"
+            result["reason"] = "Empty approval matrix"
+        elif n_approved == 0 and n_conditional == 0:
+            result["status"] = "all_rejected"
+            result["mode"] = "skip"
+            result["reason"] = (
+                f"All {n_rejected} strategies REJECTED — skipping optimization"
+            )
+        elif n_conditional > 0 and n_approved == 0:
+            result["status"] = "some_conditional"
+            result["mode"] = "cautious"
+            result["reason"] = (
+                f"{n_conditional} CONDITIONAL, {n_rejected} REJECTED — cautious mode "
+                "(fewer trials, smaller bounds)"
+            )
+        else:
+            result["status"] = "all_approved"
+            result["mode"] = "full"
+            result["reason"] = (
+                f"{n_approved} APPROVED, {n_conditional} CONDITIONAL, {n_rejected} REJECTED"
+            )
+
+        log.info("Governance prerequisites: %s — mode=%s", result["reason"], result["mode"])
+        return result
+
+    def generate_smart_suggestions(self, report: Optional[Dict] = None) -> List[Dict]:
+        """
+        Generate targeted suggestions from methodology and alpha_decay machine summaries.
+
+        Reads:
+        - methodology machine_summary for optimizer_instructions
+        - alpha_decay machine_summary for action_policies
+        - Current weaknesses from evaluation
+
+        Each suggestion includes: param, current_value, new_value, rationale, expected_impact.
+        """
+        suggestions: List[Dict] = []
+        params = self.current_params()
+
+        # ── Load methodology machine_summary ───────────────────────────
+        meth_ms: Dict = {}
+        if report and isinstance(report, dict):
+            meth_ms = report.get("machine_summary_v3") or report.get("machine_summary", {})
+        else:
+            for fpath in sorted(REPORTS_DIR.glob("*.json"), reverse=True):
+                try:
+                    data = json.loads(fpath.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and (
+                        "machine_summary_v3" in data or "machine_summary" in data
+                    ):
+                        meth_ms = data.get("machine_summary_v3") or data.get("machine_summary", {})
+                        break
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        # ── Load alpha_decay machine_summary ───────────────────────────
+        alpha_ms: Dict = {}
+        alpha_dir = ROOT / "agents" / "alpha_decay" / "reports"
+        if alpha_dir.exists():
+            for fpath in sorted(alpha_dir.glob("*.json"), reverse=True):
+                try:
+                    data = json.loads(fpath.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and "machine_summary" in data:
+                        alpha_ms = data.get("machine_summary", {})
+                        break
+                except (json.JSONDecodeError, OSError):
+                    continue
+
+        # ── Extract optimizer instructions ─────────────────────────────
+        optimizer_instructions = meth_ms.get("optimizer_instructions", [])
+        if isinstance(optimizer_instructions, list):
+            for instr in optimizer_instructions[:3]:
+                if isinstance(instr, dict):
+                    param = instr.get("param", "")
+                    new_val = instr.get("value") or instr.get("new_value")
+                    if param in params and new_val is not None:
+                        try:
+                            new_val = float(new_val)
+                            suggestions.append({
+                                "param": param,
+                                "current_value": params[param],
+                                "new_value": new_val,
+                                "rationale": instr.get("reason", "methodology optimizer instruction"),
+                                "expected_impact": instr.get("expected_impact", "unknown"),
+                                "source": "methodology_machine_summary",
+                            })
+                        except (ValueError, TypeError):
+                            pass
+
+        # ── Extract alpha decay action policies ────────────────────────
+        action_policies = alpha_ms.get("action_policies", [])
+        if isinstance(action_policies, list):
+            for policy in action_policies[:2]:
+                if isinstance(policy, dict):
+                    param = policy.get("param", "")
+                    new_val = policy.get("value") or policy.get("new_value")
+                    if param in params and new_val is not None:
+                        try:
+                            new_val = float(new_val)
+                            suggestions.append({
+                                "param": param,
+                                "current_value": params[param],
+                                "new_value": new_val,
+                                "rationale": policy.get("reason", "alpha decay action policy"),
+                                "expected_impact": policy.get("expected_impact", "unknown"),
+                                "source": "alpha_decay_machine_summary",
+                            })
+                        except (ValueError, TypeError):
+                            pass
+
+        # ── Weakness-targeted suggestions ──────────────────────────────
+        regime_breakdown = meth_ms.get("regime_performance", {})
+        if isinstance(regime_breakdown, dict):
+            for regime_name, stats in regime_breakdown.items():
+                if isinstance(stats, dict) and stats.get("sharpe", 0) < -0.3:
+                    size_key = f"regime_size_{regime_name.lower()}"
+                    if size_key in params:
+                        current = params[size_key]
+                        new_val = max(0.1, round(current * 0.7, 2))
+                        if new_val != current:
+                            suggestions.append({
+                                "param": size_key,
+                                "current_value": current,
+                                "new_value": new_val,
+                                "rationale": f"Reduce {regime_name} sizing: Sharpe={stats.get('sharpe', 0):.3f}",
+                                "expected_impact": f"reduce {regime_name} losses",
+                                "source": "smart_weakness_analysis",
+                            })
+
+        # Deduplicate
+        seen = set()
+        unique = []
+        for s in suggestions:
+            if s["param"] not in seen:
+                seen.add(s["param"])
+                unique.append(s)
+
+        log.info("Smart suggestions: %d generated from governance + alpha_decay", len(unique))
+        return unique[:MAX_SUGGESTIONS_PER_CYCLE]
+
+    def validate_promotion_safety(
+        self,
+        param: str,
+        old_val: Any,
+        new_val: Any,
+        delta_sharpe: float,
+        test_result: Optional[Dict] = None,
+    ) -> bool:
+        """
+        Multi-check promotion safety gate.
+
+        All of the following must pass:
+        1. delta_sharpe >= 0.03
+        2. No regime degradation (per-regime Sharpe not worse)
+        3. Drawdown didn't worsen by > 2%
+        4. Win rate didn't drop by > 3%
+
+        Returns True only if ALL checks pass.
+        """
+        checks_passed = True
+        reasons: List[str] = []
+
+        # Check 1: Minimum Sharpe improvement
+        if delta_sharpe < 0.03:
+            checks_passed = False
+            reasons.append(f"delta_sharpe={delta_sharpe:.4f} < 0.03 minimum")
+
+        if test_result:
+            # Check 2: Per-regime degradation
+            regime_before = test_result.get("regime_sharpes_before", {})
+            regime_after = test_result.get("regime_sharpes_after", {})
+            for r_name in regime_before:
+                before = regime_before.get(r_name, 0)
+                after = regime_after.get(r_name, before)
+                if after < before - 0.1:
+                    checks_passed = False
+                    reasons.append(
+                        f"regime {r_name} degraded: {before:.3f} -> {after:.3f}"
+                    )
+
+            # Check 3: Drawdown check
+            dd_before = abs(test_result.get("max_dd_before", 0))
+            dd_after = abs(test_result.get("max_dd_after", 0))
+            if dd_after > dd_before + 0.02:
+                checks_passed = False
+                reasons.append(
+                    f"drawdown worsened: {dd_before:.3f} -> {dd_after:.3f} (>{0.02} limit)"
+                )
+
+            # Check 4: Win rate check
+            wr_before = test_result.get("wr_before", 0)
+            wr_after = test_result.get("wr_after", 0)
+            if wr_after < wr_before - 0.03:
+                checks_passed = False
+                reasons.append(
+                    f"win_rate dropped: {wr_before:.3f} -> {wr_after:.3f} (>{0.03} limit)"
+                )
+
+        if checks_passed:
+            log.info("Promotion safety PASSED for %s: %s -> %s (delta_sharpe=%.4f)",
+                     param, old_val, new_val, delta_sharpe)
+        else:
+            log.warning("Promotion safety FAILED for %s: %s", param, "; ".join(reasons))
+
+        return checks_passed
 
     # ── Core Methods ─────────────────────────────────────────────────────
 

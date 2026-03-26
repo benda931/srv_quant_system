@@ -149,7 +149,7 @@ REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-METHODOLOGY_VERSION = "2.0.0"
+METHODOLOGY_VERSION = "3.0.0"
 _TRADING_DAYS = 252
 _EPSILON = 1e-12
 _REGIMES = ["CALM", "NORMAL", "TENSION", "CRISIS"]
@@ -242,6 +242,147 @@ def _regime_breakdown_to_dict(breakdown: dict) -> dict:
         else:
             result[regime] = {"raw": str(rb)}
     return result
+
+
+# =============================================================================
+# GovernanceReport dataclass — Research Governance Truth Engine
+# =============================================================================
+
+@dataclass
+class GovernanceReport:
+    """
+    Institutional research governance record for full experiment lineage.
+    Tracks data fingerprints, settings versions, validation status,
+    and promotion readiness for audit trail.
+    """
+    experiment_id: str = ""                      # UUID
+    data_fingerprint: str = ""                   # SHA256 of prices.parquet last 100 rows
+    settings_fingerprint: str = ""               # SHA256 of settings dump
+    methodology_version: str = "v3.0"
+    universe_summary: Dict[str, Any] = field(default_factory=dict)  # {"n_sectors": 11, "date_range": "2016-2026"}
+    run_mode: str = "daily"                      # "daily" / "adhoc" / "validation" / "promotion_gate"
+    validation_status: str = "PENDING"           # from validation suite
+    promotion_readiness: str = "PENDING"         # "APPROVED" / "CONDITIONAL" / "REJECTED"
+    fail_reasons: List[str] = field(default_factory=list)
+    timestamp: str = ""
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items()}
+
+
+# =============================================================================
+# Relaxed Promotion Gate (v3.0 thresholds per spec)
+# =============================================================================
+
+_PROMOTION_GATE_V3_RULES = {
+    "min_sharpe":             {"threshold": 0.0,  "compare": ">=", "label": "Sharpe >= 0.0 (any positive)"},
+    "max_drawdown":           {"threshold": 0.25, "compare": "<=", "label": "Max drawdown <= 25%"},
+    "min_trades":             {"threshold": 50,   "compare": ">=", "label": "Total trades >= 50"},
+    "min_win_rate":           {"threshold": 0.48, "compare": ">=", "label": "Win rate >= 48%"},
+    "min_regime_consistency": {"threshold": 2,    "compare": ">=", "label": "Positive Sharpe in >= 2 regimes"},
+}
+
+
+def evaluate_promotion_gate_v3(
+    net_sharpe: float,
+    max_drawdown: float,
+    total_trades: int,
+    win_rate: float,
+    regime_scores: Dict[str, float],
+) -> Tuple[str, Dict[str, Any], List[str]]:
+    """
+    Deterministic promotion gate with v3.0 relaxed thresholds.
+
+    Parameters
+    ----------
+    net_sharpe : float
+    max_drawdown : float   (negative, e.g. -0.12)
+    total_trades : int
+    win_rate : float       (0-1 scale)
+    regime_scores : dict   {regime_name: sharpe}
+
+    Returns
+    -------
+    (decision, rule_breakdown, fail_reasons)
+        decision:       "APPROVED" / "CONDITIONAL" / "REJECTED"
+        rule_breakdown: {rule_name: {"pass": bool, "value": ..., "threshold": ...}}
+        fail_reasons:   list of human-readable failure strings
+    """
+    positive_regimes = sum(1 for v in regime_scores.values() if _sf(v) > 0)
+    fail_reasons: List[str] = []
+    rule_breakdown: Dict[str, Any] = {}
+
+    # Rule 1: min_sharpe >= 0.0
+    passed = net_sharpe >= 0.0
+    rule_breakdown["min_sharpe"] = {"pass": passed, "value": _safe_round(net_sharpe), "threshold": 0.0}
+    if not passed:
+        fail_reasons.append(f"net_sharpe={net_sharpe:.3f} < 0.0")
+
+    # Rule 2: max_drawdown <= 25%
+    passed = abs(max_drawdown) <= 0.25
+    rule_breakdown["max_drawdown"] = {"pass": passed, "value": _safe_round(abs(max_drawdown)), "threshold": 0.25}
+    if not passed:
+        fail_reasons.append(f"max_drawdown={abs(max_drawdown):.3f} > 25%")
+
+    # Rule 3: min_trades >= 50
+    passed = total_trades >= 50
+    rule_breakdown["min_trades"] = {"pass": passed, "value": total_trades, "threshold": 50}
+    if not passed:
+        fail_reasons.append(f"total_trades={total_trades} < 50")
+
+    # Rule 4: min_win_rate >= 48%
+    passed = win_rate >= 0.48
+    rule_breakdown["min_win_rate"] = {"pass": passed, "value": _safe_round(win_rate), "threshold": 0.48}
+    if not passed:
+        fail_reasons.append(f"win_rate={win_rate:.3f} < 0.48")
+
+    # Rule 5: min_regime_consistency >= 2
+    passed = positive_regimes >= 2
+    rule_breakdown["min_regime_consistency"] = {"pass": passed, "value": positive_regimes, "threshold": 2}
+    if not passed:
+        fail_reasons.append(f"positive_regimes={positive_regimes} < 2")
+
+    # Decision
+    n_fails = len(fail_reasons)
+    if n_fails == 0:
+        decision = "APPROVED"
+    elif n_fails <= 2:
+        decision = "CONDITIONAL"
+    else:
+        decision = "REJECTED"
+
+    return decision, rule_breakdown, fail_reasons
+
+
+# =============================================================================
+# Anti-Overfitting: Simple Deflated Sharpe Ratio
+# =============================================================================
+
+def compute_deflated_sharpe(sharpe: float, n_strategies: int, n_trades: int) -> float:
+    """
+    Simplified Deflated Sharpe Ratio penalizing for multiple testing.
+
+    DSR = Sharpe * sqrt(1 - (n_strategies - 1) / (2 * n_trades))
+
+    If DSR < 0 after penalty: flags as potential overfit.
+
+    Parameters
+    ----------
+    sharpe : float       observed Sharpe ratio
+    n_strategies : int   number of strategies tested
+    n_trades : int       number of trades (sample size)
+
+    Returns
+    -------
+    float — deflated Sharpe ratio
+    """
+    if n_trades <= 0 or n_strategies <= 0:
+        return 0.0
+    penalty_term = 1.0 - (n_strategies - 1) / (2.0 * max(n_trades, 1))
+    if penalty_term <= 0:
+        return 0.0
+    dsr = sharpe * math.sqrt(penalty_term)
+    return _safe_round(dsr)
 
 
 # =============================================================================
@@ -1645,6 +1786,285 @@ class MethodologyAgent:
             log.debug("GPT advisory failed: %s", exc)
             return {"advisory_error": str(exc)}
 
+    # ── Research Governance Truth Engine (v3.0) ─────────────────────────────
+
+    def build_governance(self, run_mode: str = "daily") -> GovernanceReport:
+        """
+        Build a GovernanceReport dataclass with full experiment lineage:
+        data fingerprint, settings fingerprint, universe summary.
+        """
+        try:
+            prices = getattr(self.engine, "prices", None)
+
+            # Data fingerprint: SHA256 of last 100 rows of prices
+            data_fp = ""
+            if prices is not None and len(prices) > 0:
+                tail = prices.tail(100)
+                raw = tail.to_csv(index=True)
+                data_fp = hashlib.sha256(raw.encode()).hexdigest()
+            else:
+                data_fp = _compute_data_fingerprint(self.settings)
+
+            # Settings fingerprint
+            settings_fp = _compute_settings_fingerprint(self.settings)
+
+            # Universe summary
+            universe = {}
+            if prices is not None and not prices.empty:
+                universe["n_sectors"] = len(prices.columns)
+                universe["n_days"] = len(prices)
+                try:
+                    universe["date_range"] = (
+                        f"{prices.index[0].strftime('%Y-%m-%d')} to "
+                        f"{prices.index[-1].strftime('%Y-%m-%d')}"
+                    )
+                except Exception:
+                    universe["date_range"] = "unknown"
+            else:
+                universe["n_sectors"] = len(self.settings.sector_list())
+                universe["date_range"] = "no data loaded"
+
+            return GovernanceReport(
+                experiment_id=str(uuid.uuid4())[:12],
+                data_fingerprint=data_fp,
+                settings_fingerprint=settings_fp,
+                methodology_version=METHODOLOGY_VERSION,
+                universe_summary=universe,
+                run_mode=run_mode,
+                validation_status="PENDING",
+                promotion_readiness="PENDING",
+                fail_reasons=[],
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:
+            log.warning("build_governance failed: %s", exc)
+            return GovernanceReport(
+                experiment_id=str(uuid.uuid4())[:12],
+                methodology_version=METHODOLOGY_VERSION,
+                fail_reasons=[f"governance_build_error: {exc}"],
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+
+    def evaluate_promotion_gate(
+        self, scorecard: MethodologyScorecard,
+    ) -> Tuple[str, Dict[str, Any], List[str]]:
+        """
+        Apply v3.0 relaxed promotion gate to a single scorecard.
+
+        Returns (decision, rule_breakdown, fail_reasons).
+        """
+        return evaluate_promotion_gate_v3(
+            net_sharpe=scorecard.net_sharpe,
+            max_drawdown=scorecard.max_drawdown,
+            total_trades=scorecard.total_trades,
+            win_rate=scorecard.hit_rate,
+            regime_scores=scorecard.regime_scores,
+        )
+
+    def build_methodology_scorecards_v3(
+        self,
+        scorecards: List[MethodologyScorecard],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Build v3.0 enhanced scorecards with all institutional fields.
+        Applies the relaxed v3 promotion gate and adds classification.
+
+        Returns {strategy_name: scorecard_dict}.
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        n_strategies = len(scorecards)
+
+        for sc in scorecards:
+            # v3 promotion gate (relaxed thresholds)
+            v3_decision, v3_rules, v3_fails = self.evaluate_promotion_gate(sc)
+
+            # Simple deflated Sharpe
+            dsr_simple = compute_deflated_sharpe(
+                sc.gross_sharpe, n_strategies, sc.total_trades,
+            )
+
+            # Robustness score: 1 - fold variance proxy
+            robustness = sc.robustness_score
+
+            # Stability: consistency across time (from walk-forward)
+            stability = sc.stability_score
+
+            # Tail risk score: drawdown severity
+            tail_risk = sc.tail_risk_score
+
+            # Diversification score
+            diversification = sc.diversification_score
+
+            card = {
+                "name": sc.name,
+                # Gross/net metrics
+                "gross_sharpe": _safe_round(sc.gross_sharpe),
+                "net_sharpe": _safe_round(sc.net_sharpe),
+                # Walk-forward metrics
+                "walk_forward_sharpe": _safe_round(sc.walk_forward_sharpe),
+                "stability_score": _safe_round(stability),
+                # Bootstrap confidence
+                "bootstrap_sharpe_median": _safe_round(sc.bootstrap_sharpe_median),
+                "bootstrap_p_positive": _safe_round(sc.bootstrap_p_positive),
+                # Regime metrics
+                "regime_scores": sc.regime_scores,
+                # Computed scores
+                "robustness_score": _safe_round(robustness),
+                "stability_score_wf": _safe_round(stability),
+                "tail_risk_score": _safe_round(tail_risk),
+                "diversification_score": _safe_round(diversification),
+                # Anti-overfitting
+                "deflated_sharpe_bailey": _safe_round(sc.deflated_sharpe),
+                "deflated_sharpe_simple": _safe_round(dsr_simple),
+                "overfit_flag": dsr_simple < 0,
+                # Gate results
+                "promotion_decision_v3": v3_decision,
+                "promotion_rules_v3": v3_rules,
+                "promotion_fails_v3": v3_fails,
+                # Classification
+                "classification": sc.classification,
+                # Extra
+                "hit_rate": _safe_round(sc.hit_rate),
+                "max_drawdown": _safe_round(sc.max_drawdown),
+                "total_trades": sc.total_trades,
+                "calmar": _safe_round(sc.calmar),
+                "cost_drag_pct": _safe_round(sc.cost_drag_pct),
+                "final_rank": sc.final_rank,
+                "confidence_score": _safe_round(sc.confidence_score),
+                "strengths": sc.strengths,
+                "weaknesses": sc.weaknesses,
+                "failure_tags": sc.failure_tags,
+                "action_candidates": sc.action_candidates,
+            }
+            result[sc.name] = card
+
+        return result
+
+    def build_machine_summary_v3(
+        self,
+        scorecards: List[MethodologyScorecard],
+        regime_attribution: Dict[str, Any],
+        v3_scorecards: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Compact, deterministic machine_summary for downstream agents (v3.0).
+
+        Includes: best strategy, approval status, regime analysis,
+        robustness, actionable instructions for optimizer and methodology.
+        """
+        if not scorecards:
+            return {
+                "best_strategy": "N/A",
+                "best_sharpe": 0.0,
+                "approval_status": "REJECTED",
+                "n_approved": 0,
+                "n_rejected": 0,
+                "weakest_regime": "UNKNOWN",
+                "strongest_regime": "UNKNOWN",
+                "overall_robustness": 0.0,
+                "top_3_actionable": [],
+                "optimizer_instructions": {"param_tune": [], "regime_disable": []},
+                "methodology_instructions": {"revalidate": [], "freeze": []},
+            }
+
+        best = scorecards[0]
+
+        # Count v3 decisions
+        n_approved = 0
+        n_conditional = 0
+        n_rejected = 0
+        for sc_name, sc_data in v3_scorecards.items():
+            d = sc_data.get("promotion_decision_v3", "REJECTED")
+            if d == "APPROVED":
+                n_approved += 1
+            elif d == "CONDITIONAL":
+                n_conditional += 1
+            else:
+                n_rejected += 1
+
+        # Best strategy approval from v3 gate
+        best_v3 = v3_scorecards.get(best.name, {})
+        approval_status = best_v3.get("promotion_decision_v3", "REJECTED")
+
+        # Regime analysis
+        method_scores = regime_attribution.get("methodology_scores", {})
+        all_regime_sharpes: Dict[str, List[float]] = {r: [] for r in _REGIMES}
+        for name, ms in method_scores.items():
+            rs = ms.get("regime_sharpes", {})
+            for regime in _REGIMES:
+                if regime in rs:
+                    all_regime_sharpes[regime].append(_sf(rs[regime]))
+
+        regime_means = {}
+        for regime, sharpes in all_regime_sharpes.items():
+            regime_means[regime] = float(np.mean(sharpes)) if sharpes else 0.0
+
+        weakest_regime = min(regime_means, key=regime_means.get) if regime_means else "UNKNOWN"
+        strongest_regime = max(regime_means, key=regime_means.get) if regime_means else "UNKNOWN"
+
+        # Overall robustness
+        overall_robustness = _safe_round(
+            float(np.mean([sc.robustness_score for sc in scorecards]))
+        )
+
+        # Top 3 actionable items from weakest strategies
+        actionable: List[str] = []
+        for sc in scorecards:
+            for action in sc.action_candidates:
+                if action not in actionable:
+                    actionable.append(action)
+                if len(actionable) >= 3:
+                    break
+            if len(actionable) >= 3:
+                break
+
+        # Optimizer instructions
+        param_tune: List[str] = []
+        regime_disable: List[str] = []
+        for sc_name, sc_data in v3_scorecards.items():
+            if sc_data.get("promotion_decision_v3") == "CONDITIONAL":
+                if sc_data.get("hit_rate", 1.0) < 0.50:
+                    param_tune.append("z_entry")
+                if sc_data.get("cost_drag_pct", 0) > 20:
+                    param_tune.append("hold_max")
+            rs = sc_data.get("regime_scores", {})
+            for regime, val in rs.items():
+                if _sf(val) < -0.1:
+                    regime_disable.append(f"{sc_name}:{regime}")
+        param_tune = list(dict.fromkeys(param_tune))[:5]
+        regime_disable = regime_disable[:10]
+
+        # Methodology instructions
+        revalidate: List[str] = []
+        freeze: List[str] = []
+        for sc in scorecards:
+            v3d = v3_scorecards.get(sc.name, {}).get("promotion_decision_v3", "REJECTED")
+            if v3d == "CONDITIONAL" and sc.stability_score < 0.4:
+                revalidate.append(sc.name)
+            elif v3d == "APPROVED" and sc.robustness_score > 0.7:
+                freeze.append(sc.name)
+
+        return {
+            "best_strategy": best.name,
+            "best_sharpe": _safe_round(best.net_sharpe),
+            "approval_status": approval_status,
+            "n_approved": n_approved,
+            "n_conditional": n_conditional,
+            "n_rejected": n_rejected,
+            "weakest_regime": weakest_regime,
+            "strongest_regime": strongest_regime,
+            "overall_robustness": overall_robustness,
+            "top_3_actionable": actionable[:3],
+            "optimizer_instructions": {
+                "param_tune": param_tune,
+                "regime_disable": regime_disable,
+            },
+            "methodology_instructions": {
+                "revalidate": revalidate,
+                "freeze": freeze,
+            },
+        }
+
     # ── Full professional analysis orchestration ─────────────────────────────
 
     def run_professional_analysis(self, report: Dict[str, Any]) -> Dict[str, Any]:
@@ -2077,12 +2497,143 @@ def run(once: bool = False) -> dict:
         report["errors"].append(f"Institutional Analysis: {exc}")
 
     # ── Step 8: Conclusions & Recommendations ────────────────────────────────
-    log.info("[8/8] Generating conclusions and recommendations...")
+    log.info("[8/11] Generating conclusions and recommendations...")
     try:
         _generate_conclusions(report, portfolio)
     except Exception as exc:
         log.exception("Conclusion generation failed")
         report["errors"].append(f"Conclusions: {exc}")
+
+    # ── Step 9: Research Governance Truth Engine (v3.0) ────────────────────
+    log.info("[9/11] Building v3.0 governance report...")
+    try:
+        _gov_agent = MethodologyAgent(settings=settings, engine=engine)
+        governance_report = _gov_agent.build_governance(run_mode="daily")
+
+        # Attach scorecards from institutional analysis
+        existing_scorecards = report.get("methodology_scorecards", [])
+        if existing_scorecards:
+            # Re-hydrate MethodologyScorecard objects for v3 processing
+            _sc_objects: List[MethodologyScorecard] = []
+            for sc_dict in existing_scorecards:
+                sc_obj = MethodologyScorecard(name=sc_dict.get("name", "unknown"))
+                for fld in [
+                    "gross_sharpe", "net_sharpe", "deflated_sharpe",
+                    "walk_forward_sharpe", "bootstrap_sharpe_median",
+                    "bootstrap_p_positive", "hit_rate", "max_drawdown",
+                    "calmar", "total_trades", "robustness_score",
+                    "stability_score", "tail_risk_score",
+                    "diversification_score", "cost_drag_pct",
+                    "classification", "promotion_decision",
+                    "final_rank", "sortino", "skewness", "kurtosis",
+                    "avg_holding_days", "total_pnl",
+                    "confidence_score",
+                ]:
+                    if fld in sc_dict:
+                        setattr(sc_obj, fld, sc_dict[fld])
+                sc_obj.regime_scores = sc_dict.get("regime_scores", {})
+                sc_obj.fail_reasons = sc_dict.get("fail_reasons", [])
+                sc_obj.strengths = sc_dict.get("strengths", [])
+                sc_obj.weaknesses = sc_dict.get("weaknesses", [])
+                sc_obj.failure_tags = sc_dict.get("failure_tags", [])
+                sc_obj.action_candidates = sc_dict.get("action_candidates", [])
+                _sc_objects.append(sc_obj)
+
+            # Build v3 scorecards
+            v3_scorecards = _gov_agent.build_methodology_scorecards_v3(_sc_objects)
+
+            # Build v3 approval matrix
+            v3_approval_matrix = {}
+            v3_promotion_gate = {}
+            for sc_name, sc_data in v3_scorecards.items():
+                v3_approval_matrix[sc_name] = sc_data.get("promotion_decision_v3", "REJECTED")
+                v3_promotion_gate[sc_name] = {
+                    "rules": sc_data.get("promotion_rules_v3", {}),
+                    "decision": sc_data.get("promotion_decision_v3", "REJECTED"),
+                    "fail_reasons": sc_data.get("promotion_fails_v3", []),
+                }
+
+            # Build v3 machine summary
+            regime_attr = report.get("attribution", {})
+            v3_machine_summary = _gov_agent.build_machine_summary_v3(
+                _sc_objects, regime_attr, v3_scorecards,
+            )
+
+            # Update governance report status
+            n_v3_approved = sum(
+                1 for d in v3_approval_matrix.values() if d == "APPROVED"
+            )
+            n_v3_rejected = sum(
+                1 for d in v3_approval_matrix.values() if d == "REJECTED"
+            )
+            governance_report.validation_status = "COMPLETE"
+            if n_v3_approved > 0:
+                governance_report.promotion_readiness = "APPROVED"
+            elif n_v3_rejected < len(v3_approval_matrix):
+                governance_report.promotion_readiness = "CONDITIONAL"
+            else:
+                governance_report.promotion_readiness = "REJECTED"
+
+            # Wire v3 sections into report
+            report["governance_v3"] = governance_report.to_dict()
+            report["methodology_scorecards_v3"] = v3_scorecards
+            report["approval_matrix_v3"] = v3_approval_matrix
+            report["promotion_gate_v3"] = v3_promotion_gate
+            report["machine_summary_v3"] = v3_machine_summary
+            log.info(
+                "  v3.0 governance: %d strategies, %d approved (v3 gate), "
+                "readiness=%s",
+                len(v3_scorecards), n_v3_approved,
+                governance_report.promotion_readiness,
+            )
+        else:
+            report["governance_v3"] = governance_report.to_dict()
+            log.info("  v3.0 governance: no scorecards available for v3 gate")
+    except Exception as exc:
+        log.warning("v3.0 governance layer failed: %s", exc)
+        report["errors"].append(f"Governance v3.0: {exc}")
+
+    # ── Step 10: Anti-Overfitting Deflated Sharpe (simple) ────────────────
+    log.info("[10/11] Computing simple deflated Sharpe ratios...")
+    try:
+        existing_scorecards_10 = report.get("methodology_scorecards", [])
+        n_strats = len(existing_scorecards_10)
+        dsr_results = {}
+        for sc_dict in existing_scorecards_10:
+            name = sc_dict.get("name", "unknown")
+            sharpe = _sf(sc_dict.get("gross_sharpe", 0))
+            trades = sc_dict.get("total_trades", 0)
+            dsr = compute_deflated_sharpe(sharpe, n_strats, trades)
+            dsr_results[name] = {
+                "observed_sharpe": _safe_round(sharpe),
+                "deflated_sharpe_simple": _safe_round(dsr),
+                "n_strategies": n_strats,
+                "n_trades": trades,
+                "overfit_flag": dsr < 0,
+            }
+        report["deflated_sharpe_simple"] = dsr_results
+        n_flagged = sum(1 for v in dsr_results.values() if v["overfit_flag"])
+        log.info("  Deflated Sharpe (simple): %d/%d flagged as potential overfit",
+                 n_flagged, n_strats)
+    except Exception as exc:
+        log.warning("Simple deflated Sharpe failed: %s", exc)
+        report["errors"].append(f"Deflated Sharpe Simple: {exc}")
+
+    # ── Step 11: Publish enhanced bus payload ─────────────────────────────
+    log.info("[11/11] Publishing v3 summary to bus...")
+    try:
+        if _IMPORTS_OK.get("agent_bus"):
+            bus = get_bus()
+            v3_ms = report.get("machine_summary_v3", {})
+            if v3_ms:
+                bus.publish("agent_methodology_v3", {
+                    "machine_summary_v3": v3_ms,
+                    "governance_v3": report.get("governance_v3", {}),
+                    "run_date": today,
+                })
+                log.info("  Published v3 machine_summary to AgentBus")
+    except Exception as exc:
+        log.debug("v3 bus publish failed: %s", exc)
 
     # ── Finalize ─────────────────────────────────────────────────────────────
     finished_at = datetime.now(timezone.utc)

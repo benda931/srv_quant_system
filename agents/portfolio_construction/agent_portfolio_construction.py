@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import uuid
+
 import numpy as np
 import pandas as pd
 
@@ -243,6 +245,267 @@ class PortfolioConstructor:
 
         return weights
 
+    # ── Institutional Methods ─────────────────────────────────────────
+
+    def load_governance_inputs(self) -> Dict[str, Any]:
+        """
+        Consume methodology governance reports.
+
+        Reads the latest methodology report from agents/methodology/reports/,
+        extracts approval_matrix, scorecards, regime_fitness_map, machine_summary.
+        Only APPROVED/CONDITIONAL strategies may receive allocation;
+        REJECTED strategies are forced to weight = 0.
+        """
+        reports_dir = ROOT / "agents" / "methodology" / "reports"
+        governance: Dict[str, Any] = {
+            "approval_matrix": {},
+            "scorecards": [],
+            "regime_fitness_map": {},
+            "machine_summary": {},
+            "loaded": False,
+        }
+
+        if not reports_dir.exists():
+            log.warning("Governance: reports dir not found at %s", reports_dir)
+            return governance
+
+        # Find latest methodology report (prefer v3 fields if present)
+        candidates = sorted(reports_dir.glob("*.json"), reverse=True)
+        report_data: Optional[Dict] = None
+        for fpath in candidates:
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+                # Must have approval_matrix or approval_matrix_v3
+                if isinstance(data, dict) and (
+                    "approval_matrix" in data or "approval_matrix_v3" in data
+                ):
+                    report_data = data
+                    log.info("Governance: loaded report from %s", fpath.name)
+                    break
+            except (json.JSONDecodeError, OSError):
+                continue
+
+        if report_data is None:
+            log.warning("Governance: no valid methodology report found")
+            return governance
+
+        # Extract approval matrix (prefer v3)
+        governance["approval_matrix"] = (
+            report_data.get("approval_matrix_v3")
+            or report_data.get("approval_matrix", {})
+        )
+
+        # Extract scorecards
+        governance["scorecards"] = report_data.get("scorecards", [])
+
+        # Extract regime fitness map
+        governance["regime_fitness_map"] = report_data.get("regime_fitness_map", {})
+
+        # Extract machine summary (prefer v3)
+        governance["machine_summary"] = (
+            report_data.get("machine_summary_v3")
+            or report_data.get("machine_summary", {})
+        )
+
+        governance["loaded"] = True
+        n_approved = sum(
+            1 for d in governance["approval_matrix"].values()
+            if d in ("APPROVED", "CONDITIONAL")
+            or (isinstance(d, dict) and d.get("decision") in ("APPROVED", "CONDITIONAL"))
+        )
+        log.info(
+            "Governance: %d strategies in matrix, %d allocable (APPROVED/CONDITIONAL)",
+            len(governance["approval_matrix"]),
+            n_approved,
+        )
+        return governance
+
+    def risk_budget_allocate(
+        self, cov_matrix: pd.DataFrame, target_vol: float = 0.10,
+        governance: Optional[Dict] = None,
+    ) -> Dict[str, float]:
+        """
+        Allocate risk budget to each strategy given a target annual vol.
+
+        Steps:
+        1. Start with inverse-vol weights
+        2. Apply regime-based tilts from methodology governance
+        3. Cap individual risk contribution at 30%
+        4. Scale to target vol
+
+        Returns dict of ticker -> risk_budget_fraction.
+        """
+        tickers = list(cov_matrix.columns)
+        n = len(tickers)
+        if n == 0:
+            return {}
+
+        # Step 1: Inverse-vol weights
+        vols = np.sqrt(np.diag(cov_matrix.values))
+        vols = np.where(vols < 1e-8, 1e-8, vols)
+        inv_vol = 1.0 / vols
+        weights = inv_vol / inv_vol.sum()
+
+        # Step 2: Regime tilts from governance
+        if governance and governance.get("loaded"):
+            regime_fitness = governance.get("regime_fitness_map", {})
+            for i, t in enumerate(tickers):
+                fitness = regime_fitness.get(t, {})
+                if isinstance(fitness, dict):
+                    tilt = fitness.get("fitness_score", 1.0)
+                    weights[i] *= max(0.1, min(2.0, tilt))
+
+            # Re-normalize
+            w_sum = weights.sum()
+            if w_sum > 0:
+                weights = weights / w_sum
+
+        # Step 3: Cap individual risk contribution at 30%
+        for _ in range(10):  # Iterative capping
+            capped = False
+            for i in range(n):
+                if weights[i] > 0.30:
+                    excess = weights[i] - 0.30
+                    weights[i] = 0.30
+                    # Redistribute excess proportionally
+                    others = [j for j in range(n) if j != i and weights[j] < 0.30]
+                    if others:
+                        other_sum = sum(weights[j] for j in others)
+                        if other_sum > 0:
+                            for j in others:
+                                weights[j] += excess * (weights[j] / other_sum)
+                    capped = True
+            if not capped:
+                break
+
+        # Normalize
+        w_sum = weights.sum()
+        if w_sum > 0:
+            weights = weights / w_sum
+
+        # Step 4: Scale to target vol
+        port_vol = float(np.sqrt(weights @ cov_matrix.values @ weights))
+        if port_vol > 0:
+            vol_scale = target_vol / port_vol
+        else:
+            vol_scale = 1.0
+
+        result = {t: round(float(weights[i] * vol_scale), 4) for i, t in enumerate(tickers)}
+
+        used = port_vol / target_vol if target_vol > 0 else 0.0
+        log.info(
+            "Risk budget: target_vol=%.2f, port_vol=%.4f, scale=%.2f, budget_used=%.2f",
+            target_vol, port_vol, vol_scale, min(used, 1.0),
+        )
+        return result
+
+    def compute_turnover(
+        self, current_weights: Dict[str, float], new_weights: Dict[str, float],
+    ) -> float:
+        """
+        Compute total turnover and cap at 20% if exceeded.
+
+        Turnover = sum(|new - current|) / 2.
+        If turnover > 20%, scale changes to cap at 20%.
+
+        Returns actual turnover after any capping. Also modifies new_weights
+        in-place if capping is applied.
+        """
+        all_tickers = set(list(current_weights.keys()) + list(new_weights.keys()))
+        total_abs_diff = 0.0
+        for t in all_tickers:
+            total_abs_diff += abs(new_weights.get(t, 0.0) - current_weights.get(t, 0.0))
+
+        turnover = total_abs_diff / 2.0
+
+        if turnover > 0.20:
+            scale = 0.20 / turnover
+            log.warning(
+                "Turnover %.2f%% exceeds 20%% cap — scaling changes by %.2f",
+                turnover * 100, scale,
+            )
+            for t in all_tickers:
+                curr = current_weights.get(t, 0.0)
+                new = new_weights.get(t, 0.0)
+                new_weights[t] = round(curr + (new - curr) * scale, 4)
+            turnover = 0.20
+
+        log.info("Turnover: %.2f%%", turnover * 100)
+        return round(turnover, 4)
+
+    def regime_adjust_weights(
+        self, weights: Dict[str, float], regime: str,
+    ) -> Dict[str, float]:
+        """
+        Regime-conditional allocation adjustments.
+
+        CALM:    allow full allocation
+        NORMAL:  cap gross exposure at 1.5x
+        TENSION: reduce all weights by 40%, cap gross at 1.0x
+        CRISIS:  keep only Risk Parity weights at 50% scale
+        """
+        adjusted = dict(weights)
+
+        if regime == "CALM":
+            # Full allocation, no adjustment
+            pass
+
+        elif regime == "NORMAL":
+            gross = sum(abs(w) for w in adjusted.values())
+            if gross > 1.5:
+                scale = 1.5 / gross
+                adjusted = {t: round(w * scale, 4) for t, w in adjusted.items()}
+                log.info("NORMAL regime: capped gross from %.2f to 1.50", gross)
+
+        elif regime == "TENSION":
+            # Reduce all by 40%
+            adjusted = {t: round(w * 0.6, 4) for t, w in adjusted.items()}
+            # Cap gross at 1.0x
+            gross = sum(abs(w) for w in adjusted.values())
+            if gross > 1.0:
+                scale = 1.0 / gross
+                adjusted = {t: round(w * scale, 4) for t, w in adjusted.items()}
+            log.info("TENSION regime: weights reduced 40%%, gross=%.2f",
+                     sum(abs(w) for w in adjusted.values()))
+
+        elif regime == "CRISIS":
+            # Keep only Risk Parity weights at 50% scale — zero out everything
+            # and rely on RP weights passed in via blend (RP-dominated in CRISIS)
+            adjusted = {t: round(w * 0.5, 4) for t, w in adjusted.items()}
+            log.info("CRISIS regime: scaled to 50%% of RP-dominated blend")
+
+        else:
+            log.warning("Unknown regime '%s' — no adjustment", regime)
+
+        # Remove dust
+        adjusted = {t: w for t, w in adjusted.items() if abs(w) > 0.005}
+        return adjusted
+
+    def _build_machine_summary(
+        self,
+        final_weights: Dict[str, float],
+        regime: str,
+        turnover: float,
+        risk_budget_used: float,
+        strategies_excluded: List[str],
+    ) -> Dict[str, Any]:
+        """Build institutional machine_summary for downstream consumption."""
+        gross = sum(abs(w) for w in final_weights.values())
+        net = sum(final_weights.values())
+        return {
+            "total_positions": sum(1 for w in final_weights.values() if abs(w) > 0.005),
+            "gross_exposure": round(gross, 4),
+            "net_exposure": round(net, 4),
+            "regime": regime,
+            "allocation_method": "regime_adaptive_blend",
+            "turnover": turnover,
+            "risk_budget_used": round(risk_budget_used, 4),
+            "strategies_excluded": strategies_excluded,
+            "execution_instructions": {
+                t: round(w, 4) for t, w in final_weights.items() if abs(w) > 0.005
+            },
+        }
+
     def _get_regime(self) -> str:
         """Get current regime from prices."""
         vix = self.prices.get("^VIX", pd.Series(dtype=float)).dropna()
@@ -255,7 +518,7 @@ class PortfolioConstructor:
         return "CRISIS"
 
     def run(self) -> Dict:
-        """Full cycle: signals → covariance → optimize → blend → constrain → save."""
+        """Full cycle: governance → signals → covariance → optimize → blend → constrain → save."""
         log.info("=" * 60)
         log.info("PORTFOLIO CONSTRUCTION — %s", datetime.now(timezone.utc).isoformat()[:19])
         log.info("=" * 60)
@@ -263,9 +526,21 @@ class PortfolioConstructor:
         regime = self._get_regime()
         log.info("Regime: %s", regime)
 
+        # ── Governance inputs ──────────────────────────────────────────
+        governance = self.load_governance_inputs()
+        approval_matrix = governance.get("approval_matrix", {})
+        strategies_excluded: List[str] = []
+        for strat_name, decision in approval_matrix.items():
+            dec = decision if isinstance(decision, str) else decision.get("decision", "REJECTED")
+            if dec == "REJECTED":
+                strategies_excluded.append(strat_name)
+
         # Covariance
         cov = self.compute_covariance(lookback=60)
         log.info("Covariance: %d×%d matrix", cov.shape[0], cov.shape[1])
+
+        # ── Risk budget allocation ─────────────────────────────────────
+        risk_budget = self.risk_budget_allocate(cov, target_vol=0.10, governance=governance)
 
         # Expected returns from momentum
         avail = [s for s in SECTORS if s in self.prices.columns]
@@ -301,8 +576,28 @@ class PortfolioConstructor:
         log.info("Blended (pre-constraint): gross=%.2f, net=%.2f",
                  sum(abs(w) for w in blended.values()), sum(blended.values()))
 
+        # ── Zero out REJECTED strategies in blended weights ────────────
+        for strat in strategies_excluded:
+            if strat in blended:
+                blended[strat] = 0.0
+
+        # ── Regime-conditional adjustment ──────────────────────────────
+        blended = self.regime_adjust_weights(blended, regime)
+
         # Constrain
         final = self.apply_constraints(blended)
+
+        # ── Turnover control ───────────────────────────────────────────
+        prev_path = OUTPUT_DIR / "portfolio_weights.json"
+        current_weights: Dict[str, float] = {}
+        if prev_path.exists():
+            try:
+                prev = json.loads(prev_path.read_text(encoding="utf-8"))
+                current_weights = prev.get("weights", {})
+            except (json.JSONDecodeError, OSError):
+                pass
+        turnover = self.compute_turnover(current_weights, final)
+
         gross = sum(abs(w) for w in final.values())
         net = sum(final.values())
 
@@ -311,6 +606,16 @@ class PortfolioConstructor:
         exp_ret = float(final_arr @ np.array([er.get(t, 0) for t in avail]))
         exp_vol = float(np.sqrt(final_arr @ cov.loc[avail, avail].values @ final_arr))
         sharpe_est = exp_ret / exp_vol if exp_vol > 0 else 0
+
+        # ── Risk budget usage ──────────────────────────────────────────
+        port_vol = exp_vol
+        risk_budget_used = port_vol / 0.10 if 0.10 > 0 else 0.0
+        risk_budget_used = min(risk_budget_used, 1.0)
+
+        # ── Machine summary ────────────────────────────────────────────
+        machine_summary = self._build_machine_summary(
+            final, regime, turnover, risk_budget_used, strategies_excluded,
+        )
 
         result = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -323,6 +628,11 @@ class PortfolioConstructor:
             "expected_return": round(exp_ret, 4),
             "expected_vol": round(exp_vol, 4),
             "sharpe_estimate": round(sharpe_est, 3),
+            "risk_budget": risk_budget,
+            "turnover": turnover,
+            "governance_loaded": governance.get("loaded", False),
+            "strategies_excluded": strategies_excluded,
+            "machine_summary": machine_summary,
         }
 
         log.info("Final: %d positions, gross=%.2f, net=%.2f, Sharpe est=%.3f",
