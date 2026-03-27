@@ -1613,7 +1613,7 @@ def build_app() -> dash.Dash:
                     dbc.Tab(label="Optimization 🎯", tab_id="tab-optimization"),
                 ],
                 className="mt-2",
-                style={"flexWrap": "wrap"},
+                style={"flexWrap": "wrap", "overflow": "visible"},
             ),
             html.Div(id="tab-content", className="mt-3"),
             dcc.Store(id="master-store", data=master_df.to_dict("records")),
