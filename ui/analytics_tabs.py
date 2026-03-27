@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import json
+import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -2557,8 +2561,8 @@ def build_portfolio_tab(paper_portfolio: Optional[Dict] = None, prices: Optional
 # METHODOLOGY LAB TAB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Optional[Dict] = None) -> html.Div:
-    """Full Methodology Lab tab layout — strategy comparison and analysis.
+def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Optional[Dict] = None, alpha_research: Optional[Dict] = None) -> html.Div:
+    """Full Methodology Lab tab layout -- strategy comparison and analysis.
 
     Parameters
     ----------
@@ -2567,20 +2571,41 @@ def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Opti
     governance_data : dict | None
         Governance report from agents/methodology/reports/2026-*.json with
         conclusions, recommendations, signal_stack, metrics, etc.
+    alpha_research : dict | None
+        Alpha research report from agents/methodology/reports/*alpha_research*.json.
     """
 
     # If we have governance data but no lab data, build from governance
     if not lab_data and governance_data:
-        return _build_methodology_from_governance(governance_data)
+        gov_div = _build_methodology_from_governance(governance_data)
+        # Append alpha research card if available
+        if alpha_research:
+            ar_section = _build_alpha_research_section(alpha_research)
+            # Inject into the governance div
+            if hasattr(gov_div, 'children') and isinstance(gov_div.children, list):
+                gov_div.children.insert(0, ar_section)
+        return gov_div
 
     if not lab_data:
+        fallback_sections = []
+        if alpha_research:
+            fallback_sections.append(_build_alpha_research_section(alpha_research))
+        if governance_data:
+            fallback_sections.extend(_build_governance_sections(governance_data))
+        if fallback_sections:
+            return html.Div(fallback_sections, style={"padding": "12px"})
         return html.Div(
-            dbc.Alert("אין נתוני Methodology Lab זמינים. הרץ methodology_lab כדי לייצר.", color="secondary",
+            dbc.Alert("\u05d0\u05d9\u05df \u05e0\u05ea\u05d5\u05e0\u05d9 Methodology Lab \u05d6\u05de\u05d9\u05e0\u05d9\u05dd. \u05d4\u05e8\u05e5 methodology_lab \u05db\u05d3\u05d9 \u05dc\u05d9\u05d9\u05e6\u05e8.", color="secondary",
                       style={"textAlign": "right", "direction": "rtl"}),
             style={"padding": "20px"},
         )
 
     sections: List = []
+
+    # ── Alpha Research Highlighted Card ──────────────────────────────────
+    if alpha_research:
+        sections.append(_build_alpha_research_section(alpha_research))
+
     strategies = list(lab_data.keys())
     n_strats = len(strategies)
 
@@ -2652,8 +2677,15 @@ def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Opti
         style={"fontSize": "12px"},
     )
     sections.append(dbc.Card([
-        dbc.CardHeader(html.H6("📊 השוואת אסטרטגיות — Strategy Comparison", className="mb-0 text-center")),
-        dbc.CardBody(cmp_table, style={"overflowX": "auto"}),
+        dbc.CardHeader(html.H6("\U0001f4ca \u05d4\u05e9\u05d5\u05d5\u05d0\u05ea \u05d0\u05e1\u05d8\u05e8\u05d8\u05d2\u05d9\u05d5\u05ea \u2014 Strategy Comparison", className="mb-0 text-center")),
+        dbc.CardBody([
+            cmp_table,
+            html.Div(
+                "\u05d4\u05e2\u05e8\u05d4: Lab \u05de\u05e9\u05ea\u05de\u05e9 \u05d1-daily-accumulation P&L. Alpha Research \u05de\u05e9\u05ea\u05de\u05e9 \u05d1-per-trade returns.",
+                className="text-muted mt-2",
+                style={"fontSize": "0.78rem", "fontStyle": "italic", "textAlign": "center"},
+            ),
+        ], style={"overflowX": "auto"}),
     ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}))
 
     # ── 3. Parameter Details (Accordion) ────────────────────────────────────
@@ -2772,6 +2804,88 @@ def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Opti
         sections.extend(gov_sections)
 
     return html.Div(sections, style={"padding": "12px"})
+
+
+def _build_alpha_research_section(alpha_research: Dict) -> dbc.Card:
+    """Build a highlighted card showing the Alpha Research validated strategy results."""
+    best_oos = alpha_research.get("best_oos", {})
+    oos_sharpe = best_oos.get("oos_sharpe", 0)
+    oos_wr = best_oos.get("oos_wr", 0)
+    oos_trades = best_oos.get("oos_trades", 0)
+    is_sharpe = best_oos.get("is_sharpe", 0)
+    params = best_oos.get("params", {})
+    valid = best_oos.get("valid", False)
+
+    regime_adaptive = alpha_research.get("regime_adaptive", {})
+    regime_sharpes = regime_adaptive.get("sharpes", {})
+
+    recommendations = alpha_research.get("recommendations", [])
+    timestamp = alpha_research.get("timestamp", "N/A")
+    if isinstance(timestamp, str) and len(timestamp) > 19:
+        timestamp = timestamp[:19].replace("T", " ")
+
+    # Determine best strategy name from context
+    strategy_name = "ALPHA_WHITELIST_MR"
+
+    # KPI row
+    kpi_items = dbc.Row([
+        _kpi("OOS Sharpe", _ff(oos_sharpe), "success" if oos_sharpe > 0 else "danger", small=True),
+        _kpi("IS Sharpe", _ff(is_sharpe), "info", small=True),
+        _kpi("OOS Win Rate", _pct(oos_wr), "primary", small=True),
+        _kpi("OOS Trades", str(oos_trades), "secondary", small=True),
+        _kpi("Validated", "YES" if valid else "NO", "success" if valid else "danger", small=True),
+    ], className="g-2 mb-2")
+
+    # Regime breakdown
+    regime_items = []
+    for rname, rsharpe in regime_sharpes.items():
+        rc = "#4caf50" if rsharpe > 0 else "#ef5350"
+        regime_items.append(html.Span([
+            html.Span(f"{rname}: ", className="text-muted", style={"fontSize": "0.78rem"}),
+            html.Span(f"{rsharpe:.3f}  ", style={"color": rc, "fontWeight": "bold", "fontSize": "0.82rem"}),
+        ]))
+
+    # Params
+    param_items = []
+    for pk, pv in params.items():
+        param_items.append(html.Span([
+            html.Span(f"{pk}=", className="text-muted", style={"fontSize": "0.75rem"}),
+            html.Span(f"{pv} ", style={"fontSize": "0.8rem"}),
+        ]))
+
+    # Recommendations
+    rec_items = []
+    for r in recommendations[:3]:
+        r_text = r if isinstance(r, str) else str(r)
+        rec_items.append(html.Div(r_text[:150], className="text-muted", style={"fontSize": "0.78rem"}))
+
+    body = [kpi_items]
+    if regime_items:
+        body.append(html.Div([
+            html.Strong("Regime Sharpes: ", className="small text-info"),
+            html.Span(regime_items),
+        ], className="mb-2"))
+    if param_items:
+        body.append(html.Div([
+            html.Strong("Best Params: ", className="small text-info"),
+            html.Span(param_items),
+        ], className="mb-2"))
+    if rec_items:
+        body.append(html.Div([
+            html.Strong("Recommendations:", className="small text-info d-block"),
+        ] + rec_items, className="mb-1"))
+
+    return dbc.Card([
+        dbc.CardHeader([
+            html.H6([
+                "\U0001f3c6 Best Validated Strategy: ",
+                html.Span(strategy_name, style={"color": "#4caf50"}),
+                html.Span(f" \u2014 OOS Sharpe {oos_sharpe:.3f}", style={"color": "#ff9800"}),
+            ], className="mb-0 text-center"),
+            html.Div(f"Alpha Research \u2014 {timestamp}", className="text-muted text-center", style={"fontSize": "0.75rem"}),
+        ], style={"backgroundColor": "#1a3a1a", "borderBottom": "2px solid #4caf50"}),
+        dbc.CardBody(body),
+    ], className="border-success mb-3", style={"borderTop": "3px solid #4caf50", "backgroundColor": "#1a2a1a"})
 
 
 def _build_governance_sections(gov: Dict) -> List:
@@ -2969,6 +3083,8 @@ def build_ml_insights_tab(
     regime_forecast: Optional[Dict] = None,
     ml_signals: Optional[Dict] = None,
     drift_status: Optional[Dict] = None,
+    ensemble_results: Optional[Dict] = None,
+    scout_data: Optional[Dict] = None,
 ) -> html.Div:
     """Build the ML Insights analytics tab.
 
@@ -2982,9 +3098,41 @@ def build_ml_insights_tab(
         Per-sector ML conviction scores and aggregate metrics.
     drift_status : dict | None
         Drift detection output: ``is_drifting``, ``current_version``.
+    ensemble_results : dict | None
+        GBM/ensemble alpha model results from data/ensemble_results.json.
+    scout_data : dict | None
+        Data scout report with research leads, risk flags, macro risk.
     """
     drift_status = drift_status or {}
     ml_signals = ml_signals or {}
+    ensemble_results = ensemble_results or {}
+    scout_data = scout_data or {}
+
+    all_sections = []
+
+    # ── Run ML Pipeline button ───────────────────────────────────────────
+    all_sections.append(dbc.Row([
+        dbc.Col(
+            dbc.Button(
+                [html.Span("\u25b6 ", style={"fontSize": "1rem"}), "Run ML Pipeline"],
+                id="btn-run-ml-pipeline",
+                color="info",
+                size="sm",
+                className="mb-3",
+                style={"fontWeight": "bold"},
+                disabled=True,
+            ),
+            width="auto",
+        ),
+        dbc.Col(
+            html.Small(
+                "python -m analytics.ml_pipeline",
+                className="text-muted mt-1",
+                style={"fontSize": "0.78rem"},
+            ),
+            width="auto",
+        ),
+    ], className="mb-2"))
 
     # ── Row 1: KPI cards ──────────────────────────────────────────────────
     accuracy_val = ml_signals.get("accuracy")
@@ -3001,13 +3149,56 @@ def build_ml_insights_tab(
 
     kpi_row = dbc.Row(
         [
-            _kpi("Model Accuracy — דיוק מודל", accuracy_str, color="info"),
-            _kpi("IC Score — ניקוד IC", ic_str, color="primary"),
-            _kpi("Drift Status — סטטוס סטייה", drift_label, color=drift_color),
-            _kpi("Model Version — גרסת מודל", version_str, color="warning"),
+            _kpi("Model Accuracy \u2014 \u05d3\u05d9\u05d5\u05e7 \u05de\u05d5\u05d3\u05dc", accuracy_str, color="info"),
+            _kpi("IC Score \u2014 \u05e0\u05d9\u05e7\u05d5\u05d3 IC", ic_str, color="primary"),
+            _kpi("Drift Status \u2014 \u05e1\u05d8\u05d8\u05d5\u05e1 \u05e1\u05d8\u05d9\u05d9\u05d4", drift_label, color=drift_color),
+            _kpi("Model Version \u2014 \u05d2\u05e8\u05e1\u05ea \u05de\u05d5\u05d3\u05dc", version_str, color="warning"),
         ],
         className="g-3 mb-4",
     )
+    all_sections.append(kpi_row)
+
+    # ── Ensemble / Alpha Model Results ────────────────────────────────────
+    if ensemble_results:
+        best = ensemble_results.get("best", {})
+        all_configs = ensemble_results.get("all_configs", {})
+        if best:
+            ens_kpi = dbc.Row([
+                _kpi("Best Config", str(best.get("config_name", "N/A"))[:25], "success", small=True),
+                _kpi("OOS Sharpe", _ff(best.get("sharpe", 0)), "warning", small=True),
+                _kpi("Annual Return", _pct(best.get("annual_return", 0)), "info", small=True),
+                _kpi("Max DD", _pct(best.get("max_dd", 0)), "danger", small=True),
+                _kpi("Model Type", "GBM Ensemble", "primary", small=True),
+                _kpi("# Configs", str(len(all_configs)), "secondary", small=True),
+            ], className="g-2 mb-3")
+
+            # Configs comparison table
+            cfg_rows = []
+            for cname, cdata in sorted(all_configs.items(), key=lambda x: x[1].get("sharpe", 0), reverse=True):
+                s_val = cdata.get("sharpe", 0)
+                s_color = "#4caf50" if s_val > 0.5 else "#ff9800" if s_val > 0 else "#ef5350"
+                cfg_rows.append(html.Tr([
+                    html.Td(cname, style={"fontWeight": "bold", "fontSize": "0.82rem"}),
+                    html.Td(_ff(s_val), style={"color": s_color, "fontWeight": "bold", "fontSize": "0.82rem"}),
+                    html.Td(_pct(cdata.get("annual_return", 0)), style={"fontSize": "0.82rem"}),
+                    html.Td(_pct(cdata.get("max_dd", 0)), style={"fontSize": "0.82rem"}),
+                    html.Td(str(cdata.get("n_periods", 0)), style={"fontSize": "0.82rem"}),
+                ]))
+
+            ens_table = dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Config"), html.Th("Sharpe"), html.Th("Annual Ret"),
+                    html.Th("Max DD"), html.Th("Periods"),
+                ]))] + [html.Tbody(cfg_rows)],
+                bordered=True, dark=True, hover=True, size="sm",
+                style={"fontSize": "0.82rem"},
+            )
+
+            ens_card = dbc.Card([
+                dbc.CardHeader(html.H6("\u2699\ufe0f GBM Alpha Model Results \u2014 \u05ea\u05d5\u05e6\u05d0\u05d5\u05ea \u05de\u05d5\u05d3\u05dc \u05d0\u05dc\u05e4\u05d0", className="mb-0 text-center")),
+                dbc.CardBody([ens_kpi, ens_table], style={"overflowX": "auto"}),
+            ], className="border-warning mb-3", style={"borderTop": "3px solid var(--bs-warning)"})
+            all_sections.append(ens_card)
 
     # ── Row 2 col-8: Feature importance bar chart ─────────────────────────
     if feature_importances and isinstance(feature_importances, dict) and len(feature_importances) > 0:
@@ -3026,7 +3217,7 @@ def build_ml_insights_tab(
             template="plotly_dark",
             paper_bgcolor="#1a1a2e",
             plot_bgcolor="#1a1a2e",
-            title={"text": "Feature Importance — חשיבות פיצ'רים", "x": 0.5},
+            title={"text": "Feature Importance \u2014 \u05d7\u05e9\u05d9\u05d1\u05d5\u05ea \u05e4\u05d9\u05e6'\u05e8\u05d9\u05dd", "x": 0.5},
             xaxis_title="Importance",
             yaxis_title="",
             margin=dict(l=180, r=20, t=50, b=40),
@@ -3035,19 +3226,19 @@ def build_ml_insights_tab(
         fi_content = dcc.Graph(figure=fi_fig, config={"displayModeBar": False})
     else:
         fi_content = dbc.Alert(
-            "ML models not trained yet — הרצת pipeline נדרשת לחישוב חשיבות פיצ'רים",
+            "ML models not trained yet \u2014 \u05d4\u05e8\u05e6\u05ea pipeline \u05e0\u05d3\u05e8\u05e9\u05ea \u05dc\u05d7\u05d9\u05e9\u05d5\u05d1 \u05d7\u05e9\u05d9\u05d1\u05d5\u05ea \u05e4\u05d9\u05e6'\u05e8\u05d9\u05dd",
             color="info",
             className="mt-3",
             style=_RTL,
         )
 
-    # ── Row 2 col-4: Regime forecast donut ────────────────────────────────
+    # ── Regime forecast donut + multi-horizon ─────────────────────────────
+    rf_content_items = []
     if regime_forecast and isinstance(regime_forecast, dict):
         probs = regime_forecast.get("probabilities", regime_forecast)
-        # Accept either top-level keys or nested 'probabilities'
         regime_labels = []
         regime_values = []
-        regime_colors = {
+        regime_colors_map = {
             "CALM": "#00bc8c",
             "NORMAL": "#3498db",
             "TENSION": "#f39c12",
@@ -3065,7 +3256,7 @@ def build_ml_insights_tab(
                     labels=regime_labels,
                     values=regime_values,
                     hole=0.5,
-                    marker_colors=[regime_colors.get(l, "#888") for l in regime_labels],
+                    marker_colors=[regime_colors_map.get(l, "#888") for l in regime_labels],
                     textinfo="label+percent",
                 )
             )
@@ -3073,22 +3264,47 @@ def build_ml_insights_tab(
                 template="plotly_dark",
                 paper_bgcolor="#1a1a2e",
                 plot_bgcolor="#1a1a2e",
-                title={"text": "Regime Forecast — תחזית רגים", "x": 0.5},
+                title={"text": "Regime Forecast \u2014 \u05ea\u05d7\u05d6\u05d9\u05ea \u05e8\u05d2\u05d9\u05dd", "x": 0.5},
                 margin=dict(l=20, r=20, t=50, b=20),
-                height=350,
+                height=280,
                 showlegend=False,
             )
-            rf_content = dcc.Graph(figure=rf_fig, config={"displayModeBar": False})
-        else:
-            rf_content = dbc.Alert(
-                "Regime forecast data incomplete — אין נתוני הסתברויות",
-                color="warning",
-                className="mt-3",
-                style=_RTL,
-            )
+            rf_content_items.append(dcc.Graph(figure=rf_fig, config={"displayModeBar": False}))
+
+        # Multi-horizon forecast if available
+        for horizon_key in ["forecast_1d", "forecast_5d", "forecast_20d"]:
+            horizon_data = regime_forecast.get(horizon_key)
+            if horizon_data and isinstance(horizon_data, dict):
+                label = horizon_key.replace("forecast_", "")
+                items = []
+                for rn in ["CALM", "NORMAL", "TENSION", "CRISIS"]:
+                    rv = horizon_data.get(rn, 0)
+                    if rv:
+                        rc = regime_colors_map.get(rn, "#888")
+                        items.append(html.Span([
+                            html.Span(f"{rn}: ", className="text-muted", style={"fontSize": "0.75rem"}),
+                            html.Span(f"{rv:.0%} ", style={"color": rc, "fontWeight": "bold", "fontSize": "0.8rem"}),
+                        ]))
+                if items:
+                    rf_content_items.append(html.Div([
+                        html.Strong(f"Horizon {label}:", className="small text-info d-block"),
+                        html.Div(items),
+                    ], className="mt-1"))
+
+        # Transition & safety
+        transition_prob = regime_forecast.get("transition_probability", 0)
+        safety_score = regime_forecast.get("regime_safety_score", 0)
+        if transition_prob or safety_score:
+            rf_content_items.append(html.Div([
+                html.Span(f"Transition: {transition_prob:.0%}", className="text-muted small me-3"),
+                html.Span(f"Safety: {safety_score:.0%}", className="text-muted small"),
+            ], className="mt-1"))
+
+    if rf_content_items:
+        rf_content = html.Div(rf_content_items)
     else:
         rf_content = dbc.Alert(
-            "Regime forecast not available — תחזית רגים לא זמינה",
+            "Regime forecast not available \u2014 \u05ea\u05d7\u05d6\u05d9\u05ea \u05e8\u05d2\u05d9\u05dd \u05dc\u05d0 \u05d6\u05de\u05d9\u05e0\u05d4",
             color="info",
             className="mt-3",
             style=_RTL,
@@ -3101,15 +3317,16 @@ def build_ml_insights_tab(
         ],
         className="g-3 mb-4",
     )
+    all_sections.append(row2)
 
-    # ── Row 3: Sector ML conviction table ─────────────────────────────────
+    # ── Sector ML conviction table ─────────────────────────────────────
     sector_scores = ml_signals.get("sector_scores", {})
     if sector_scores and isinstance(sector_scores, dict) and len(sector_scores) > 0:
         table_header = html.Thead(
             html.Tr([
-                html.Th("Sector — סקטור", style={"textAlign": "center"}),
-                html.Th("ML Score — ציון ML", style={"textAlign": "center"}),
-                html.Th("Signal — סיגנל", style={"textAlign": "center"}),
+                html.Th("Sector \u2014 \u05e1\u05e7\u05d8\u05d5\u05e8", style={"textAlign": "center"}),
+                html.Th("ML Score \u2014 \u05e6\u05d9\u05d5\u05df ML", style={"textAlign": "center"}),
+                html.Th("Signal \u2014 \u05e1\u05d9\u05d2\u05e0\u05dc", style={"textAlign": "center"}),
             ]),
             style={"backgroundColor": "#2d2d44", "color": "#ddd"},
         )
@@ -3146,7 +3363,7 @@ def build_ml_insights_tab(
         table_card = dbc.Card(
             [
                 dbc.CardHeader(
-                    html.H6("Sector ML Conviction — ציוני ML לפי סקטור", className="mb-0 text-center"),
+                    html.H6("Sector ML Conviction \u2014 \u05e6\u05d9\u05d5\u05e0\u05d9 ML \u05dc\u05e4\u05d9 \u05e1\u05e7\u05d8\u05d5\u05e8", className="mb-0 text-center"),
                 ),
                 dbc.CardBody(sector_table),
             ],
@@ -3155,7 +3372,7 @@ def build_ml_insights_tab(
         )
     else:
         table_card = dbc.Alert(
-            "Run ML pipeline to see signals — הרצת ML pipeline נדרשת לצפייה בסיגנלים",
+            "Run ML pipeline to see signals \u2014 \u05d4\u05e8\u05e6\u05ea ML pipeline \u05e0\u05d3\u05e8\u05e9\u05ea \u05dc\u05e6\u05e4\u05d9\u05d9\u05d4 \u05d1\u05e1\u05d9\u05d2\u05e0\u05dc\u05d9\u05dd",
             color="info",
             className="mt-3",
             style=_RTL,
@@ -3165,9 +3382,46 @@ def build_ml_insights_tab(
         [dbc.Col(table_card, md=12)],
         className="g-3 mb-4",
     )
+    all_sections.append(row3)
+
+    # ── Data Scout Insights ───────────────────────────────────────────────
+    if scout_data:
+        scout_items = []
+
+        # Research leads
+        research_leads = scout_data.get("research_leads", scout_data.get("opportunities", []))
+        if research_leads:
+            scout_items.append(html.Strong("\U0001f50d Top Research Leads:", className="text-info small d-block mb-1"))
+            for rl in research_leads[:5]:
+                rl_text = rl if isinstance(rl, str) else str(rl)
+                scout_items.append(html.Div(f"  {rl_text[:120]}", className="text-muted", style={"fontSize": "0.78rem"}))
+
+        # Risk flags
+        risk_flags = scout_data.get("risk_flags", [])
+        if risk_flags:
+            scout_items.append(html.Strong("\u26a0 Top Risk Flags:", className="text-danger small d-block mb-1 mt-2"))
+            for rf in risk_flags[:5]:
+                rf_text = rf if isinstance(rf, str) else str(rf)
+                scout_items.append(html.Div(f"  {rf_text[:120]}", className="text-warning", style={"fontSize": "0.78rem"}))
+
+        # Macro risk score
+        macro_risk = scout_data.get("macro_risk_score", scout_data.get("macro_risk"))
+        if macro_risk is not None:
+            mr_color = "#4caf50" if float(macro_risk) < 0.4 else "#ff9800" if float(macro_risk) < 0.7 else "#ef5350"
+            scout_items.insert(0, html.Div([
+                html.Span("Macro Risk Score: ", className="text-muted small"),
+                html.Span(f"{float(macro_risk):.2f}", style={"color": mr_color, "fontWeight": "bold", "fontSize": "0.9rem"}),
+            ], className="mb-2"))
+
+        if scout_items:
+            scout_card = dbc.Card([
+                dbc.CardHeader(html.H6("\U0001f50d Data Scout Insights \u2014 \u05ea\u05d5\u05d1\u05e0\u05d5\u05ea \u05de\u05d7\u05e7\u05e8", className="mb-0 text-center")),
+                dbc.CardBody(scout_items),
+            ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"})
+            all_sections.append(scout_card)
 
     return html.Div(
-        [kpi_row, row2, row3],
+        all_sections,
         style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
     )
 
@@ -3411,6 +3665,49 @@ def build_agent_status_tab(
     )
 
 
+def _load_json_safe_local(path: str) -> Optional[Dict]:
+    """Load a JSON file safely, returning None on failure."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+# Complete list of all 11 agents in the SRV system
+ALL_AGENTS = [
+    {"name": "methodology", "icon": "\U0001f52c", "role": "Research Governance Truth Engine", "file": "agents/methodology/reports/"},
+    {"name": "optimizer", "icon": "\u2699\ufe0f", "role": "Governed Optimization Committee", "file": "agents/optimizer/optimization_history.json"},
+    {"name": "math", "icon": "\U0001f4d0", "role": "Formula Research & Validation Lab", "file": "agents/math/math_proposals/"},
+    {"name": "auto_improve", "icon": "\U0001f504", "role": "Master Improvement Governor", "file": "agents/auto_improve/machine_summary.json"},
+    {"name": "alpha_decay", "icon": "\U0001f4c9", "role": "Strategy Health & Death Engine", "file": "agents/alpha_decay/decay_status.json"},
+    {"name": "regime_forecaster", "icon": "\U0001f321\ufe0f", "role": "Regime Intelligence Engine", "file": "agents/regime_forecaster/regime_forecast.json"},
+    {"name": "portfolio_construction", "icon": "\U0001f4bc", "role": "Capital Allocation Committee", "file": "agents/portfolio_construction/portfolio_weights.json"},
+    {"name": "risk_guardian", "icon": "\U0001f6e1\ufe0f", "role": "Chief Risk Officer Engine", "file": "agents/risk_guardian/risk_status.json"},
+    {"name": "execution", "icon": "\u26a1", "role": "Trade Orchestration Engine", "file": "agents/execution/execution_log.json"},
+    {"name": "data_scout", "icon": "\U0001f50d", "role": "Research Intelligence & Discovery", "file": "agents/data_scout/scout_report.json"},
+    {"name": "architect", "icon": "\U0001f3d7\ufe0f", "role": "Chief Systems Architect", "file": "agents/architect/improvement_history.json"},
+]
+
+
+def _get_agent_file_status(project_root: str, file_path: str) -> tuple:
+    """Check if an agent's output file/dir exists and get its mtime."""
+    full_path = os.path.join(project_root, file_path)
+    try:
+        if os.path.isdir(full_path):
+            # For directory agents (methodology, math), check if any files exist
+            entries = list(Path(full_path).glob("*.json"))
+            if entries:
+                newest = max(entries, key=lambda p: p.stat().st_mtime)
+                return True, newest.stat().st_mtime
+            return False, 0
+        elif os.path.isfile(full_path):
+            return True, os.path.getmtime(full_path)
+    except Exception:
+        pass
+    return False, 0
+
+
 def build_agent_monitor_tab(
     registry_data: Optional[Dict] = None,
     audit_changes: Optional[List[Dict]] = None,
@@ -3419,12 +3716,16 @@ def build_agent_monitor_tab(
     decay_data: Optional[Dict] = None,
     scout_data: Optional[Dict] = None,
     portfolio_alloc: Optional[Dict] = None,
+    auto_improve_data: Optional[Dict] = None,
+    optimizer_data: Optional[Dict] = None,
+    architect_data: Optional[Dict] = None,
+    project_root: Optional[str] = None,
 ) -> html.Div:
     """
-    Agent Monitor tab -- full agent system dashboard.
+    Agent Monitor tab -- full agent system dashboard showing ALL 11 agents.
 
-    Shows: system health overview, per-agent status cards, risk guardian,
-    regime status, strategy health, scout findings, and audit trail.
+    Shows: system health overview, per-agent clickable cards with details,
+    risk guardian, regime status, strategy health, scout findings, and audit trail.
     """
     _RTL = {"direction": "rtl", "textAlign": "right"}
 
@@ -3432,6 +3733,8 @@ def build_agent_monitor_tab(
         registry_data = {}
     if audit_changes is None:
         audit_changes = []
+    if project_root is None:
+        project_root = str(Path(__file__).resolve().parent.parent)
 
     sections: List = []
 
@@ -3442,27 +3745,39 @@ def build_agent_monitor_tab(
         "COMPLETED": "success",
         "FAILED": "danger",
         "STALE": "warning",
+        "HAS_DATA": "info",
+        "NO_DATA": "dark",
     }
     status_icons = {
-        "IDLE": "⏸",
-        "RUNNING": "▶",
-        "COMPLETED": "✓",
-        "FAILED": "✗",
-        "STALE": "⚠",
+        "IDLE": "\u23f8",
+        "RUNNING": "\u25b6",
+        "COMPLETED": "\u2713",
+        "FAILED": "\u2717",
+        "STALE": "\u26a0",
+        "HAS_DATA": "\u2139",
+        "NO_DATA": "\u2014",
+    }
+
+    # ── Pre-load agent-specific data for detail panels ───────────────────
+    agent_detail_data = {
+        "risk_guardian": risk_data,
+        "regime_forecaster": regime_data,
+        "alpha_decay": decay_data,
+        "data_scout": scout_data,
+        "portfolio_construction": portfolio_alloc,
+        "auto_improve": auto_improve_data,
+        "optimizer": optimizer_data,
+        "architect": architect_data,
     }
 
     # ══════════════════════════════════════════════════════════════════════
-    # 1. System Health Overview KPI Row
+    # 1. System Health KPI Row
     # ══════════════════════════════════════════════════════════════════════
-    total_agents = len(registry_data)
-    healthy_agents = sum(
-        1 for a in registry_data.values()
-        if isinstance(a, dict) and a.get("status") in ("COMPLETED", "IDLE", "RUNNING")
-    )
-    failed_agents = sum(
-        1 for a in registry_data.values()
-        if isinstance(a, dict) and a.get("status") == "FAILED"
-    )
+    agents_with_data = 0
+    for ag_def in ALL_AGENTS:
+        has_file, _ = _get_agent_file_status(project_root, ag_def["file"])
+        if has_file:
+            agents_with_data += 1
 
     # Risk level
     risk_level = "N/A"
@@ -3471,89 +3786,181 @@ def build_agent_monitor_tab(
         risk_level = risk_data.get("level", "N/A")
         risk_color = {"GREEN": "success", "YELLOW": "warning", "RED": "danger", "BLACK": "dark"}.get(risk_level, "secondary")
 
-    # Regime
-    regime_name = "N/A"
-    regime_color = "secondary"
-    if regime_data:
-        regime_name = regime_data.get("predicted_regime", "N/A")
-        regime_color = {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(regime_name, "secondary")
+    # Last cycle time (newest file among all agents)
+    newest_mtime = 0
+    for ag_def in ALL_AGENTS:
+        _, mtime = _get_agent_file_status(project_root, ag_def["file"])
+        if mtime > newest_mtime:
+            newest_mtime = mtime
+    import datetime as _dt
+    last_cycle_str = _dt.datetime.fromtimestamp(newest_mtime).strftime("%Y-%m-%d %H:%M") if newest_mtime > 0 else "N/A"
 
-    # Alpha health
-    alpha_label = "N/A"
-    alpha_color = "secondary"
-    if decay_data:
-        alpha_label = decay_data.get("decay_level", "N/A")
-        alpha_color = {"HEALTHY": "success", "WARNING": "warning", "DECAYING": "danger", "DEAD": "dark"}.get(alpha_label, "secondary")
+    # System status based on risk level
+    sys_status = "HEALTHY"
+    sys_status_color = "success"
+    if risk_level in ("RED", "BLACK"):
+        sys_status = "ALERT"
+        sys_status_color = "danger"
+    elif risk_level == "YELLOW":
+        sys_status = "CAUTION"
+        sys_status_color = "warning"
 
     health_kpi_row = dbc.Row([
-        _kpi("Agent System", f"{healthy_agents}/{total_agents} healthy", "success" if failed_agents == 0 else "warning", small=True),
+        _kpi("Total Agents", "11", "info", small=True),
+        _kpi("With Data", str(agents_with_data), "success" if agents_with_data >= 8 else "warning", small=True),
+        _kpi("Last Cycle", last_cycle_str, "primary", small=True),
+        _kpi("System Status", sys_status, sys_status_color, small=True),
         _kpi("Risk Level", risk_level, risk_color, small=True),
-        _kpi("Regime", regime_name, regime_color, small=True),
-        _kpi("Alpha Health", alpha_label, alpha_color, small=True),
     ], className="g-2 mb-3")
     sections.append(health_kpi_row)
 
+    # ── Run All Agents button ────────────────────────────────────────────
+    sections.append(dbc.Row([
+        dbc.Col(
+            dbc.Button(
+                [html.Span("\u25b6 ", style={"fontSize": "1rem"}), "Run All Agents"],
+                id="btn-run-all-agents",
+                color="success",
+                size="sm",
+                className="mb-3",
+                style={"fontWeight": "bold"},
+                disabled=True,
+            ),
+            width="auto",
+        ),
+        dbc.Col(
+            html.Small(
+                "Orchestrator: python agents/run_agents.py",
+                className="text-muted mt-1",
+                style={"fontSize": "0.78rem"},
+            ),
+            width="auto",
+        ),
+    ], className="mb-2"))
+
     # ══════════════════════════════════════════════════════════════════════
-    # 2. Per-Agent Status Cards (ALL agents from registry)
+    # 2. ALL 11 Agent Cards with Clickable Details (Accordion)
     # ══════════════════════════════════════════════════════════════════════
-    agent_cards = []
-    for agent_key, rec in sorted(registry_data.items(), key=lambda x: x[0]):
-        if not isinstance(rec, dict):
-            continue
-        status = rec.get("status", rec.get("runtime_state", "IDLE"))
-        last_run = rec.get("last_run")
-        run_count = rec.get("run_count", 0)
-        last_error = rec.get("last_error")
-        role = rec.get("role", "")
-        reliability = rec.get("reliability_score")
+    accordion_items = []
+
+    for ag_def in ALL_AGENTS:
+        ag_name = ag_def["name"]
+        ag_icon = ag_def["icon"]
+        ag_role = ag_def["role"]
+        ag_file = ag_def["file"]
+
+        # Get status from registry if available
+        reg_rec = registry_data.get(ag_name, registry_data.get(f"agent_{ag_name}", {}))
+        if not isinstance(reg_rec, dict):
+            reg_rec = {}
+
+        has_file, file_mtime = _get_agent_file_status(project_root, ag_file)
+
+        if reg_rec.get("status"):
+            status = reg_rec["status"]
+        elif has_file:
+            status = "HAS_DATA"
+        else:
+            status = "NO_DATA"
+
+        last_run = reg_rec.get("last_run")
+        if last_run:
+            run_display = str(last_run)[:19].replace("T", " ")
+        elif file_mtime > 0:
+            run_display = _dt.datetime.fromtimestamp(file_mtime).strftime("%Y-%m-%d %H:%M")
+        else:
+            run_display = "Never"
+
+        run_count = reg_rec.get("run_count", 0)
         color = status_colors.get(status, "secondary")
         icon = status_icons.get(status, "?")
 
-        run_display = last_run[:19].replace("T", " ") if last_run else "Never ran"
+        # ── Build detail content for accordion ───────────────────────
+        detail_items = []
+        detail_data = agent_detail_data.get(ag_name)
 
-        body_items = [
-            html.Small(role[:80] if role else "—", className="text-muted d-block mb-2"),
-            html.Div([
-                html.Span("Last run: ", className="text-muted"),
-                html.Span(run_display),
-            ], className="mb-1", style={"fontSize": "0.85rem"}),
-            html.Div([
-                html.Span("Total runs: ", className="text-muted"),
-                html.Span(str(run_count)),
-            ], className="mb-1", style={"fontSize": "0.85rem"}),
-        ]
-        if reliability is not None:
-            body_items.append(html.Div([
-                html.Span("Reliability: ", className="text-muted"),
-                html.Span(f"{reliability:.0%}", style={"color": "#4caf50" if reliability > 0.9 else "#ff9800"}),
-            ], className="mb-1", style={"fontSize": "0.85rem"}))
+        if detail_data and isinstance(detail_data, dict):
+            # Machine summary
+            ms = detail_data.get("machine_summary")
+            if ms and isinstance(ms, dict):
+                for mk, mv in list(ms.items())[:6]:
+                    detail_items.append(html.Div([
+                        html.Span(f"{mk}: ", className="text-muted small"),
+                        html.Span(str(mv)[:100], style={"fontSize": "0.82rem"}),
+                    ], className="mb-1"))
 
-        if last_error:
-            body_items.append(dbc.Alert(
-                f"Error: {str(last_error)[:120]}",
-                color="danger",
-                className="mt-2 mb-0 py-1 px-2",
-                style={"fontSize": "0.78rem"},
-            ))
+            # Recommendations
+            recs = detail_data.get("recommendations", [])
+            if recs and isinstance(recs, list):
+                detail_items.append(html.Hr(style={"borderColor": "#2a2a4a", "margin": "6px 0"}))
+                detail_items.append(html.Strong("Recommendations:", className="text-info small d-block mb-1"))
+                for r in recs[:3]:
+                    r_text = r if isinstance(r, str) else str(r)
+                    detail_items.append(html.Div(f"  {r_text[:120]}", className="text-muted", style={"fontSize": "0.78rem"}))
 
-        card = dbc.Col(
-            dbc.Card([
-                dbc.CardHeader([
-                    html.Span(f"{icon} ", style={"fontSize": "1.1rem"}),
-                    html.Strong(agent_key.replace("_", " ").title(), style={"fontSize": "0.9rem"}),
-                    dbc.Badge(status, color=color, className="ms-2", style={"fontSize": "0.7rem"}),
-                ], style={"backgroundColor": "#16213e", "padding": "8px 12px"}),
-                dbc.CardBody(body_items, style={"backgroundColor": "#1a1a2e", "padding": "10px 12px"}),
-            ], className="h-100", style={"border": "1px solid #2a2a4a"}),
-            md=3,
-            sm=6,
-            className="mb-3",
-        )
-        agent_cards.append(card)
+            # Key metrics
+            met = detail_data.get("metrics", {})
+            if met and isinstance(met, dict):
+                detail_items.append(html.Hr(style={"borderColor": "#2a2a4a", "margin": "6px 0"}))
+                detail_items.append(html.Strong("Key Metrics:", className="text-info small d-block mb-1"))
+                for mk, mv in list(met.items())[:6]:
+                    mv_str = f"{mv:.4f}" if isinstance(mv, float) else str(mv)
+                    detail_items.append(html.Span([
+                        html.Span(f"{mk}: ", className="text-muted", style={"fontSize": "0.78rem"}),
+                        html.Span(f"{mv_str}  ", style={"fontWeight": "bold", "fontSize": "0.82rem"}),
+                    ]))
 
-    if agent_cards:
-        sections.append(html.H5("All Agents", className="text-info mb-2 mt-2"))
-        sections.append(dbc.Row(agent_cards, className="g-3 mb-4"))
+            # Top-level summary fields
+            for summary_key in ["cycle_result", "primary_mode", "diagnosed_bottleneck", "system_health_score",
+                                "decay_level", "predicted_regime", "level", "n_positions"]:
+                sv = detail_data.get(summary_key)
+                if sv is not None and summary_key not in ("machine_summary", "recommendations", "metrics"):
+                    if not detail_items or not any(summary_key in str(getattr(d, 'children', '')) for d in detail_items[:3]):
+                        detail_items.insert(0, html.Div([
+                            html.Span(f"{summary_key}: ", className="text-muted small"),
+                            html.Span(str(sv)[:80], style={"fontSize": "0.82rem", "fontWeight": "bold"}),
+                        ], className="mb-1"))
+
+        if not detail_items:
+            if has_file:
+                detail_items.append(html.Div(
+                    f"Data file exists at: {ag_file}",
+                    className="text-muted small",
+                ))
+            else:
+                detail_items.append(html.Div(
+                    f"No output data found. Run agent to generate: {ag_file}",
+                    className="text-warning small",
+                ))
+
+        # Build accordion title with status badge
+        title_content = f"{ag_icon} {ag_name.replace('_', ' ').title()} \u2014 {ag_role}"
+
+        accordion_items.append(dbc.AccordionItem(
+            [
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Status: "),
+                            dbc.Badge(status, color=color, className="ms-1", style={"fontSize": "0.72rem"}),
+                        ], className="mb-1", style={"fontSize": "0.85rem"}),
+                        html.Div([
+                            html.Span("Last run: ", className="text-muted"),
+                            html.Span(run_display),
+                        ], className="mb-1", style={"fontSize": "0.85rem"}),
+                        html.Div([
+                            html.Span("Total runs: ", className="text-muted"),
+                            html.Span(str(run_count) if run_count else "\u2014"),
+                        ], style={"fontSize": "0.85rem"}),
+                    ], md=3),
+                    dbc.Col(detail_items, md=9),
+                ]),
+            ],
+            title=title_content,
+        ))
+
+    sections.append(html.H5("All 11 Agents", className="text-info mb-2 mt-2"))
+    sections.append(dbc.Accordion(accordion_items, start_collapsed=True, className="mb-4"))
 
     # ══════════════════════════════════════════════════════════════════════
     # 3. Risk Guardian Status Card
@@ -3562,7 +3969,6 @@ def build_agent_monitor_tab(
         veto = risk_data.get("veto", {})
         fragility = risk_data.get("fragility", {})
         risk_scores = risk_data.get("risk_scores", {})
-        machine_summary = risk_data.get("machine_summary", {})
 
         veto_items = []
         if veto:
@@ -3618,7 +4024,7 @@ def build_agent_monitor_tab(
 
         risk_card = dbc.Card([
             dbc.CardHeader([
-                html.Strong("Risk Guardian"),
+                html.Strong("\U0001f6e1\ufe0f Risk Guardian"),
                 dbc.Badge(risk_level, color=risk_color, className="ms-2"),
             ], style={"backgroundColor": "#16213e"}),
             dbc.CardBody(
@@ -3650,6 +4056,8 @@ def build_agent_monitor_tab(
     # 4. Regime Forecaster Status Card
     # ══════════════════════════════════════════════════════════════════════
     if regime_data:
+        regime_name = regime_data.get("predicted_regime", "N/A")
+        regime_color = {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(regime_name, "secondary")
         probs = regime_data.get("probabilities", {})
         regime_colors_map = {"CALM": "#00bc8c", "NORMAL": "#3498db", "TENSION": "#f39c12", "CRISIS": "#e74c3c"}
         prob_badges = []
@@ -3679,7 +4087,7 @@ def build_agent_monitor_tab(
 
         regime_card = dbc.Card([
             dbc.CardHeader([
-                html.Strong("Regime Forecaster"),
+                html.Strong("\U0001f321\ufe0f Regime Forecaster"),
                 dbc.Badge(regime_name, color=regime_color, className="ms-2"),
                 html.Span(f"  Safety: {safety_score:.0%}", className="text-muted small ms-2"),
                 html.Span(f"  Transition: {transition_prob:.0%}", className="text-muted small ms-2"),
@@ -3695,6 +4103,8 @@ def build_agent_monitor_tab(
     # 5. Strategy Health (Alpha Decay)
     # ══════════════════════════════════════════════════════════════════════
     if decay_data:
+        alpha_label = decay_data.get("decay_level", "N/A")
+        alpha_color = {"HEALTHY": "success", "WARNING": "warning", "DECAYING": "danger", "DEAD": "dark"}.get(alpha_label, "secondary")
         metrics = decay_data.get("metrics", {})
         signals = decay_data.get("signals", {})
         recs = decay_data.get("recommendations", [])
@@ -3718,7 +4128,7 @@ def build_agent_monitor_tab(
 
         decay_card = dbc.Card([
             dbc.CardHeader([
-                html.Strong("Alpha Decay Monitor"),
+                html.Strong("\U0001f4c9 Alpha Decay Monitor"),
                 dbc.Badge(alpha_label, color=alpha_color, className="ms-2"),
             ], style={"backgroundColor": "#16213e"}),
             dbc.CardBody([
@@ -3776,7 +4186,7 @@ def build_agent_monitor_tab(
         if scout_items:
             scout_card = dbc.Card([
                 dbc.CardHeader([
-                    html.Strong("Data Scout Report"),
+                    html.Strong("\U0001f50d Data Scout Report"),
                     dbc.Badge(f"{len(anomalies)} anomalies", color="warning", className="ms-2",
                               style={"fontSize": "0.7rem"}),
                 ], style={"backgroundColor": "#16213e"}),
@@ -3807,7 +4217,7 @@ def build_agent_monitor_tab(
 
         port_card = dbc.Card([
             dbc.CardHeader([
-                html.Strong("Portfolio Construction"),
+                html.Strong("\U0001f4bc Portfolio Construction"),
                 dbc.Badge(f"{n_pos} positions", color="info", className="ms-2", style={"fontSize": "0.7rem"}),
                 dbc.Badge(f"Regime: {blend_regime}", color={"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(blend_regime, "secondary"), className="ms-1", style={"fontSize": "0.7rem"}),
             ], style={"backgroundColor": "#16213e"}),
@@ -3849,7 +4259,7 @@ def build_agent_monitor_tab(
 
     audit_card = dbc.Card([
         dbc.CardHeader(
-            html.Strong("Parameter Changes — Audit Trail"),
+            html.Strong("Parameter Changes \u2014 Audit Trail"),
             style={"backgroundColor": "#16213e"},
         ),
         dbc.CardBody(
@@ -3870,7 +4280,7 @@ def build_agent_monitor_tab(
 
     return html.Div(
         [
-            html.H4("Agent Monitor", className="text-info mb-1"),
+            html.H4("Agent Monitor \u2014 11 Agents", className="text-info mb-1"),
             html.P(
                 "Full agent system dashboard: health, risk, regime, alpha decay, scout, portfolio",
                 className="text-muted mb-3",
@@ -3878,3 +4288,418 @@ def build_agent_monitor_tab(
         ] + sections,
         style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
     )
+
+
+# ---------------------------------------------------------------------------
+# OPTIMIZATION TAB
+# ---------------------------------------------------------------------------
+
+_OPT_KEY_PARAMS: List[tuple] = [
+    ("zscore_threshold_calm", 0.70, 0.3, 2.5, "Z-score entry \u2014 CALM"),
+    ("zscore_threshold_normal", 0.70, 0.3, 2.5, "Z-score entry \u2014 NORMAL"),
+    ("zscore_threshold_tension", 0.70, 0.3, 3.0, "Z-score entry \u2014 TENSION"),
+    ("regime_conviction_scale_calm", 1.30, 0.0, 3.0, "Conviction mult \u2014 CALM"),
+    ("regime_conviction_scale_normal", 1.00, 0.0, 3.0, "Conviction mult \u2014 NORMAL"),
+    ("regime_conviction_scale_tension", 0.50, 0.0, 3.0, "Conviction mult \u2014 TENSION"),
+    ("signal_a1_frob", 0.30, 0.0, 5.0, "Signal wt \u2014 Frobenius"),
+    ("signal_a2_mode", 0.20, 0.0, 5.0, "Signal wt \u2014 mode"),
+    ("signal_a3_coc", 0.30, 0.0, 5.0, "Signal wt \u2014 cost of carry"),
+    ("signal_z_cap", 2.50, 1.0, 10.0, "Max z-score cap"),
+    ("signal_entry_threshold", 0.05, 0.01, 1.0, "Min composite to enter"),
+    ("kelly_fraction", 0.50, 0.1, 1.0, "Kelly sizing fraction"),
+    ("max_leverage", 5.00, 1.0, 10.0, "Max portfolio leverage"),
+    ("target_vol_annual", 0.10, 0.01, 0.50, "Annual vol target"),
+]
+
+_OPT_CARD = {"backgroundColor": "#2d2d44", "border": "1px solid #3d3d5c"}
+
+
+def _ohdr(title: str) -> dbc.CardHeader:
+    return dbc.CardHeader(html.Strong(title), style={"backgroundColor": "#16213e"})
+
+
+def build_optimization_tab(
+    optimizer_history: Optional[Any] = None,
+    auto_improve_data: Optional[Dict] = None,
+    methodology_lab: Optional[Dict] = None,
+    optuna_pareto: Optional[Any] = None,
+    settings_obj: Optional[Any] = None,
+) -> html.Div:
+    """Comprehensive optimization dashboard."""
+    sec: List[Any] = []
+    best_sharpe_s = "\u2014"
+    best_strat = "\u2014"
+    n_params = 0
+    last_ts = "\u2014"
+    o_mode = "\u2014"
+    if methodology_lab and isinstance(methodology_lab, dict):
+        _bs = None
+        for sn, sd in methodology_lab.items():
+            if isinstance(sd, dict) and sd.get("sharpe") is not None:
+                try:
+                    _sv = float(sd["sharpe"])
+                    if _bs is None or _sv > _bs:
+                        _bs = _sv
+                        best_strat = sn
+                except (ValueError, TypeError):
+                    pass
+        if _bs is not None:
+            best_sharpe_s = f"{_bs:.4f}"
+    hl = optimizer_history if isinstance(optimizer_history, list) else []
+    for _e in hl:
+        if isinstance(_e, dict):
+            if _e.get("params_changed"):
+                n_params += len(_e["params_changed"])
+            elif _e.get("param_name"):
+                n_params += 1
+    for _e in reversed(hl):
+        if isinstance(_e, dict) and _e.get("timestamp"):
+            last_ts = str(_e["timestamp"])[:19]
+            break
+    if auto_improve_data and isinstance(auto_improve_data, dict):
+        o_mode = auto_improve_data.get("primary_mode", "\u2014")
+    _bsc = "secondary"
+    if best_sharpe_s != "\u2014":
+        try:
+            _bsc = "success" if float(best_sharpe_s) > 0 else "danger"
+        except (ValueError, TypeError):
+            pass
+    sec.append(dbc.Row([
+        _kpi("Best Sharpe", best_sharpe_s, _bsc),
+        _kpi("Best Strategy", best_strat[:22], "info"),
+        _kpi("Params Optimized", str(n_params), "primary"),
+        _kpi("Last Run", last_ts[:16] if last_ts != "\u2014" else "\u2014", "secondary"),
+        _kpi("Mode", o_mode.replace("_", " ")[:18], "warning"),
+    ], className="g-2 mb-3"))
+    prows = []
+    for pn, pdef, pmn, pmx, pdsc in _OPT_KEY_PARAMS:
+        lv = pdef
+        if settings_obj is not None:
+            lv = getattr(settings_obj, pn, pdef)
+        try:
+            lv = float(lv)
+        except (ValueError, TypeError):
+            lv = pdef
+        vc = "#20c997" if abs(lv - pdef) < 1e-6 else "#ffc107"
+        prows.append(html.Tr([
+            html.Td(pn, style={"fontSize": "0.82rem", "fontFamily": "monospace"}),
+            html.Td(html.Strong(f"{lv:.4f}", style={"color": vc}), className="text-center"),
+            html.Td(f"{pdef:.2f}", className="text-center text-muted", style={"fontSize": "0.8rem"}),
+            html.Td(f"{pmn:.2f}", className="text-center text-muted", style={"fontSize": "0.8rem"}),
+            html.Td(f"{pmx:.2f}", className="text-center text-muted", style={"fontSize": "0.8rem"}),
+            html.Td(pdsc, className="text-muted", style={"fontSize": "0.78rem"}),
+        ]))
+    sec.append(dbc.Card([
+        _ohdr("Parameter Space Explorer \u2014 \u05de\u05e4\u05ea \u05e4\u05e8\u05de\u05d8\u05e8\u05d9\u05dd"),
+        dbc.CardBody(
+            dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Parameter"), html.Th("Current", className="text-center"),
+                    html.Th("Default", className="text-center"),
+                    html.Th("Min", className="text-center"),
+                    html.Th("Max", className="text-center"), html.Th("Description"),
+                ]))] + [html.Tbody(prows)],
+                bordered=True, dark=True, hover=True, size="sm", className="mb-0",
+            ),
+            style={"backgroundColor": "#1a1a2e", "padding": "0", "overflowX": "auto"},
+        ),
+    ], style=_OPT_CARD, className="mb-3"))
+    orows: list = []
+    st_ts: List[str] = []
+    st_v: List[float] = []
+    for _e in hl:
+        if not isinstance(_e, dict):
+            continue
+        ts = str(_e.get("timestamp", ""))[:19]
+        pnm = _e.get("param_name", "")
+        ov = nv = ""
+        ds = _e.get("delta_sharpe")
+        oc = _e.get("outcome", _e.get("final_decision", ""))
+        prom = oc.upper() in ("PROMOTED", "IMPROVED", "ACCEPTED") if oc else False
+        if _e.get("params_changed") and isinstance(_e["params_changed"], dict):
+            pk = list(_e["params_changed"].keys())
+            pnm = ", ".join(pk[:2]) + ("..." if len(pk) > 2 else "")
+            fp = _e["params_changed"].get(pk[0], {})
+            if isinstance(fp, dict):
+                ov = str(fp.get("old", ""))[:8]
+                nv = str(fp.get("new", ""))[:8]
+        elif _e.get("old_value") is not None:
+            ov = str(_e["old_value"])[:8]
+            nv = str(_e.get("new_value", ""))[:8]
+        dss = "\u2014"
+        dsc = "#888"
+        if ds is not None:
+            try:
+                _dv = float(ds)
+                dss = f"{_dv:+.4f}"
+                dsc = "#20c997" if _dv > 0 else "#dc3545" if _dv < 0 else "#888"
+            except (ValueError, TypeError):
+                pass
+        pb = (html.Span("Yes", style={"color": "#20c997", "fontWeight": "bold"})
+              if prom else html.Span("No", style={"color": "#888"}))
+        orows.append(html.Tr([
+            html.Td(ts, style={"fontSize": "0.78rem"}),
+            html.Td(pnm[:30], style={"fontSize": "0.78rem", "fontFamily": "monospace"}),
+            html.Td(ov, className="text-center", style={"fontSize": "0.78rem"}),
+            html.Td(nv, className="text-center", style={"fontSize": "0.78rem"}),
+            html.Td(html.Span(dss, style={"color": dsc}), className="text-center"),
+            html.Td(pb, className="text-center"),
+        ]))
+        if _e.get("before_metrics") and isinstance(_e["before_metrics"], dict):
+            _bms = _e["before_metrics"].get("sharpe")
+            if _bms is not None and ts:
+                st_ts.append(ts)
+                st_v.append(float(_bms))
+    schart: Any = html.Div()
+    if len(st_ts) >= 2:
+        _sfig = go.Figure(go.Scatter(
+            x=st_ts, y=st_v, mode="lines+markers",
+            line=dict(color="#00bc8c", width=2), marker=dict(size=6), name="Sharpe",
+        ))
+        _sfig.update_layout(
+            template="plotly_dark", paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+            height=260, title="Sharpe Trend Over Optimization Cycles",
+            margin=dict(l=40, r=20, t=40, b=30), yaxis_title="Sharpe", showlegend=False,
+        )
+        schart = dcc.Graph(figure=_sfig, config={"displayModeBar": False})
+    sec.append(dbc.Card([
+        _ohdr("Optimization History \u2014 \u05d4\u05d9\u05e1\u05d8\u05d5\u05e8\u05d9\u05d9\u05ea \u05d0\u05d5\u05e4\u05d8\u05d9\u05de\u05d9\u05d6\u05e6\u05d9\u05d4"),
+        dbc.CardBody([
+            dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Timestamp"), html.Th("Parameter"),
+                    html.Th("Old", className="text-center"),
+                    html.Th("New", className="text-center"),
+                    html.Th("\u0394 Sharpe", className="text-center"),
+                    html.Th("Promoted", className="text-center"),
+                ]))] + [html.Tbody(orows[-20:])],
+                bordered=True, dark=True, hover=True, size="sm", className="mb-2",
+            ) if orows else html.Div("No optimization history.", className="text-muted p-3"),
+            schart,
+        ], style={"backgroundColor": "#1a1a2e", "padding": "8px"}),
+    ], style=_OPT_CARD, className="mb-3"))
+    if optuna_pareto and isinstance(optuna_pareto, (list, dict)):
+        pl = optuna_pareto if isinstance(optuna_pareto, list) else optuna_pareto.get("trials", [])
+        _shp: List[float] = []
+        _ddr: List[float] = []
+        _lbl: List[str] = []
+        for tr in pl:
+            if not isinstance(tr, dict):
+                continue
+            s = tr.get("sharpe", tr.get("values", [None, None])[0])
+            d = tr.get("max_dd", tr.get("values", [None, None])[-1])
+            if s is not None and d is not None:
+                _shp.append(float(s))
+                _ddr.append(abs(float(d)))
+                _lbl.append(str(tr.get("number", tr.get("trial_id", ""))))
+        if _shp:
+            pfig = go.Figure(go.Scatter(
+                x=_ddr, y=_shp, mode="markers+text", text=_lbl,
+                textposition="top center", textfont=dict(size=8),
+                marker=dict(size=10, color=_shp, colorscale="Viridis",
+                            showscale=True, colorbar=dict(title="Sharpe")),
+            ))
+            pfig.update_layout(
+                template="plotly_dark", paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+                height=350, title="Pareto Front \u2014 Sharpe vs Max Drawdown",
+                xaxis_title="Max Drawdown (abs)", yaxis_title="Sharpe Ratio",
+                margin=dict(l=50, r=20, t=45, b=40),
+            )
+            sec.append(dbc.Card([
+                _ohdr("Bayesian Optimization \u2014 Pareto Front"),
+                dbc.CardBody(dcc.Graph(figure=pfig, config={"displayModeBar": False}),
+                             style={"backgroundColor": "#1a1a2e"}),
+            ], style=_OPT_CARD, className="mb-3"))
+    sdata: List[tuple] = []
+    if auto_improve_data and isinstance(auto_improve_data, dict):
+        _sns = auto_improve_data.get("parameter_sensitivity")
+        if _sns and isinstance(_sns, dict):
+            for _pn, _sv2 in _sns.items():
+                try:
+                    sdata.append((_pn, float(_sv2)))
+                except (ValueError, TypeError):
+                    pass
+    if not sdata and hl:
+        _pdd: Dict[str, List[float]] = {}
+        for _e in hl:
+            if not isinstance(_e, dict):
+                continue
+            _dsh = _e.get("delta_sharpe")
+            _pn2 = _e.get("param_name", "")
+            if _dsh is not None and _pn2:
+                try:
+                    _pdd.setdefault(_pn2, []).append(abs(float(_dsh)))
+                except (ValueError, TypeError):
+                    pass
+        for _pn2, _dl in _pdd.items():
+            if _dl:
+                sdata.append((_pn2, sum(_dl) / len(_dl)))
+    if sdata:
+        sdata.sort(key=lambda x: abs(x[1]), reverse=True)
+        snm = [s[0][:25] for s in sdata[:15]]
+        svl = [s[1] for s in sdata[:15]]
+        sfig2 = go.Figure(go.Bar(
+            x=svl, y=snm, orientation="h",
+            marker_color=["#20c997" if v > 0 else "#dc3545" for v in svl],
+            text=[f"{v:.4f}" for v in svl], textposition="auto",
+        ))
+        sfig2.update_layout(
+            template="plotly_dark", paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+            height=max(200, len(snm) * 28),
+            title="Parameter Sensitivity \u2014 dSharpe / dParam",
+            margin=dict(l=160, r=20, t=40, b=30),
+            xaxis_title="Avg |\u0394Sharpe|", yaxis=dict(autorange="reversed"),
+            showlegend=False,
+        )
+        sec.append(dbc.Card([
+            _ohdr("Sensitivity Analysis \u2014 \u05e8\u05d2\u05d9\u05e9\u05d5\u05ea \u05e4\u05e8\u05de\u05d8\u05e8\u05d9\u05dd"),
+            dbc.CardBody(dcc.Graph(figure=sfig2, config={"displayModeBar": False}),
+                         style={"backgroundColor": "#1a1a2e"}),
+        ], style=_OPT_CARD, className="mb-3"))
+    if methodology_lab and isinstance(methodology_lab, dict):
+        srows = []
+        for sn2, sd2 in sorted(
+            methodology_lab.items(),
+            key=lambda x: float(x[1].get("sharpe", -999)) if isinstance(x[1], dict) else -999,
+            reverse=True,
+        ):
+            if not isinstance(sd2, dict):
+                continue
+            try:
+                _sf2 = float(sd2.get("sharpe", 0))
+            except (ValueError, TypeError):
+                _sf2 = 0.0
+            sc2 = "#20c997" if _sf2 > 0 else "#dc3545"
+            try:
+                _wr = float(sd2.get("win_rate", 0)) * 100
+            except (ValueError, TypeError):
+                _wr = 0.0
+            try:
+                _mdd = float(sd2.get("max_drawdown", 0)) * 100
+            except (ValueError, TypeError):
+                _mdd = 0.0
+            _trd = sd2.get("total_trades", 0)
+            _dsc2 = str(sd2.get("description", ""))[:50]
+            srows.append(html.Tr([
+                html.Td(sn2, style={"fontSize": "0.82rem", "fontWeight": "bold"}),
+                html.Td(html.Strong(f"{_sf2:.4f}", style={"color": sc2}), className="text-center"),
+                html.Td(f"{_wr:.1f}%", className="text-center", style={"fontSize": "0.82rem"}),
+                html.Td(f"{_mdd:.2f}%", className="text-center",
+                         style={"fontSize": "0.82rem",
+                                "color": "#dc3545" if _mdd < -20 else "#ffc107"}),
+                html.Td(str(_trd), className="text-center", style={"fontSize": "0.82rem"}),
+                html.Td(_dsc2, className="text-muted", style={"fontSize": "0.78rem"}),
+            ], style={
+                "backgroundColor": "rgba(32,201,151,0.06)" if _sf2 > 0
+                else "rgba(220,53,69,0.06)" if _sf2 < -1 else "transparent",
+            }))
+        if srows:
+            sec.append(dbc.Card([
+                _ohdr("Strategy Comparison \u2014 \u05d4\u05e9\u05d5\u05d5\u05d0\u05ea \u05d0\u05e1\u05d8\u05e8\u05d8\u05d2\u05d9\u05d5\u05ea"),
+                dbc.CardBody(
+                    dbc.Table(
+                        [html.Thead(html.Tr([
+                            html.Th("Strategy"), html.Th("Sharpe", className="text-center"),
+                            html.Th("Win Rate", className="text-center"),
+                            html.Th("Max DD", className="text-center"),
+                            html.Th("Trades", className="text-center"),
+                            html.Th("Description"),
+                        ]))] + [html.Tbody(srows)],
+                        bordered=True, dark=True, hover=True, size="sm", className="mb-0",
+                    ),
+                    style={"backgroundColor": "#1a1a2e", "padding": "0", "overflowX": "auto"},
+                ),
+            ], style=_OPT_CARD, className="mb-3"))
+    sec.append(dbc.Card([
+        _ohdr("Run Optimization \u2014 \u05d4\u05e8\u05e6\u05ea \u05d0\u05d5\u05e4\u05d8\u05d9\u05de\u05d9\u05d6\u05e6\u05d9\u05d4"),
+        dbc.CardBody([dbc.Row([
+            dbc.Col([
+                dbc.Label("Optimization Mode", className="text-muted"),
+                dbc.Select(id="opt-mode-select", options=[
+                    {"label": "Quick (20 trials)", "value": "quick"},
+                    {"label": "Full (100 trials)", "value": "full"},
+                    {"label": "Bayesian Multi-Objective", "value": "bayesian"},
+                ], value="quick", className="mb-2"),
+            ], md=4),
+            dbc.Col([
+                html.Br(),
+                dbc.Button("\u05d4\u05e8\u05e5 \u05d0\u05d5\u05e4\u05d8\u05d9\u05de\u05d9\u05d6\u05e6\u05d9\u05d4",
+                           id="btn-run-optimization", color="success", size="lg", className="w-100"),
+            ], md=4),
+            dbc.Col([
+                html.Br(),
+                html.Div(id="opt-run-status", children="Ready",
+                         className="text-muted mt-2", style={"fontSize": "0.85rem"}),
+            ], md=4),
+        ])], style={"backgroundColor": "#1a1a2e"}),
+    ], style=_OPT_CARD, className="mb-3"))
+    if auto_improve_data and isinstance(auto_improve_data, dict):
+        _ai = auto_improve_data
+        _bn = _ai.get("diagnosed_bottleneck", "\u2014")
+        _md2 = _ai.get("primary_mode", "\u2014")
+        _stk = _ai.get("stuck_state", "\u2014")
+        _hlth = _ai.get("system_health_score", "\u2014")
+        _impr = _ai.get("system_improvability_score", "\u2014")
+        _prc = _ai.get("promote_count", 0)
+        _shc = _ai.get("shadow_count", 0)
+        _esc = _ai.get("escalation_flag", False)
+        _nxa = _ai.get("next_recommended_action", "\u2014")
+        _blk = _ai.get("top_blockers", [])
+        _hcol = "success"
+        try:
+            _hvf = float(_hlth)
+            if _hvf < 0.4:
+                _hcol = "danger"
+            elif _hvf < 0.7:
+                _hcol = "warning"
+        except (ValueError, TypeError):
+            _hcol = "secondary"
+        _stkc = ("#dc3545" if "NO_PROGRESS" in str(_stk)
+                 else "#ffc107" if "LOW" in str(_stk) else "#20c997")
+        _bki = ([html.Li(str(b), style={"fontSize": "0.82rem"}) for b in _blk[:5]]
+                if _blk else [html.Li("None", className="text-muted")])
+        sec.append(dbc.Card([
+            _ohdr("Auto-Improve Status \u2014 \u05de\u05e6\u05d1 \u05e9\u05d9\u05e4\u05d5\u05e8 \u05d0\u05d5\u05d8\u05d5\u05de\u05d8\u05d9"),
+            dbc.CardBody([
+                dbc.Row([
+                    _kpi("System Health", _ff(_hlth, "{:.2f}"), _hcol, small=True),
+                    _kpi("Improvability", _ff(_impr, "{:.2f}"), "info", small=True),
+                    _kpi("Promoted", str(_prc), "success", small=True),
+                    _kpi("Shadowed", str(_shc), "warning", small=True),
+                    _kpi("Escalation", "Yes" if _esc else "No",
+                         "danger" if _esc else "secondary", small=True),
+                ], className="g-2 mb-2"),
+                dbc.Row([
+                    dbc.Col([
+                        html.Div("Bottleneck", className="text-muted", style={"fontSize": "0.78rem"}),
+                        html.Div(str(_bn).replace("_", " "),
+                                 style={"fontSize": "0.9rem", "fontWeight": "bold"}),
+                    ], md=3),
+                    dbc.Col([
+                        html.Div("Mode", className="text-muted", style={"fontSize": "0.78rem"}),
+                        html.Div(str(_md2).replace("_", " "),
+                                 style={"fontSize": "0.9rem", "fontWeight": "bold"}),
+                    ], md=3),
+                    dbc.Col([
+                        html.Div("Stuck State", className="text-muted", style={"fontSize": "0.78rem"}),
+                        html.Div(str(_stk).replace("_", " "),
+                                 style={"fontSize": "0.9rem", "fontWeight": "bold", "color": _stkc}),
+                    ], md=3),
+                    dbc.Col([
+                        html.Div("Next Action", className="text-muted", style={"fontSize": "0.78rem"}),
+                        html.Div(str(_nxa).replace("_", " "),
+                                 style={"fontSize": "0.9rem", "fontWeight": "bold"}),
+                    ], md=3),
+                ], className="mb-2"),
+                html.Div("Top Blockers", className="text-muted mt-2", style={"fontSize": "0.78rem"}),
+                html.Ul(_bki),
+            ], style={"backgroundColor": "#1a1a2e"}),
+        ], style=_OPT_CARD, className="mb-3"))
+    if not sec:
+        return html.Div(
+            dbc.Alert("No optimization data available.", color="warning"), className="mt-3")
+    return html.Div(
+        [html.H4("Optimization Dashboard", className="text-info mb-1"),
+         html.P("Parameter tuning, strategy comparison, optimization history, and auto-improve status.",
+                className="text-muted mb-3")] + sec,
+        style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"})

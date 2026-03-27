@@ -56,6 +56,7 @@ from ui.analytics_tabs import (
     build_portfolio_tab, build_methodology_tab,
     build_ml_insights_tab,
     build_agent_monitor_tab,
+    build_optimization_tab,
 )
 from data_ops.journal import PMJournal, open_journal
 
@@ -1490,6 +1491,24 @@ def build_app() -> dash.Dash:
     _scout_data = _load_json_safe(settings.project_root / "agents" / "data_scout" / "scout_report.json")
     _portfolio_alloc = _load_json_safe(settings.project_root / "agents" / "portfolio_construction" / "portfolio_weights.json")
 
+    # Additional agent outputs for enhanced tabs
+    _auto_improve_data = _load_json_safe(settings.project_root / "agents" / "auto_improve" / "machine_summary.json")
+    _optimizer_data = _load_json_safe(settings.project_root / "agents" / "optimizer" / "optimization_history.json")
+    _architect_data = _load_json_safe(settings.project_root / "agents" / "architect" / "improvement_history.json")
+    _ensemble_results = _load_json_safe(settings.project_root / "data" / "ensemble_results.json")
+
+    # Load latest alpha research report
+    _alpha_research_data = None
+    try:
+        _alpha_research_reports = sorted(
+            (settings.project_root / "agents" / "methodology" / "reports").glob("*alpha_research*"),
+            reverse=True,
+        )
+        if _alpha_research_reports:
+            _alpha_research_data = _load_json_safe(str(_alpha_research_reports[0]))
+    except Exception:
+        pass
+
     # Load latest methodology governance report
     _methodology_gov = None
     try:
@@ -1899,7 +1918,7 @@ def build_app() -> dash.Dash:
                     children=[
                         html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
                         html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
-                        build_methodology_tab(_methodology_ranking_full, governance_data=_methodology_gov),
+                        build_methodology_tab(_methodology_ranking_full, governance_data=_methodology_gov, alpha_research=_alpha_research_data),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -1919,6 +1938,8 @@ def build_app() -> dash.Dash:
                             regime_forecast=_ml_regime_forecast,
                             ml_signals=_ml_signals_result,
                             drift_status=_ml_drift_status,
+                            ensemble_results=_ensemble_results,
+                            scout_data=_scout_data,
                         ),
                     ],
                 )],
@@ -1971,6 +1992,10 @@ def build_app() -> dash.Dash:
                             decay_data=_decay_data,
                             scout_data=_scout_data,
                             portfolio_alloc=_portfolio_alloc,
+                            auto_improve_data=_auto_improve_data,
+                            optimizer_data=_optimizer_data,
+                            architect_data=_architect_data,
+                            project_root=str(settings.project_root),
                         ),
                     ],
                 )],
