@@ -1610,6 +1610,7 @@ def build_app() -> dash.Dash:
                     dbc.Tab(label="Methodology 🧪", tab_id="tab-methodology"),
                     dbc.Tab(label="ML Insights 🤖", tab_id="tab-ml"),
                     dbc.Tab(label="Agents 🤝",      tab_id="tab-agents"),
+                    dbc.Tab(label="Optimization 🎯", tab_id="tab-optimization"),
                 ],
                 className="mt-2",
                 style={"flexWrap": "wrap"},
@@ -1996,6 +1997,40 @@ def build_app() -> dash.Dash:
                             optimizer_data=_optimizer_data,
                             architect_data=_architect_data,
                             project_root=str(settings.project_root),
+                        ),
+                    ],
+                )],
+                type="circle", color="#00bc8c", style={"minHeight": "200px"},
+            )
+
+        if active_tab == "tab-optimization":
+            # Load methodology lab for strategy comparison
+            _methodology_lab_data = None
+            try:
+                _mlab_files = sorted(
+                    (settings.project_root / "agents" / "methodology" / "reports").glob("*methodology_lab*"),
+                    reverse=True,
+                )
+                if _mlab_files:
+                    _methodology_lab_data = _load_json_safe(str(_mlab_files[0]))
+            except Exception:
+                pass
+            _optuna_pareto_data = _load_json_safe(settings.project_root / "data" / "optuna_pareto.json")
+            return dcc.Loading(
+                children=[dbc.Container(
+                    fluid=True,
+                    children=[
+                        html.H5("Optimization \u2014 \u05d0\u05d5\u05e4\u05d8\u05d9\u05de\u05d9\u05d6\u05e6\u05d9\u05d4", className="mt-2",
+                                style={"direction": "rtl", "textAlign": "right"}),
+                        html.Div("\u05de\u05e8\u05d7\u05d1 \u05e4\u05e8\u05de\u05d8\u05e8\u05d9\u05dd, \u05d4\u05e9\u05d5\u05d5\u05d0\u05ea \u05d0\u05e1\u05d8\u05e8\u05d8\u05d2\u05d9\u05d5\u05ea, \u05d5\u05de\u05e6\u05d1 \u05e9\u05d9\u05e4\u05d5\u05e8 \u05d0\u05d5\u05d8\u05d5\u05de\u05d8\u05d9.",
+                                 className="text-muted small mb-3",
+                                 style={"direction": "rtl", "textAlign": "right"}),
+                        build_optimization_tab(
+                            optimizer_history=_optimizer_data,
+                            auto_improve_data=_auto_improve_data,
+                            methodology_lab=_methodology_lab_data,
+                            optuna_pareto=_optuna_pareto_data,
+                            settings_obj=settings,
                         ),
                     ],
                 )],
