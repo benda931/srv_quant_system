@@ -2305,17 +2305,87 @@ def build_dss_tab(
 # PORTFOLIO TAB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_portfolio_tab(paper_portfolio: Optional[Dict] = None, prices: Optional[pd.DataFrame] = None) -> html.Div:
-    """Full Paper Trading Portfolio tab layout."""
-    if not paper_portfolio:
+def build_portfolio_tab(paper_portfolio: Optional[Dict] = None, prices: Optional[pd.DataFrame] = None, portfolio_alloc: Optional[Dict] = None) -> html.Div:
+    """Full Paper Trading Portfolio tab layout with agent allocation data."""
+
+    # If no paper portfolio but we have agent allocation data, show that
+    if not paper_portfolio and not portfolio_alloc:
         return html.Div(
             dbc.Alert("אין נתוני Paper Portfolio זמינים. הרץ את ה-Paper Trader כדי לייצר.", color="secondary",
                       style={"textAlign": "right", "direction": "rtl"}),
             style={"padding": "20px"},
         )
 
+    # ── Agent Portfolio Allocation Section (from portfolio_construction agent) ──
+    alloc_section = html.Div()
+    if portfolio_alloc:
+        pa = portfolio_alloc
+        alloc_weights = pa.get("weights", {})
+        method_weights = pa.get("method_weights", {})
+        gross = pa.get("gross_exposure", 0)
+        net = pa.get("net_exposure", 0)
+        n_pos = pa.get("n_positions", 0)
+        blend_regime = pa.get("blend_regime", "N/A")
+        exp_ret = pa.get("expected_return", 0)
+        exp_vol = pa.get("expected_vol", 0)
+        sharpe_est = pa.get("sharpe_estimate", 0)
+
+        # KPI row for allocation
+        alloc_kpi = dbc.Row([
+            _kpi("Gross Exposure", f"{gross:.1%}", "warning", small=True),
+            _kpi("Net Exposure", f"{net:.1%}", "info", small=True),
+            _kpi("# Positions", str(n_pos), "primary", small=True),
+            _kpi("Blend Regime", blend_regime,
+                 {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(blend_regime, "secondary"),
+                 small=True),
+            _kpi("Exp Return", f"{exp_ret:.1%}", "success", small=True),
+            _kpi("Exp Vol", f"{exp_vol:.1%}", "warning", small=True),
+            _kpi("Sharpe Est", f"{sharpe_est:.2f}", "info", small=True),
+        ], className="g-2 mb-3")
+
+        # Weights table
+        weight_header = html.Thead(html.Tr([
+            html.Th("Ticker"), html.Th("Final Weight"),
+            html.Th("MV Weight"), html.Th("RP Weight"), html.Th("Conv Weight"),
+        ]))
+        weight_rows = []
+        for ticker in sorted(alloc_weights.keys()):
+            w = alloc_weights[ticker]
+            mv_w = method_weights.get("mv", {}).get(ticker, 0)
+            rp_w = method_weights.get("rp", {}).get(ticker, 0)
+            conv_w = method_weights.get("conv", {}).get(ticker, 0)
+            w_color = "#4caf50" if w > 0.05 else "#aaa" if w > 0 else "#ef5350"
+            weight_rows.append(html.Tr([
+                html.Td(ticker, style={"fontWeight": "bold"}),
+                html.Td(f"{w:.1%}", style={"color": w_color, "fontWeight": "bold"}),
+                html.Td(f"{mv_w:+.1%}", style={"color": "#4caf50" if mv_w > 0 else "#ef5350" if mv_w < 0 else "#888"}),
+                html.Td(f"{rp_w:.1%}"),
+                html.Td(f"{conv_w:.1%}", style={"color": "#888"}),
+            ]))
+
+        weight_table = dbc.Table(
+            [weight_header, html.Tbody(weight_rows)],
+            bordered=True, hover=True, size="sm", dark=True,
+            style={"fontSize": "12px"},
+        )
+
+        alloc_section = html.Div([
+            dbc.Card([
+                dbc.CardHeader(html.H6("Agent Portfolio Construction — Allocated Weights", className="mb-0 text-center")),
+                dbc.CardBody([alloc_kpi, weight_table], style={"overflowX": "auto"}),
+            ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}),
+        ])
+
+    if not paper_portfolio:
+        # Show just the allocation section if no paper portfolio
+        return html.Div([alloc_section], style={"padding": "12px"})
+
     pp = paper_portfolio
     sections: List = []
+
+    # Prepend agent allocation section if available
+    if portfolio_alloc:
+        sections.append(alloc_section)
 
     # ── 1. KPI Row ──────────────────────────────────────────────────────────
     capital = pp.get("capital", 0)
@@ -2487,8 +2557,22 @@ def build_portfolio_tab(paper_portfolio: Optional[Dict] = None, prices: Optional
 # METHODOLOGY LAB TAB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_methodology_tab(lab_data: Optional[Dict] = None) -> html.Div:
-    """Full Methodology Lab tab layout — strategy comparison and analysis."""
+def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Optional[Dict] = None) -> html.Div:
+    """Full Methodology Lab tab layout — strategy comparison and analysis.
+
+    Parameters
+    ----------
+    lab_data : dict | None
+        Raw methodology lab output (per-strategy results).
+    governance_data : dict | None
+        Governance report from agents/methodology/reports/2026-*.json with
+        conclusions, recommendations, signal_stack, metrics, etc.
+    """
+
+    # If we have governance data but no lab data, build from governance
+    if not lab_data and governance_data:
+        return _build_methodology_from_governance(governance_data)
+
     if not lab_data:
         return html.Div(
             dbc.Alert("אין נתוני Methodology Lab זמינים. הרץ methodology_lab כדי לייצר.", color="secondary",
@@ -2681,6 +2765,194 @@ def build_methodology_tab(lab_data: Optional[Dict] = None) -> html.Div:
             dbc.CardHeader(html.H6("💡 ממצאים עיקריים — Key Findings", className="mb-0 text-center")),
             dbc.CardBody(html.Ul(findings_content, style={"direction": "rtl", "textAlign": "right"})),
         ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"}))
+
+    # ── Governance Data Section (appended if available) ────────────────────
+    if governance_data:
+        gov_sections = _build_governance_sections(governance_data)
+        sections.extend(gov_sections)
+
+    return html.Div(sections, style={"padding": "12px"})
+
+
+def _build_governance_sections(gov: Dict) -> List:
+    """Build additional sections from a methodology governance report."""
+    sections = []
+
+    # Metrics overview
+    metrics = gov.get("metrics", {})
+    if metrics:
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Governance Metrics", className="mb-0 text-center")),
+            dbc.CardBody(dbc.Row([
+                _kpi("IC Mean", _ff(metrics.get("ic_mean", 0), "{:.4f}"), "info", small=True),
+                _kpi("IC IR", _ff(metrics.get("ic_ir", 0), "{:.4f}"), "primary", small=True),
+                _kpi("Sharpe", _ff(metrics.get("sharpe", 0)), "warning", small=True),
+                _kpi("Hit Rate", _pct(metrics.get("hit_rate", 0)), "success", small=True),
+                _kpi("Max DD", _pct(metrics.get("max_dd", 0)), "danger", small=True),
+                _kpi("# Walks", str(metrics.get("n_walks", 0)), "secondary", small=True),
+            ], className="g-2")),
+        ], className="border-warning mb-3", style={"borderTop": "3px solid var(--bs-warning)"}))
+
+    # Signal stack
+    signal_stack = gov.get("signal_stack", {})
+    if signal_stack:
+        top_candidates = signal_stack.get("top_candidates", [])
+        if top_candidates:
+            sig_header = html.Thead(html.Tr([
+                html.Th("Ticker"), html.Th("Direction"), html.Th("Conviction"),
+                html.Th("Z-score"), html.Th("Dislocation"), html.Th("MR"),
+                html.Th("Safe"), html.Th("Entry"),
+            ]))
+            sig_rows = []
+            for c in top_candidates:
+                conv = c.get("conviction", 0)
+                conv_color = "#4caf50" if conv > 0.2 else "#ff9800" if conv > 0.1 else "#aaa"
+                dir_color = "#4caf50" if c.get("direction") == "LONG" else "#ef5350"
+                sig_rows.append(html.Tr([
+                    html.Td(c.get("ticker", ""), style={"fontWeight": "bold"}),
+                    html.Td(c.get("direction", ""), style={"color": dir_color}),
+                    html.Td(f"{conv:.3f}", style={"color": conv_color, "fontWeight": "bold"}),
+                    html.Td(_ff(c.get("z", 0))),
+                    html.Td(_ff(c.get("disloc", 0))),
+                    html.Td(_ff(c.get("mr", 0))),
+                    html.Td(_ff(c.get("safe", 0))),
+                    html.Td("YES" if c.get("entry") else "no",
+                             style={"color": "#4caf50" if c.get("entry") else "#888"}),
+                ]))
+            sections.append(dbc.Card([
+                dbc.CardHeader(html.H6(
+                    f"Signal Stack — {signal_stack.get('n_passing', 0)}/{signal_stack.get('n_total', 0)} passing",
+                    className="mb-0 text-center")),
+                dbc.CardBody(dbc.Table(
+                    [sig_header, html.Tbody(sig_rows)],
+                    bordered=True, hover=True, size="sm", dark=True, style={"fontSize": "12px"},
+                ), style={"overflowX": "auto"}),
+            ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}))
+
+    # Conclusions
+    conclusions = gov.get("conclusions", [])
+    smart_conclusions = gov.get("smart_conclusions", [])
+    if smart_conclusions:
+        priority_colors = {"CRITICAL": "danger", "HIGH": "warning", "WARNING": "info", "LOW": "secondary"}
+        conc_items = []
+        for sc in smart_conclusions[:10]:
+            pri = sc.get("priority", "LOW")
+            finding = sc.get("finding", "")
+            conc_items.append(html.Div([
+                dbc.Badge(pri, color=priority_colors.get(pri, "secondary"),
+                          className="me-2", style={"fontSize": "0.7rem"}),
+                html.Span(finding, style={"fontSize": "0.85rem"}),
+            ], className="mb-1"))
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Smart Conclusions", className="mb-0 text-center")),
+            dbc.CardBody(conc_items),
+        ], className="border-danger mb-3", style={"borderTop": "3px solid var(--bs-danger)"}))
+    elif conclusions:
+        conc_items = [html.Li(c, className="mb-1", style={"fontSize": "0.85rem"}) for c in conclusions[:10]]
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Conclusions", className="mb-0 text-center")),
+            dbc.CardBody(html.Ul(conc_items)),
+        ], className="border-danger mb-3", style={"borderTop": "3px solid var(--bs-danger)"}))
+
+    # Recommendations
+    recommendations = gov.get("recommendations", [])
+    if recommendations:
+        rec_items = [html.Li(r, className="mb-1", style={"fontSize": "0.85rem"}) for r in recommendations[:8]]
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Recommendations", className="mb-0 text-center")),
+            dbc.CardBody(html.Ul(rec_items)),
+        ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"}))
+
+    # Tail risk
+    tail_risk = gov.get("tail_risk", {})
+    if tail_risk:
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Tail Risk Analysis", className="mb-0 text-center")),
+            dbc.CardBody(dbc.Row([
+                _kpi("ES 97.5% 1D", _pct(tail_risk.get("es_97_5_1d", 0)), "danger", small=True),
+                _kpi("VaR 97.5% 1D", _pct(tail_risk.get("var_97_5_1d", 0)), "warning", small=True),
+                _kpi("ES/VaR Ratio", _ff(tail_risk.get("es_var_ratio", 0)), "info", small=True),
+                _kpi("Skewness", _ff(tail_risk.get("skewness", 0)), "secondary", small=True),
+                _kpi("Kurtosis", _ff(tail_risk.get("kurtosis", 0)), "secondary", small=True),
+            ], className="g-2")),
+        ], className="border-secondary mb-3", style={"borderTop": "3px solid var(--bs-secondary)"}))
+
+    return sections
+
+
+def _build_methodology_from_governance(gov: Dict) -> html.Div:
+    """Build methodology tab purely from governance report when no lab data is available."""
+    sections: List = []
+
+    run_date = gov.get("run_date", "N/A")
+    metrics = gov.get("metrics", {})
+
+    # KPI row from governance metrics
+    kpi_row = dbc.Row([
+        _kpi("Run Date", str(run_date), "info", small=True),
+        _kpi("Sharpe", _ff(metrics.get("sharpe", 0)), "warning", small=True),
+        _kpi("Hit Rate", _pct(metrics.get("hit_rate", 0)), "primary", small=True),
+        _kpi("IC Mean", _ff(metrics.get("ic_mean", 0), "{:.4f}"), "info", small=True),
+        _kpi("Max DD", _pct(metrics.get("max_dd", 0)), "danger", small=True),
+    ], className="g-2 mb-3")
+    sections.append(kpi_row)
+
+    # Methodology ranking from governance
+    method_lab = gov.get("methodology_lab", {})
+    if method_lab:
+        ranking = method_lab.get("ranking", [])
+        if ranking:
+            rank_header = html.Thead(html.Tr([
+                html.Th("#"), html.Th("Strategy"), html.Th("Sharpe"),
+                html.Th("Win Rate"), html.Th("Total P&L"), html.Th("Trades"),
+            ]))
+            rank_rows = []
+            for i, r in enumerate(ranking[:15], 1):
+                s_val = r.get("sharpe", 0)
+                s_color = "#4caf50" if s_val > 0 else "#ef5350"
+                rank_rows.append(html.Tr([
+                    html.Td(str(i), style={"fontWeight": "bold"}),
+                    html.Td(r.get("name", ""), style={"fontWeight": "bold", "color": "#0dcaf0"}),
+                    html.Td(_ff(s_val), style={"color": s_color, "fontWeight": "bold"}),
+                    html.Td(_pct(r.get("win_rate", 0))),
+                    html.Td(_pct(r.get("total_pnl", 0))),
+                    html.Td(str(r.get("total_trades", 0))),
+                ]))
+            sections.append(dbc.Card([
+                dbc.CardHeader(html.H6(f"Strategy Ranking ({method_lab.get('n_methodologies', 0)} strategies)", className="mb-0 text-center")),
+                dbc.CardBody(dbc.Table(
+                    [rank_header, html.Tbody(rank_rows)],
+                    bordered=True, hover=True, size="sm", dark=True, style={"fontSize": "12px"},
+                ), style={"overflowX": "auto"}),
+            ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"}))
+
+    # Regime breakdown
+    regime_bd = gov.get("regime_breakdown", {})
+    if regime_bd:
+        rb_header = html.Thead(html.Tr([
+            html.Th("Regime"), html.Th("# Walks"), html.Th("IC Mean"),
+            html.Th("IC IR"), html.Th("Hit Rate"), html.Th("Sharpe"),
+        ]))
+        rb_rows = []
+        for rname, rdata in regime_bd.items():
+            rb_rows.append(html.Tr([
+                html.Td(rname, style={"fontWeight": "bold"}),
+                html.Td(str(rdata.get("n_walks", 0))),
+                html.Td(_ff(rdata.get("ic_mean", 0), "{:.4f}")),
+                html.Td(_ff(rdata.get("ic_ir", 0), "{:.4f}")),
+                html.Td(_pct(rdata.get("hit_rate", 0))),
+                html.Td(_ff(rdata.get("sharpe", 0))),
+            ]))
+        sections.append(dbc.Card([
+            dbc.CardHeader(html.H6("Regime Breakdown", className="mb-0 text-center")),
+            dbc.CardBody(dbc.Table(
+                [rb_header, html.Tbody(rb_rows)],
+                bordered=True, hover=True, size="sm", dark=True, style={"fontSize": "12px"},
+            ), style={"overflowX": "auto"}),
+        ], className="border-warning mb-3", style={"borderTop": "3px solid var(--bs-warning)"}))
+
+    # Add governance sections (conclusions, recommendations, tail risk, etc.)
+    sections.extend(_build_governance_sections(gov))
 
     return html.Div(sections, style={"padding": "12px"})
 
@@ -3142,17 +3414,17 @@ def build_agent_status_tab(
 def build_agent_monitor_tab(
     registry_data: Optional[Dict] = None,
     audit_changes: Optional[List[Dict]] = None,
+    risk_data: Optional[Dict] = None,
+    regime_data: Optional[Dict] = None,
+    decay_data: Optional[Dict] = None,
+    scout_data: Optional[Dict] = None,
+    portfolio_alloc: Optional[Dict] = None,
 ) -> html.Div:
     """
-    Agent Monitor tab -- status cards + parameter change audit trail.
+    Agent Monitor tab -- full agent system dashboard.
 
-    Parameters
-    ----------
-    registry_data : dict | None
-        Output of AgentRegistry.all_agents() -- keyed by agent name.
-    audit_changes : list[dict] | None
-        Recent parameter changes from AuditTrail, each with keys:
-        param_name, old_value, new_value, changed_by, timestamp.
+    Shows: system health overview, per-agent status cards, risk guardian,
+    regime status, strategy health, scout findings, and audit trail.
     """
     _RTL = {"direction": "rtl", "textAlign": "right"}
 
@@ -3160,6 +3432,8 @@ def build_agent_monitor_tab(
         registry_data = {}
     if audit_changes is None:
         audit_changes = []
+
+    sections: List = []
 
     # ── Status color mapping ─────────────────────────────────────────────
     status_colors = {
@@ -3177,63 +3451,390 @@ def build_agent_monitor_tab(
         "STALE": "⚠",
     }
 
-    # ── Agent definitions (display order) ────────────────────────────────
-    agent_defs = [
-        ("agent_methodology", "Methodology", "methodology evaluation & benchmarking"),
-        ("agent_optimizer", "Optimizer", "parameter & code optimization"),
-        ("agent_math", "Math", "mathematical research & proposals"),
-    ]
+    # ══════════════════════════════════════════════════════════════════════
+    # 1. System Health Overview KPI Row
+    # ══════════════════════════════════════════════════════════════════════
+    total_agents = len(registry_data)
+    healthy_agents = sum(
+        1 for a in registry_data.values()
+        if isinstance(a, dict) and a.get("status") in ("COMPLETED", "IDLE", "RUNNING")
+    )
+    failed_agents = sum(
+        1 for a in registry_data.values()
+        if isinstance(a, dict) and a.get("status") == "FAILED"
+    )
 
-    # ── Build 3 status cards ─────────────────────────────────────────────
+    # Risk level
+    risk_level = "N/A"
+    risk_color = "secondary"
+    if risk_data:
+        risk_level = risk_data.get("level", "N/A")
+        risk_color = {"GREEN": "success", "YELLOW": "warning", "RED": "danger", "BLACK": "dark"}.get(risk_level, "secondary")
+
+    # Regime
+    regime_name = "N/A"
+    regime_color = "secondary"
+    if regime_data:
+        regime_name = regime_data.get("predicted_regime", "N/A")
+        regime_color = {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(regime_name, "secondary")
+
+    # Alpha health
+    alpha_label = "N/A"
+    alpha_color = "secondary"
+    if decay_data:
+        alpha_label = decay_data.get("decay_level", "N/A")
+        alpha_color = {"HEALTHY": "success", "WARNING": "warning", "DECAYING": "danger", "DEAD": "dark"}.get(alpha_label, "secondary")
+
+    health_kpi_row = dbc.Row([
+        _kpi("Agent System", f"{healthy_agents}/{total_agents} healthy", "success" if failed_agents == 0 else "warning", small=True),
+        _kpi("Risk Level", risk_level, risk_color, small=True),
+        _kpi("Regime", regime_name, regime_color, small=True),
+        _kpi("Alpha Health", alpha_label, alpha_color, small=True),
+    ], className="g-2 mb-3")
+    sections.append(health_kpi_row)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 2. Per-Agent Status Cards (ALL agents from registry)
+    # ══════════════════════════════════════════════════════════════════════
     agent_cards = []
-    for agent_key, agent_label, default_role in agent_defs:
-        rec = registry_data.get(agent_key, {})
-        status = rec.get("status", "IDLE")
-        last_run = rec.get("last_run", None)
+    for agent_key, rec in sorted(registry_data.items(), key=lambda x: x[0]):
+        if not isinstance(rec, dict):
+            continue
+        status = rec.get("status", rec.get("runtime_state", "IDLE"))
+        last_run = rec.get("last_run")
         run_count = rec.get("run_count", 0)
-        last_error = rec.get("last_error", None)
+        last_error = rec.get("last_error")
+        role = rec.get("role", "")
+        reliability = rec.get("reliability_score")
         color = status_colors.get(status, "secondary")
         icon = status_icons.get(status, "?")
 
-        run_display = last_run[:19].replace("T", " ") if last_run else "Never"
+        run_display = last_run[:19].replace("T", " ") if last_run else "Never ran"
 
-        error_section = html.Div()
-        if last_error and status == "FAILED":
-            error_section = dbc.Alert(
-                f"Error: {last_error[:150]}",
+        body_items = [
+            html.Small(role[:80] if role else "—", className="text-muted d-block mb-2"),
+            html.Div([
+                html.Span("Last run: ", className="text-muted"),
+                html.Span(run_display),
+            ], className="mb-1", style={"fontSize": "0.85rem"}),
+            html.Div([
+                html.Span("Total runs: ", className="text-muted"),
+                html.Span(str(run_count)),
+            ], className="mb-1", style={"fontSize": "0.85rem"}),
+        ]
+        if reliability is not None:
+            body_items.append(html.Div([
+                html.Span("Reliability: ", className="text-muted"),
+                html.Span(f"{reliability:.0%}", style={"color": "#4caf50" if reliability > 0.9 else "#ff9800"}),
+            ], className="mb-1", style={"fontSize": "0.85rem"}))
+
+        if last_error:
+            body_items.append(dbc.Alert(
+                f"Error: {str(last_error)[:120]}",
                 color="danger",
                 className="mt-2 mb-0 py-1 px-2",
-                style={"fontSize": "0.8rem"},
-            )
+                style={"fontSize": "0.78rem"},
+            ))
 
         card = dbc.Col(
             dbc.Card([
                 dbc.CardHeader([
-                    html.Span(f"{icon} ", style={"fontSize": "1.2rem"}),
-                    html.Strong(agent_label),
-                    dbc.Badge(status, color=color, className="ms-2"),
-                ], style={"backgroundColor": "#16213e"}),
-                dbc.CardBody([
-                    html.Small(default_role, className="text-muted d-block mb-2"),
-                    html.Div([
-                        html.Span("Last run: ", className="text-muted"),
-                        html.Span(run_display),
-                    ], className="mb-1", style={"fontSize": "0.85rem"}),
-                    html.Div([
-                        html.Span("Total runs: ", className="text-muted"),
-                        html.Span(str(run_count)),
-                    ], className="mb-2", style={"fontSize": "0.85rem"}),
-                    error_section,
-                ], style={"backgroundColor": "#1a1a2e"}),
+                    html.Span(f"{icon} ", style={"fontSize": "1.1rem"}),
+                    html.Strong(agent_key.replace("_", " ").title(), style={"fontSize": "0.9rem"}),
+                    dbc.Badge(status, color=color, className="ms-2", style={"fontSize": "0.7rem"}),
+                ], style={"backgroundColor": "#16213e", "padding": "8px 12px"}),
+                dbc.CardBody(body_items, style={"backgroundColor": "#1a1a2e", "padding": "10px 12px"}),
             ], className="h-100", style={"border": "1px solid #2a2a4a"}),
-            md=4,
+            md=3,
+            sm=6,
             className="mb-3",
         )
         agent_cards.append(card)
 
-    cards_row = dbc.Row(agent_cards, className="g-3 mb-4")
+    if agent_cards:
+        sections.append(html.H5("All Agents", className="text-info mb-2 mt-2"))
+        sections.append(dbc.Row(agent_cards, className="g-3 mb-4"))
 
-    # ── Parameter Changes Audit Trail ────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════
+    # 3. Risk Guardian Status Card
+    # ══════════════════════════════════════════════════════════════════════
+    if risk_data:
+        veto = risk_data.get("veto", {})
+        fragility = risk_data.get("fragility", {})
+        risk_scores = risk_data.get("risk_scores", {})
+        machine_summary = risk_data.get("machine_summary", {})
+
+        veto_items = []
+        if veto:
+            veto_items = [
+                html.Div([
+                    html.Span("Can Allocate New Risk: ", className="text-muted small"),
+                    dbc.Badge("YES" if veto.get("can_allocate_new_risk") else "NO",
+                              color="success" if veto.get("can_allocate_new_risk") else "danger",
+                              style={"fontSize": "0.75rem"}),
+                ], className="mb-1"),
+                html.Div([
+                    html.Span("Can Execute Trades: ", className="text-muted small"),
+                    dbc.Badge("YES" if veto.get("can_execute_new_trades") else "NO",
+                              color="success" if veto.get("can_execute_new_trades") else "danger",
+                              style={"fontSize": "0.75rem"}),
+                ], className="mb-1"),
+                html.Div([
+                    html.Span("Must Reduce Risk: ", className="text-muted small"),
+                    dbc.Badge("YES" if veto.get("must_reduce_existing_risk") else "NO",
+                              color="danger" if veto.get("must_reduce_existing_risk") else "success",
+                              style={"fontSize": "0.75rem"}),
+                ], className="mb-1"),
+            ]
+            if veto.get("veto_reasons"):
+                for vr in veto["veto_reasons"][:3]:
+                    veto_items.append(html.Div(
+                        f"  {vr}", className="text-warning", style={"fontSize": "0.78rem"}
+                    ))
+
+        fragility_items = []
+        if fragility:
+            frag_score = fragility.get("fragility_score", 0)
+            frag_state = fragility.get("fragility_state", "N/A")
+            frag_color = "#4caf50" if frag_state == "STABLE" else "#ff9800" if frag_state == "FRAGILE" else "#ef5350"
+            fragility_items = [
+                html.Div([
+                    html.Span("Fragility: ", className="text-muted small"),
+                    html.Span(f"{frag_score:.2f} ({frag_state})", style={"color": frag_color, "fontWeight": "bold", "fontSize": "0.85rem"}),
+                ]),
+            ]
+
+        risk_score_items = []
+        if risk_scores:
+            overall = risk_scores.get("overall_risk_score", 0)
+            risk_state = risk_scores.get("risk_state", "N/A")
+            rs_color = "#4caf50" if risk_state == "SAFE" else "#ff9800" if risk_state == "ELEVATED" else "#ef5350"
+            risk_score_items = [
+                html.Div([
+                    html.Span("Overall Risk Score: ", className="text-muted small"),
+                    html.Span(f"{overall:.2f} ({risk_state})", style={"color": rs_color, "fontWeight": "bold", "fontSize": "0.85rem"}),
+                ]),
+            ]
+
+        risk_card = dbc.Card([
+            dbc.CardHeader([
+                html.Strong("Risk Guardian"),
+                dbc.Badge(risk_level, color=risk_color, className="ms-2"),
+            ], style={"backgroundColor": "#16213e"}),
+            dbc.CardBody(
+                dbc.Row([
+                    dbc.Col(veto_items or [html.Div("No veto data", className="text-muted small")], md=4),
+                    dbc.Col(fragility_items + risk_score_items, md=4),
+                    dbc.Col([
+                        html.Div([
+                            html.Span("Positions: ", className="text-muted small"),
+                            html.Span(str(risk_data.get("n_positions", 0)), style={"fontSize": "0.85rem"}),
+                        ]),
+                        html.Div([
+                            html.Span("Capital: ", className="text-muted small"),
+                            html.Span(f"${risk_data.get('capital', 0):,.0f}", style={"fontSize": "0.85rem"}),
+                        ]),
+                        html.Div([
+                            html.Span("Inst. State: ", className="text-muted small"),
+                            html.Span(str(risk_data.get("institutional_risk_state", "N/A")),
+                                      style={"fontSize": "0.85rem", "color": "#ff9800"}),
+                        ]),
+                    ], md=4),
+                ]),
+                style={"backgroundColor": "#1a1a2e"},
+            ),
+        ], className="mb-3", style={"border": f"1px solid var(--bs-{risk_color})"})
+        sections.append(risk_card)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 4. Regime Forecaster Status Card
+    # ══════════════════════════════════════════════════════════════════════
+    if regime_data:
+        probs = regime_data.get("probabilities", {})
+        regime_colors_map = {"CALM": "#00bc8c", "NORMAL": "#3498db", "TENSION": "#f39c12", "CRISIS": "#e74c3c"}
+        prob_badges = []
+        for rname in ["CALM", "NORMAL", "TENSION", "CRISIS"]:
+            rv = probs.get(rname, 0)
+            rc = regime_colors_map.get(rname, "#888")
+            prob_badges.append(
+                html.Span([
+                    html.Span(f"{rname}: ", className="text-muted small"),
+                    html.Span(f"{rv:.0%}", style={"color": rc, "fontWeight": "bold", "fontSize": "0.85rem"}),
+                    html.Span("  ", style={"marginRight": "12px"}),
+                ])
+            )
+
+        feats = regime_data.get("features", {})
+        feat_items = []
+        for fk in ["vix", "credit_spread", "avg_corr", "realized_vol", "breadth_50d"]:
+            fv = feats.get(fk)
+            if fv is not None:
+                feat_items.append(html.Span([
+                    html.Span(f"{fk}: ", className="text-muted", style={"fontSize": "0.78rem"}),
+                    html.Span(f"{fv:.3f}  ", style={"fontSize": "0.78rem"}),
+                ]))
+
+        transition_prob = regime_data.get("transition_probability", 0)
+        safety_score = regime_data.get("regime_safety_score", 0)
+
+        regime_card = dbc.Card([
+            dbc.CardHeader([
+                html.Strong("Regime Forecaster"),
+                dbc.Badge(regime_name, color=regime_color, className="ms-2"),
+                html.Span(f"  Safety: {safety_score:.0%}", className="text-muted small ms-2"),
+                html.Span(f"  Transition: {transition_prob:.0%}", className="text-muted small ms-2"),
+            ], style={"backgroundColor": "#16213e"}),
+            dbc.CardBody([
+                html.Div(prob_badges, className="mb-2"),
+                html.Div(feat_items, className="mb-1") if feat_items else html.Div(),
+            ], style={"backgroundColor": "#1a1a2e"}),
+        ], className="mb-3", style={"border": f"1px solid var(--bs-{regime_color})"})
+        sections.append(regime_card)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 5. Strategy Health (Alpha Decay)
+    # ══════════════════════════════════════════════════════════════════════
+    if decay_data:
+        metrics = decay_data.get("metrics", {})
+        signals = decay_data.get("signals", {})
+        recs = decay_data.get("recommendations", [])
+
+        metric_items = []
+        for mk, ml in [("ic_current", "IC"), ("sharpe_current", "Sharpe"), ("wr_current", "Win Rate"), ("n_periods", "Periods")]:
+            mv = metrics.get(mk)
+            if mv is not None:
+                metric_items.append(html.Span([
+                    html.Span(f"{ml}: ", className="text-muted small"),
+                    html.Span(f"{mv:.4f}  " if isinstance(mv, float) else f"{mv}  ",
+                              style={"fontWeight": "bold", "fontSize": "0.85rem"}),
+                ]))
+
+        signal_flags = []
+        for sk in ["ic_declining", "sharpe_declining", "wr_declining"]:
+            sv = signals.get(sk, False)
+            if sv:
+                signal_flags.append(dbc.Badge(sk.replace("_", " ").title(), color="danger", className="me-1",
+                                              style={"fontSize": "0.7rem"}))
+
+        decay_card = dbc.Card([
+            dbc.CardHeader([
+                html.Strong("Alpha Decay Monitor"),
+                dbc.Badge(alpha_label, color=alpha_color, className="ms-2"),
+            ], style={"backgroundColor": "#16213e"}),
+            dbc.CardBody([
+                html.Div(metric_items, className="mb-2") if metric_items else html.Div(),
+                html.Div(signal_flags, className="mb-2") if signal_flags else
+                    html.Div("No decay signals detected", className="text-success small mb-2"),
+                html.Div([
+                    html.Div(r, className="text-muted small") for r in recs[:3]
+                ]) if recs else html.Div(),
+            ], style={"backgroundColor": "#1a1a2e"}),
+        ], className="mb-3", style={"border": f"1px solid var(--bs-{alpha_color})"})
+        sections.append(decay_card)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 6. Data Scout Findings
+    # ══════════════════════════════════════════════════════════════════════
+    if scout_data:
+        anomalies = scout_data.get("anomalies", [])
+        opportunities = scout_data.get("opportunities", [])
+        risk_flags = scout_data.get("risk_flags", [])
+
+        scout_items = []
+        if anomalies:
+            anom_rows = []
+            for a in anomalies[:6]:
+                mag_color = "#ef5350" if a.get("magnitude", 0) < -3 else "#ff9800"
+                anom_rows.append(html.Tr([
+                    html.Td(a.get("ticker", ""), style={"fontWeight": "bold", "fontSize": "0.82rem"}),
+                    html.Td(a.get("anomaly_type", ""), style={"fontSize": "0.82rem"}),
+                    html.Td(f"{a.get('magnitude', 0):.1f}x", style={"color": mag_color, "fontSize": "0.82rem"}),
+                    html.Td(f"{a.get('return_pct', 0):+.1f}%", style={"fontSize": "0.82rem"}),
+                    html.Td(str(a.get("date", ""))[:10], style={"fontSize": "0.82rem"}),
+                ]))
+            scout_items.append(dbc.Table(
+                [html.Thead(html.Tr([
+                    html.Th("Ticker"), html.Th("Type"), html.Th("Magnitude"),
+                    html.Th("Return"), html.Th("Date"),
+                ]))] + [html.Tbody(anom_rows)],
+                bordered=True, dark=True, hover=True, size="sm", className="mb-2",
+                style={"fontSize": "0.82rem"},
+            ))
+
+        if risk_flags:
+            scout_items.append(html.Div([
+                html.Strong("Risk Flags:", className="text-danger small d-block mb-1"),
+            ] + [html.Div(f"  {rf}", className="text-warning", style={"fontSize": "0.78rem"})
+                 for rf in risk_flags[:5]]))
+
+        if opportunities:
+            scout_items.append(html.Div([
+                html.Strong("Opportunities:", className="text-success small d-block mb-1 mt-2"),
+            ] + [html.Div(f"  {op}", className="text-muted", style={"fontSize": "0.78rem"})
+                 for op in opportunities[:5]]))
+
+        if scout_items:
+            scout_card = dbc.Card([
+                dbc.CardHeader([
+                    html.Strong("Data Scout Report"),
+                    dbc.Badge(f"{len(anomalies)} anomalies", color="warning", className="ms-2",
+                              style={"fontSize": "0.7rem"}),
+                ], style={"backgroundColor": "#16213e"}),
+                dbc.CardBody(scout_items, style={"backgroundColor": "#1a1a2e"}),
+            ], className="mb-3", style={"border": "1px solid #2a2a4a"})
+            sections.append(scout_card)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 7. Portfolio Construction Summary
+    # ══════════════════════════════════════════════════════════════════════
+    if portfolio_alloc:
+        weights = portfolio_alloc.get("weights", {})
+        gross = portfolio_alloc.get("gross_exposure", 0)
+        net = portfolio_alloc.get("net_exposure", 0)
+        n_pos = portfolio_alloc.get("n_positions", 0)
+        blend_regime = portfolio_alloc.get("blend_regime", "N/A")
+        exp_ret = portfolio_alloc.get("expected_return", 0)
+        exp_vol = portfolio_alloc.get("expected_vol", 0)
+        sharpe_est = portfolio_alloc.get("sharpe_estimate", 0)
+
+        weight_badges = []
+        for ticker, w in sorted(weights.items(), key=lambda x: x[1], reverse=True):
+            w_color = "#4caf50" if w > 0.05 else "#888"
+            weight_badges.append(html.Span([
+                html.Span(f"{ticker}: ", className="text-muted", style={"fontSize": "0.78rem"}),
+                html.Span(f"{w:.1%} ", style={"color": w_color, "fontWeight": "bold", "fontSize": "0.82rem"}),
+            ]))
+
+        port_card = dbc.Card([
+            dbc.CardHeader([
+                html.Strong("Portfolio Construction"),
+                dbc.Badge(f"{n_pos} positions", color="info", className="ms-2", style={"fontSize": "0.7rem"}),
+                dbc.Badge(f"Regime: {blend_regime}", color={"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(blend_regime, "secondary"), className="ms-1", style={"fontSize": "0.7rem"}),
+            ], style={"backgroundColor": "#16213e"}),
+            dbc.CardBody([
+                dbc.Row([
+                    dbc.Col([
+                        html.Div([html.Span("Gross: ", className="text-muted small"), html.Span(f"{gross:.1%}", style={"fontWeight": "bold"})]),
+                        html.Div([html.Span("Net: ", className="text-muted small"), html.Span(f"{net:.1%}", style={"fontWeight": "bold"})]),
+                    ], md=3),
+                    dbc.Col([
+                        html.Div([html.Span("Exp Return: ", className="text-muted small"), html.Span(f"{exp_ret:.1%}", style={"fontWeight": "bold", "color": "#4caf50"})]),
+                        html.Div([html.Span("Exp Vol: ", className="text-muted small"), html.Span(f"{exp_vol:.1%}", style={"fontWeight": "bold"})]),
+                    ], md=3),
+                    dbc.Col([
+                        html.Div([html.Span("Sharpe Est: ", className="text-muted small"), html.Span(f"{sharpe_est:.2f}", style={"fontWeight": "bold", "color": "#0dcaf0"})]),
+                    ], md=2),
+                    dbc.Col([
+                        html.Div(weight_badges),
+                    ], md=4),
+                ]),
+            ], style={"backgroundColor": "#1a1a2e"}),
+        ], className="mb-3", style={"border": "1px solid #2a2a4a"})
+        sections.append(port_card)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 8. Parameter Changes Audit Trail
+    # ══════════════════════════════════════════════════════════════════════
     change_rows = []
     for ch in audit_changes[:20]:
         change_rows.append(
@@ -3265,16 +3866,15 @@ def build_agent_monitor_tab(
             style={"backgroundColor": "#1a1a2e", "padding": "0"},
         ),
     ], style={"border": "1px solid #2a2a4a"})
+    sections.append(audit_card)
 
     return html.Div(
         [
             html.H4("Agent Monitor", className="text-info mb-1"),
             html.P(
-                "מעקב סוכנים: סטטוס, היסטוריית הרצות, ושינויי פרמטרים",
-                className="text-muted mb-3", style=_RTL,
+                "Full agent system dashboard: health, risk, regime, alpha decay, scout, portfolio",
+                className="text-muted mb-3",
             ),
-            cards_row,
-            audit_card,
-        ],
+        ] + sections,
         style={"padding": "12px", "backgroundColor": "#1a1a2e", "borderRadius": "8px"},
     )

@@ -55,7 +55,8 @@
       "Bash(for f:*)",
       "Bash(do echo:*)",
       "Read(//c/Users/omrib/OneDrive/Desktop/srv_quant_system/**)",
-      "Bash(wc -l /c/Users/omrib/OneDrive/Desktop/srv_quant_system/ui/*.py)"
+      "Bash(wc -l /c/Users/omrib/OneDrive/Desktop/srv_quant_system/ui/*.py)",
+      "Bash(ls -la agents/alpha_decay/decay_status.json agents/regime_forecaster/regime_forecast.json agents/risk_guardian/risk_status.json agents/data_scout/scout_report.json agents/portfolio_construction/portfolio_weights.json agents/methodology/reports/*.json)"
     ]
   }
 }

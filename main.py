@@ -1471,6 +1471,57 @@ def build_app() -> dash.Dash:
     except Exception as _ml_exc:
         logger.warning("ML model loading failed (non-fatal): %s", _ml_exc)
 
+    # ==========================================================
+    # Load Agent Outputs (JSON files produced by the agent system)
+    # ==========================================================
+    import json as _json_agent
+
+    def _load_json_safe(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return _json_agent.load(f)
+        except Exception:
+            return None
+
+    _agent_registry_data = _load_json_safe(settings.project_root / "logs" / "agent_registry.json")
+    _decay_data = _load_json_safe(settings.project_root / "agents" / "alpha_decay" / "decay_status.json")
+    _regime_agent_data = _load_json_safe(settings.project_root / "agents" / "regime_forecaster" / "regime_forecast.json")
+    _risk_agent_data = _load_json_safe(settings.project_root / "agents" / "risk_guardian" / "risk_status.json")
+    _scout_data = _load_json_safe(settings.project_root / "agents" / "data_scout" / "scout_report.json")
+    _portfolio_alloc = _load_json_safe(settings.project_root / "agents" / "portfolio_construction" / "portfolio_weights.json")
+
+    # Load latest methodology governance report
+    _methodology_gov = None
+    try:
+        _method_gov_reports = sorted(
+            (settings.project_root / "agents" / "methodology" / "reports").glob("2026-*.json"),
+            reverse=True,
+        )
+        # Prefer the governance report (not the _methodology_lab or _alpha_research variants)
+        for _mgr in _method_gov_reports:
+            if "_methodology_lab" not in _mgr.name and "_alpha_research" not in _mgr.name and "calibration_" not in _mgr.name:
+                _methodology_gov = _load_json_safe(str(_mgr))
+                break
+        if _methodology_gov is None and _method_gov_reports:
+            _methodology_gov = _load_json_safe(str(_method_gov_reports[0]))
+    except Exception:
+        pass
+
+    # Also use agent regime data for ML insights if the ML pipeline didn't produce it
+    if _ml_regime_forecast is None and _regime_agent_data:
+        _ml_regime_forecast = _regime_agent_data
+
+    logger.info(
+        "Agent outputs loaded: registry=%s, decay=%s, regime=%s, risk=%s, scout=%s, portfolio=%s, methodology_gov=%s",
+        "yes" if _agent_registry_data else "no",
+        "yes" if _decay_data else "no",
+        "yes" if _regime_agent_data else "no",
+        "yes" if _risk_agent_data else "no",
+        "yes" if _scout_data else "no",
+        "yes" if _portfolio_alloc else "no",
+        "yes" if _methodology_gov else "no",
+    )
+
     app = dash.Dash(
         __name__,
         external_stylesheets=[dbc.themes.CYBORG],
@@ -1835,7 +1886,7 @@ def build_app() -> dash.Dash:
                     children=[
                         html.H5("💼 Paper Trading Portfolio — תיק מסחר נייר", className="mt-2", style=RTL_STYLE),
                         html.Div("מעקב ביצועים, פוזיציות פתוחות, עסקאות סגורות וניתוח חשיפה.", className="text-muted small mb-3", style=RTL_STYLE),
-                        build_portfolio_tab(_paper_portfolio, engine.prices if engine else None),
+                        build_portfolio_tab(_paper_portfolio, engine.prices if engine else None, portfolio_alloc=_portfolio_alloc),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -1848,7 +1899,7 @@ def build_app() -> dash.Dash:
                     children=[
                         html.H5("🔬 Methodology Lab — השוואת אסטרטגיות", className="mt-2", style=RTL_STYLE),
                         html.Div("ניתוח מעמיק של אסטרטגיות המסחר: פרמטרים, ביצועים לפי רגים, והמלצות.", className="text-muted small mb-3", style=RTL_STYLE),
-                        build_methodology_tab(_methodology_ranking_full),
+                        build_methodology_tab(_methodology_ranking_full, governance_data=_methodology_gov),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -1875,7 +1926,7 @@ def build_app() -> dash.Dash:
             )
 
         if active_tab == "tab-agents":
-            # Load agent registry
+            # Load agent registry (live from class if available, fallback to JSON)
             _agent_reg_data = {}
             _audit_changes = []
             try:
@@ -1892,6 +1943,9 @@ def build_app() -> dash.Dash:
                 _agent_reg_data = _agent_reg.all_agents()
             except Exception as _ar_exc:
                 logger.debug("Agent registry load failed: %s", _ar_exc)
+            # Fallback: use JSON registry if live registry is empty
+            if not _agent_reg_data and _agent_registry_data:
+                _agent_reg_data = _agent_registry_data
             try:
                 from db.audit import AuditTrail
                 _audit = AuditTrail()
@@ -1909,7 +1963,15 @@ def build_app() -> dash.Dash:
                         html.Div("סטטוס סוכנים, היסטוריית הרצות, ושינויי פרמטרים.",
                                  className="text-muted small mb-3",
                                  style={"direction": "rtl", "textAlign": "right"}),
-                        build_agent_monitor_tab(_agent_reg_data, _audit_changes),
+                        build_agent_monitor_tab(
+                            registry_data=_agent_reg_data,
+                            audit_changes=_audit_changes,
+                            risk_data=_risk_agent_data,
+                            regime_data=_regime_agent_data,
+                            decay_data=_decay_data,
+                            scout_data=_scout_data,
+                            portfolio_alloc=_portfolio_alloc,
+                        ),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},
@@ -2108,35 +2170,85 @@ def build_app() -> dash.Dash:
                 className=f"mb-3 border-{_pp_color}", style={"borderWidth": "1px"},
             )
 
-        # ── Agent Status card ─────────────────────────────────────
+        # ── Agent System Status card (from agent JSONs) ─────────
         agent_kpis: Any = html.Div()
         try:
-            import json as _json_ov
-            _orch_path = settings.project_root / "data" / "orchestrator_state.json"
-            if _orch_path.exists():
-                _orch = _json_ov.loads(_orch_path.read_text(encoding="utf-8"))
-                _last_run = _orch.get("last_run", "—")
-                _status = _orch.get("status", "unknown")
-                _agents_ok = _orch.get("agents_ok", 0)
-                _agents_total = _orch.get("agents_total", 0)
-                _st_color = "success" if _status == "ok" else "warning" if _status == "partial" else "danger"
+            if _agent_registry_data:
+                _ag_total = len(_agent_registry_data)
+                _ag_healthy = sum(
+                    1 for _a in _agent_registry_data.values()
+                    if isinstance(_a, dict) and _a.get("status") in ("COMPLETED", "IDLE", "RUNNING")
+                )
+                _ag_failed = sum(
+                    1 for _a in _agent_registry_data.values()
+                    if isinstance(_a, dict) and _a.get("status") == "FAILED"
+                )
+
+                # Risk level
+                _ov_risk_level = "N/A"
+                _ov_risk_color = "secondary"
+                if _risk_agent_data:
+                    _ov_risk_level = _risk_agent_data.get("level", "N/A")
+                    _ov_risk_color = {"GREEN": "success", "YELLOW": "warning", "RED": "danger", "BLACK": "dark"}.get(_ov_risk_level, "secondary")
+
+                # Regime
+                _ov_regime = "N/A"
+                _ov_regime_color = "secondary"
+                if _regime_agent_data:
+                    _ov_regime = _regime_agent_data.get("predicted_regime", "N/A")
+                    _ov_regime_color = {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(_ov_regime, "secondary")
+
+                # Alpha health
+                _ov_alpha = "N/A"
+                if _decay_data:
+                    _ov_alpha = _decay_data.get("decay_level", "N/A")
+
                 agent_kpis = dbc.Card(
                     dbc.CardBody(
                         dbc.Row([
-                            dbc.Col(html.Div("🤖 Agent Orchestrator", className="fw-bold"), width="auto"),
+                            dbc.Col(html.Div("Agent System", className="fw-bold"), width="auto"),
                             dbc.Col([
-                                html.Span("סטטוס: ", className="text-muted small"),
-                                dbc.Badge(_status.upper(), color=_st_color, className="me-3",
-                                          style={"fontSize": "10px"}),
-                                html.Span("הרצה אחרונה: ", className="text-muted small"),
-                                html.Span(str(_last_run), className="small fw-bold me-3"),
-                                html.Span("סוכנים: ", className="text-muted small"),
-                                html.Span(f"{_agents_ok}/{_agents_total}", className="small fw-bold"),
+                                html.Span("Agents: ", className="text-muted small"),
+                                html.Span(f"{_ag_healthy}/{_ag_total} healthy", className="small fw-bold me-3 text-success" if _ag_failed == 0 else "small fw-bold me-3 text-warning"),
+                                html.Span("Risk: ", className="text-muted small"),
+                                dbc.Badge(_ov_risk_level, color=_ov_risk_color, className="me-3", style={"fontSize": "10px"}),
+                                html.Span("Regime: ", className="text-muted small"),
+                                dbc.Badge(_ov_regime, color=_ov_regime_color, className="me-3", style={"fontSize": "10px"}),
+                                html.Span("Alpha: ", className="text-muted small"),
+                                html.Span(_ov_alpha, className="small fw-bold"),
                             ]),
                         ], align="center"),
                     ),
-                    className=f"mb-3 border-{_st_color}", style={"borderWidth": "1px"},
+                    className=f"mb-3 border-{_ov_risk_color}", style={"borderWidth": "1px"},
                 )
+            else:
+                # Fallback: try orchestrator state
+                import json as _json_ov
+                _orch_path = settings.project_root / "data" / "orchestrator_state.json"
+                if _orch_path.exists():
+                    _orch = _json_ov.loads(_orch_path.read_text(encoding="utf-8"))
+                    _last_run = _orch.get("last_run", "—")
+                    _status = _orch.get("status", "unknown")
+                    _agents_ok = _orch.get("agents_ok", 0)
+                    _agents_total = _orch.get("agents_total", 0)
+                    _st_color = "success" if _status == "ok" else "warning" if _status == "partial" else "danger"
+                    agent_kpis = dbc.Card(
+                        dbc.CardBody(
+                            dbc.Row([
+                                dbc.Col(html.Div("Agent Orchestrator", className="fw-bold"), width="auto"),
+                                dbc.Col([
+                                    html.Span("Status: ", className="text-muted small"),
+                                    dbc.Badge(_status.upper(), color=_st_color, className="me-3",
+                                              style={"fontSize": "10px"}),
+                                    html.Span("Last run: ", className="text-muted small"),
+                                    html.Span(str(_last_run), className="small fw-bold me-3"),
+                                    html.Span("Agents: ", className="text-muted small"),
+                                    html.Span(f"{_agents_ok}/{_agents_total}", className="small fw-bold"),
+                                ]),
+                            ], align="center"),
+                        ),
+                        className=f"mb-3 border-{_st_color}", style={"borderWidth": "1px"},
+                    )
         except Exception:
             pass
 
