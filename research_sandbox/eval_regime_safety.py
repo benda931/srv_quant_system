@@ -19,11 +19,20 @@ Output (JSON, stdout):
     "guardrails_ok":   bool    — True if all guardrails pass
   }
 
+Objective:
+  score = sharpe × gate_penalty(pass_rate)
+  gate_penalty(p): 1.00 if p <= 0.75
+                   FLOOR + (1-FLOOR)×(1-(p-0.75)/0.25) if 0.75 < p < 1.00
+                   FLOOR (= 0.25) if p >= 1.00
+  Penalty is strong but never reaches zero: permissive gates are taxed, not
+  zeroed out, so the score retains information even at pass_rate = 1.0.
+
 Guardrails (any violation → guardrails_ok: false, change must be reverted):
-  pass_rate    >= 0.30   (don't block more than 70% of trading days)
-  n_trades     >= 50     (minimum for reliable Sharpe estimate)
-  max_dd       >= -0.15  (drawdown must not exceed -15%)
-  annual_return > 0.0    (strategy must be net profitable)
+  annual_return  >= 0.010   (economic floor: 76% of baseline 0.0131)
+  n_trades       >= 100     (statistical validity; baseline 393)
+  max_dd         >= -0.020  (5× baseline of -0.003985; substantially tighter)
+  win_rate       >= 0.60    (trade quality floor; baseline 0.733)
+  gated_off_days >= 50      (gate must be materially active)
 
 Cached data source: data_lake/parquet/prices.parquet
   — 2622 rows, 2016-03-28 to 2026-03-25, 19 columns
