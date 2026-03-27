@@ -238,5 +238,11 @@
     "timestamp": "2026-03-26T19:33:19.135948+00:00",
     "risk_state": "INSUFFICIENT_EVIDENCE",
     "legacy_level": "YELLOW"
+  },
+  {
+    "date": "2026-03-27",
+    "timestamp": "2026-03-27T00:49:56.935326+00:00",
+    "risk_state": "CAUTION",
+    "legacy_level": "YELLOW"
   }
 ]

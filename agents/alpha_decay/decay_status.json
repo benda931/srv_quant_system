@@ -1,23 +1,264 @@
 {
-  "timestamp": "2026-03-25T17:43:45.072732+00:00",
-  "decay_level": "HEALTHY",
+  "timestamp": "2026-03-27T00:49:51.159770+00:00",
+  "overall_status": "EARLY_DECAY",
+  "legacy_decay_level": "DECAYING",
+  "decay_level": "DECAYING",
+  "strategy_count": 1,
+  "healthy_count": 0,
+  "at_risk_count": 1,
+  "dead_count": 0,
+  "insufficient_count": 0,
+  "strategy_health_table": [
+    {
+      "name": "ALPHA_WHITELIST_MR",
+      "lifecycle_stage": "SHADOW_CANDIDATE",
+      "health_state": "ROBUSTNESS_BREAKDOWN",
+      "health_score": 0.4133,
+      "hazard_30d": 0.3619,
+      "hazard_90d": 0.5386,
+      "retirement_hazard": 0.05,
+      "confidence": 0.56,
+      "evidence_quality_score": 0.5057,
+      "degraded_mode": false,
+      "alpha_integrity": 0.3,
+      "robustness_integrity": 0.0,
+      "regime_integrity": 0.5,
+      "implementation_integrity": 0.7,
+      "tail_integrity": 0.5,
+      "diversification_integrity": 0.5,
+      "lifecycle_integrity": 0.9333,
+      "primary_root_cause": "predictive_edge_erosion",
+      "failure_tags": [
+        "predictive_edge_erosion",
+        "robustness_non_generalization"
+      ],
+      "actions": [
+        {
+          "action": "SEND_TO_METHOD_REVIEW",
+          "urgency": "HIGH",
+          "reason": "state=ROBUSTNESS_BREAKDOWN"
+        },
+        {
+          "action": "FREEZE_PROMOTION",
+          "urgency": "HIGH",
+          "reason": "state=ROBUSTNESS_BREAKDOWN"
+        }
+      ],
+      "evidence_gaps": [
+        "optimizer_history_missing",
+        "risk_status_missing",
+        "execution_state_missing",
+        "math_proposals_missing"
+      ],
+      "legacy_decay_level": "DECAYING",
+      "change_point": {
+        "abrupt_degradation": false,
+        "persistent_weakening": false,
+        "re_stabilization": false,
+        "z_score_latest": 0.0,
+        "deterioration_persistence_score": 0.0,
+        "recovery_persistence_score": 0.0,
+        "consecutive_declining": 0,
+        "consecutive_improving": 0,
+        "trough_index": -1,
+        "trend_direction": "STABLE"
+      },
+      "downstream_contracts": {
+        "methodology": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "FULL_REVALIDATION_REQUIRED",
+            "walk_forward_retest_mandatory",
+            "investigate_overfitting",
+            "investigate_alpha_source"
+          ],
+          "priority": "CRITICAL"
+        },
+        "optimizer": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "no_optimization_needed"
+          ],
+          "priority": "LOW"
+        },
+        "regime_forecaster": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_regime_monitoring"
+          ],
+          "priority": "LOW"
+        },
+        "portfolio_construction": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "maintain_current_weight"
+          ],
+          "priority": "LOW"
+        },
+        "risk_guardian": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_risk_monitoring"
+          ],
+          "priority": "LOW"
+        },
+        "execution": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_execution"
+          ],
+          "priority": "LOW"
+        },
+        "auto_improve": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "IMPROVEMENT_CYCLE_RECOMMENDED"
+          ],
+          "focus_areas": [
+            "predictive_edge_erosion",
+            "robustness_non_generalization"
+          ],
+          "priority": "HIGH"
+        },
+        "math": {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "review_model_assumptions"
+          ],
+          "priority": "MEDIUM"
+        }
+      },
+      "regime_decay_states": {},
+      "strongest_regimes": [],
+      "weakest_regimes": [],
+      "promotion_instability": 0.0,
+      "rollback_count": 0,
+      "post_promotion_decline": false,
+      "timestamp": "2026-03-27T00:49:51.159770+00:00",
+      "notes": ""
+    }
+  ],
+  "hazard_ranking": [
+    "ALPHA_WHITELIST_MR"
+  ],
+  "regime_decay_map": {},
+  "near_retirement": [],
+  "under_watch": [
+    "ALPHA_WHITELIST_MR"
+  ],
+  "machine_summary": {
+    "overall_health": "EARLY_DECAY",
+    "strategies_assessed": 1,
+    "strategies_at_risk": 1,
+    "most_urgent_action": "SEND_TO_METHOD_REVIEW on ALPHA_WHITELIST_MR",
+    "regime_warnings": [],
+    "retirement_warnings": [],
+    "promotion_warnings": [],
+    "optimizer_instructions": {
+      "cost_reduction": [],
+      "regime_repair": [],
+      "alpha_repair": [
+        "ALPHA_WHITELIST_MR"
+      ],
+      "robustness_repair": [
+        "ALPHA_WHITELIST_MR"
+      ]
+    },
+    "downstream_contracts": {
+      "methodology": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "FULL_REVALIDATION_REQUIRED",
+            "walk_forward_retest_mandatory",
+            "investigate_overfitting",
+            "investigate_alpha_source"
+          ],
+          "priority": "CRITICAL"
+        }
+      ],
+      "optimizer": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "no_optimization_needed"
+          ],
+          "priority": "LOW"
+        }
+      ],
+      "regime_forecaster": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_regime_monitoring"
+          ],
+          "priority": "LOW"
+        }
+      ],
+      "portfolio_construction": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "maintain_current_weight"
+          ],
+          "priority": "LOW"
+        }
+      ],
+      "risk_guardian": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_risk_monitoring"
+          ],
+          "priority": "LOW"
+        }
+      ],
+      "execution": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "routine_execution"
+          ],
+          "priority": "LOW"
+        }
+      ],
+      "auto_improve": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "IMPROVEMENT_CYCLE_RECOMMENDED"
+          ],
+          "focus_areas": [
+            "predictive_edge_erosion",
+            "robustness_non_generalization"
+          ],
+          "priority": "HIGH"
+        }
+      ],
+      "math": [
+        {
+          "strategy": "ALPHA_WHITELIST_MR",
+          "instructions": [
+            "review_model_assumptions"
+          ],
+          "priority": "MEDIUM"
+        }
+      ]
+    },
+    "retirement_watchlist": [],
+    "post_promotion_failures": []
+  },
+  "retirement_watchlist": [],
+  "post_promotion_failures": [],
   "metrics": {
     "ic_current": 0,
     "sharpe_current": 0,
     "wr_current": 0.5,
     "n_periods": 387
   },
-  "signals": {
-    "ic_declining": false,
-    "sharpe_declining": false,
-    "wr_declining": false,
-    "consecutive_negative_ic": 0,
-    "consecutive_negative_sharpe": 0,
-    "ic_slope": 0.0,
-    "sharpe_slope": 0.0,
-    "wr_slope": 0.0
-  },
+  "signals": {},
   "recommendations": [
-    "Continue current strategy \u2014 all metrics within normal range"
+    "SEND_TO_METHOD_REVIEW (HIGH): ALPHA_WHITELIST_MR",
+    "FREEZE_PROMOTION (HIGH): ALPHA_WHITELIST_MR"
   ]
 }

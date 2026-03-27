@@ -1,146 +1,321 @@
 {
   "level": "GREEN",
-  "timestamp": "2026-03-26T19:33:19.033052+00:00",
-  "date": "2026-03-26",
+  "timestamp": "2026-03-27T00:49:56.838260+00:00",
+  "date": "2026-03-27",
   "breaches": [],
   "recommendations": [],
   "checks": [
     {
       "check": "var_breach",
       "level": "GREEN",
-      "detail": "Insufficient data for VaR computation"
+      "detail": "VaR OK: 0.4168% <= 2.00%",
+      "var_95_1d": 0.004168,
+      "limit": 0.02
     },
     {
       "check": "exposure_limits",
       "level": "GREEN",
-      "detail": "No positions or zero capital"
+      "detail": "Exposure OK: gross=0.50x, net=30.00%",
+      "gross_exposure": 0.5,
+      "net_exposure": 0.3
     },
     {
       "check": "concentration",
       "level": "GREEN",
-      "detail": "No positions for concentration check"
+      "detail": "Concentration OK: max=10.00%, HHI=0.0500",
+      "hhi": 0.05,
+      "max_single_weight": 0.1,
+      "limit": 0.25
     },
     {
       "check": "correlation_spike",
       "level": "GREEN",
-      "detail": "Not enough positions for correlation check"
+      "detail": "Correlation OK: avg=0.214 <= 0.70",
+      "avg_pairwise_corr": 0.214,
+      "limit": 0.7
     },
     {
       "check": "drawdown",
       "level": "GREEN",
-      "detail": "No portfolio data for drawdown check"
+      "detail": "Drawdown OK: 0.06% <= 8%",
+      "max_drawdown": 0.000605,
+      "warn_limit": 0.08,
+      "halt_limit": 0.12
     },
     {
       "check": "vix_regime",
       "level": "GREEN",
-      "detail": "No VIX data available"
+      "detail": "VIX OK: 26.8 (1d change: +1.4)",
+      "current_vix": 26.75,
+      "vix_1d_change": 1.42,
+      "jump_limit": 5.0
     },
     {
       "check": "correlation_stress_test",
-      "current_var": null,
-      "stressed_var": null,
-      "multiplier": null,
-      "detail": "Insufficient data for correlation stress test"
+      "current_var": 0.009094,
+      "stressed_var": 0.010857,
+      "multiplier": 1.19,
+      "detail": "Stress test: current VaR=0.9094%, stressed VaR=1.0857%, multiplier=1.2x"
     },
     {
       "check": "tail_risk_evt",
-      "es_99": null,
-      "es_995": null,
-      "prob_loss_3pct": null,
-      "prob_loss_5pct": null,
-      "prob_loss_10pct": null,
-      "gpd_shape": null,
-      "gpd_scale": null,
-      "detail": "Insufficient data for tail risk analysis"
+      "es_99": 0.034984,
+      "es_995": 0.044739,
+      "prob_loss_3pct": 0.002427,
+      "prob_loss_5pct": 0.000971,
+      "prob_loss_10pct": 0.0,
+      "gpd_shape": 0.3305,
+      "gpd_scale": 0.004911,
+      "detail": "Tail risk: ES99=3.4984%, ES99.5=4.4739%, P(loss>3%)=0.2427%, P(loss>5%)=0.0971%, GPD shape=0.331"
     },
     {
       "check": "portfolio_greeks",
-      "delta": null,
-      "beta": null,
-      "gamma": null,
+      "delta": 0.4353,
+      "beta": 0.4353,
+      "gamma": -0.4469,
       "risk_flag": false,
-      "detail": "Insufficient data for portfolio greeks"
+      "detail": "Portfolio greeks: delta=0.435, beta=0.435, gamma=-0.447"
     },
     {
       "check": "liquidity_risk",
-      "positions_at_risk": [],
-      "n_flagged": 0,
-      "detail": "No positions or price data for liquidity check"
+      "positions_at_risk": [
+        {
+          "ticker": "XLP",
+          "notional": 100000.0,
+          "estimated_adv": 671859.0,
+          "pct_of_adv": 0.1488,
+          "days_to_unwind": 1.5,
+          "flag_reason": "ADV>5%"
+        },
+        {
+          "ticker": "XLV",
+          "notional": 100000.0,
+          "estimated_adv": 1251512.0,
+          "pct_of_adv": 0.0799,
+          "days_to_unwind": 0.8,
+          "flag_reason": "ADV>5%"
+        },
+        {
+          "ticker": "XLY",
+          "notional": 100000.0,
+          "estimated_adv": 1370659.0,
+          "pct_of_adv": 0.073,
+          "days_to_unwind": 0.7,
+          "flag_reason": "ADV>5%"
+        },
+        {
+          "ticker": "XLC",
+          "notional": 100000.0,
+          "estimated_adv": 737463.0,
+          "pct_of_adv": 0.1356,
+          "days_to_unwind": 1.4,
+          "flag_reason": "ADV>5%"
+        },
+        {
+          "ticker": "XLE",
+          "notional": 100000.0,
+          "estimated_adv": 547204.0,
+          "pct_of_adv": 0.1827,
+          "days_to_unwind": 1.8,
+          "flag_reason": "ADV>5%"
+        }
+      ],
+      "n_flagged": 5,
+      "detail": "Liquidity risk: 5 positions flagged (XLP, XLV, XLY, XLC, XLE)"
     }
   ],
-  "n_positions": 0,
+  "n_positions": 5,
   "capital": 1000000.0,
-  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-26T19:33:19\n\n--- Portfolio Snapshot ---\nPositions: 0\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Insufficient data for correlation stress test\n  [tail_risk_evt] Insufficient data for tail risk analysis\n  [portfolio_greeks] Insufficient data for portfolio greeks\n  [liquidity_risk] No positions or price data for liquidity check\n\n=== End Alert ===",
+  "alert_message": "=== SRV Risk Guardian Alert ===\nStatus: [V] GREEN\nסטטוס: ירוק - תקין\nTime: 2026-03-27T00:49:56\n\n--- Portfolio Snapshot ---\nPositions: 5\nCapital: $1,000,000\n\n--- Advanced Analytics ---\n  [correlation_stress_test] Stress test: current VaR=0.9094%, stressed VaR=1.0857%, multiplier=1.2x\n  [tail_risk_evt] Tail risk: ES99=3.4984%, ES99.5=4.4739%, P(loss>3%)=0.2427%, P(loss>5%)=0.0971%, GPD shape=0.331\n  [portfolio_greeks] Portfolio greeks: delta=0.435, beta=0.435, gamma=-0.447\n  [liquidity_risk] Liquidity risk: 5 positions flagged (XLP, XLV, XLY, XLC, XLE)\n\n=== End Alert ===",
   "risk_inputs_available": [
     "portfolio_weights",
     "regime_forecast",
-    "decay_status"
+    "decay_status",
+    "methodology_machine_summary",
+    "optimizer_machine_summary"
   ],
   "data_sufficiency": {
-    "evidence_quality_score": 0.6,
-    "missing_inputs": [
-      "positions",
-      "prices"
-    ],
+    "evidence_quality_score": 1.0,
+    "missing_inputs": [],
     "stale_data_flags": [],
-    "sufficient": false,
-    "risk_state": "INSUFFICIENT_EVIDENCE"
+    "sufficient": true
   },
   "fragility": {
-    "fragility_score": 0.0,
-    "fragility_drivers": [],
-    "fragility_state": "STABLE"
+    "fragility_score": 0.9368,
+    "fragility_drivers": [
+      "turnover_in_CRISIS: turnover=78.07%"
+    ],
+    "fragility_state": "CRITICAL"
   },
   "proposed_assessment": {
     "acceptable": true,
-    "haircut_required": false,
+    "haircut_required": true,
     "reject_reasons": [
-      "proposed_net=40.13% > 40%"
+      "proposed_net=40.13% > 40%",
+      "high_turnover_in_CRISIS: turnover=78.07%"
     ],
-    "proposed_risk_score": 0.15,
+    "proposed_risk_score": 0.35,
     "proposed_gross": 0.4013,
     "proposed_net": 0.4013,
     "proposed_max_weight": 0.1047
   },
-  "sleeve_risk": [],
+  "sleeve_risk": [
+    {
+      "ticker": "XLP",
+      "direction": "LONG",
+      "capital_weight": 0.1,
+      "risk_contribution": 0.2,
+      "decay_health": "HEALTHY",
+      "regime_mismatch": false,
+      "governance_quality": "approved",
+      "action": "KEEP"
+    },
+    {
+      "ticker": "XLV",
+      "direction": "SHORT",
+      "capital_weight": 0.1,
+      "risk_contribution": 0.2,
+      "decay_health": "HEALTHY",
+      "regime_mismatch": false,
+      "governance_quality": "approved",
+      "action": "KEEP"
+    },
+    {
+      "ticker": "XLY",
+      "direction": "SHORT",
+      "capital_weight": 0.1,
+      "risk_contribution": 0.2,
+      "decay_health": "HEALTHY",
+      "regime_mismatch": false,
+      "governance_quality": "approved",
+      "action": "KEEP"
+    },
+    {
+      "ticker": "XLC",
+      "direction": "SHORT",
+      "capital_weight": 0.1,
+      "risk_contribution": 0.2,
+      "decay_health": "HEALTHY",
+      "regime_mismatch": false,
+      "governance_quality": "approved",
+      "action": "KEEP"
+    },
+    {
+      "ticker": "XLE",
+      "direction": "SHORT",
+      "capital_weight": 0.1,
+      "risk_contribution": 0.2,
+      "decay_health": "HEALTHY",
+      "regime_mismatch": false,
+      "governance_quality": "approved",
+      "action": "KEEP"
+    }
+  ],
   "stress_scenarios": {
-    "detail": "Insufficient data for stress scenarios",
-    "scenarios": {}
+    "scenarios": {
+      "crisis_correlation": {
+        "estimated_loss": 10856.65,
+        "stressed_var": 0.010857,
+        "multiplier": 1.19,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      },
+      "volatility_shock": {
+        "estimated_loss": 18188.33,
+        "stressed_var": 0.018188,
+        "multiplier": 2.0,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      },
+      "gap_down_5pct": {
+        "estimated_loss": 10882.34,
+        "portfolio_beta": 0.435,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      },
+      "liquidity_deterioration": {
+        "estimated_loss": 2000.0,
+        "impact_pct": 0.002,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      },
+      "regime_transition": {
+        "estimated_loss": 16284.98,
+        "stressed_var": 0.016285,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      },
+      "combined": {
+        "estimated_loss": 23713.3,
+        "stressed_var": 0.021713,
+        "multiplier": 2.39,
+        "top_drivers": [
+          "XLP",
+          "XLV",
+          "XLY"
+        ]
+      }
+    },
+    "normal_var": 0.009094
   },
   "risk_scores": {
     "market_risk_score": 0.0,
-    "fragility_score": 0.0,
+    "fragility_score": 0.9368,
     "concentration_risk_score": 0.0,
     "liquidity_risk_score": 0.0,
     "governance_risk_score": 0.0,
     "regime_risk_score": 0.0,
-    "implementation_risk_score": 0.0,
-    "overall_risk_score": 0.0,
-    "risk_state": "SAFE"
+    "implementation_risk_score": 0.417,
+    "overall_risk_score": 0.2291,
+    "risk_state": "CAUTION"
   },
-  "institutional_risk_state": "INSUFFICIENT_EVIDENCE",
+  "institutional_risk_state": "CAUTION",
   "veto": {
     "can_allocate_new_risk": false,
     "can_execute_new_trades": true,
     "must_reduce_existing_risk": false,
     "emergency_unwind_required": false,
     "veto_reasons": [
-      "INSUFFICIENT_EVIDENCE: conservative stance"
+      "FRAGILE: fragility_score=0.94 > 0.7"
     ],
-    "veto_scope": "none",
+    "veto_scope": "regime_specific",
     "vetoed_sleeves": []
   },
   "risk_actions": [
     {
       "action": "FREEZE_NEW_RISK",
       "target": "portfolio_wide",
-      "urgency": "MEDIUM",
-      "rationale": "Insufficient evidence — conservative stance",
-      "confidence": 0.8,
+      "urgency": "HIGH",
+      "rationale": "Fragility critical: 0.94",
+      "confidence": 0.85,
       "downstream_agents": [
         "optimizer",
-        "portfolio_construction",
-        "execution"
+        "portfolio_construction"
+      ]
+    },
+    {
+      "action": "REDUCE_GROSS",
+      "target": "portfolio_wide",
+      "urgency": "MEDIUM",
+      "rationale": "Fragility building: 0.94",
+      "confidence": 0.75,
+      "downstream_agents": [
+        "portfolio_construction"
       ]
     }
   ],
@@ -148,29 +323,27 @@
     "consecutive_elevated_days": 0,
     "escalation_events": 0,
     "recovery_events": 0,
-    "history_length": 39
+    "history_length": 41
   },
   "machine_summary": {
     "legacy_level": "GREEN",
-    "risk_state": "INSUFFICIENT_EVIDENCE",
-    "overall_risk_score": 0.0,
-    "fragility_score": 0.0,
+    "risk_state": "CAUTION",
+    "overall_risk_score": 0.2291,
+    "fragility_score": 0.9368,
     "can_allocate_new_risk": false,
     "can_execute_new_trades": true,
     "must_reduce_existing_risk": false,
     "emergency_unwind_required": false,
     "active_regime": "CRISIS",
-    "transition_state": "ACTIVE_TRANSITION",
-    "gross_exposure": 0.0,
-    "net_exposure": 0.0,
+    "transition_state": "EARLY_WARNING",
+    "gross_exposure": 0.5,
+    "net_exposure": 0.3,
     "top_risk_drivers": [
-      "INSUFFICIENT_EVIDENCE: conservative stance"
+      "turnover_in_CRISIS: turnover=78.07%",
+      "FRAGILE: fragility_score=0.94 > 0.7"
     ],
     "top_flagged_sleeves": [],
-    "missing_critical_inputs": [
-      "positions",
-      "prices"
-    ],
-    "implementation_caution_level": "LOW"
+    "missing_critical_inputs": [],
+    "implementation_caution_level": "MODERATE"
   }
 }

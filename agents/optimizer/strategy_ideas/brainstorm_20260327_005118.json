@@ -1,0 +1,14 @@
+{
+  "timestamp": "20260327_005118",
+  "regime": "UNKNOWN",
+  "metrics": {
+    "sharpe": 7.6417,
+    "win_rate": 0.736,
+    "total_pnl": 0.365155,
+    "max_drawdown": -0.002725,
+    "total_trades": 519,
+    "avg_hold": 13.0,
+    "source": "dispersion_backtest"
+  },
+  "raw_response": "### 1. Name: Cross-Sectional Dispersion Capture\n\n**Signal:**  \nAnalyze cross-sectional dispersion among a basket of sector ETFs by calculating the rolling standard deviation of their returns over a short to medium-term window (e.g., 10-20 days). Identify sector ETFs that deviate most significantly from this dispersion benchmark and position for mean-reversion (e.g., short overperformers and long underperformers).\n\n**Edge:**  \nCross-sectional volatility among sectors often indicates extreme sentiment or overreaction. By targeting outliers in relative performance, this strategy aims to capture the mean-reversion driven by portfolio rebalancing and correction of mispricings.\n\n**Expected Sharpe Range:**  \n3.0 - 5.0\n\n### 2. Name: Relative Seasonality Oscillator\n\n**Signal:**  \nConstruct a mean-reversion signal based on the historical seasonal performance patterns of sector ETFs. Calculate a z-score over a multi-year historical period to determine the typical seasonal effect for each sector ETF. Generate long or short signals based on deviations from expected seasonal performance.\n\n**Edge:**  \nCertain sectors exhibit strong seasonal trends due to business cycles, fiscal periods, or consumption patterns. Exploiting deviations from these patterns provides an opportunity to capitalize on short-term inefficiencies.\n\n**Expected Sharpe Range:**  \n2.5 - 4.0\n\n### 3. Name: Sentiment Imbalance Arbitrage\n\n**Signal:**  \nUtilize sentiment analysis from news articles, social media, and analyst reports to quantify sentiment imbalance for each sector ETF. Construct a sentiment index and measure significant deviations from historical sentiment norms. Engage in mean-reversion trades when sentiment becomes excessively skewed relative to historical averages.\n\n**Edge:**  \nSentiments often lead to overextensions in price movements which later realign with fundamental values. Rapid sentiment shifts can lead to transient mispricings, presenting opportunities to engage in short-term mean-reversion"
+}

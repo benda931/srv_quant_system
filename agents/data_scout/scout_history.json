@@ -1,0 +1,1058 @@
+[
+  {
+    "timestamp": "2026-03-27T00:47:49.846593+00:00",
+    "leads": [
+      {
+        "lead_id": "dc9951a2ede1",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLK",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLK/IEF (converging, delta=0.642)",
+        "evidence": [
+          "Corr 20d: 0.638",
+          "Corr 120d: -0.003",
+          "Direction: converging"
+        ],
+        "severity_score": 1.0,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.645
+      },
+      {
+        "lead_id": "ddc4f9aa10e0",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "SPY",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: SPY/IEF (converging, delta=0.574)",
+        "evidence": [
+          "Corr 20d: 0.769",
+          "Corr 120d: 0.195",
+          "Direction: converging"
+        ],
+        "severity_score": 0.9566666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.6342
+      },
+      {
+        "lead_id": "e51c7cca3c62",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "SPY",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: SPY/^TNX (decorrelating, delta=-0.478)",
+        "evidence": [
+          "Corr 20d: -0.688",
+          "Corr 120d: -0.210",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.7966666666666666,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5942
+      },
+      {
+        "lead_id": "34172b985d03",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLK",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLK/^TNX (decorrelating, delta=-0.474)",
+        "evidence": [
+          "Corr 20d: -0.492",
+          "Corr 120d: -0.018",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.79,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5925
+      },
+      {
+        "lead_id": "b23c2de0e57e",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLK",
+          "TLT"
+        ],
+        "summary": "Relative Value Setup: XLK/TLT (converging, delta=0.460)",
+        "evidence": [
+          "Corr 20d: 0.591",
+          "Corr 120d: 0.131",
+          "Direction: converging"
+        ],
+        "severity_score": 0.7666666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5867
+      },
+      {
+        "lead_id": "93b372943074",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLI",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLI/IEF (converging, delta=0.440)",
+        "evidence": [
+          "Corr 20d: 0.646",
+          "Corr 120d: 0.206",
+          "Direction: converging"
+        ],
+        "severity_score": 0.7333333333333334,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5783
+      },
+      {
+        "lead_id": "1b701d03f509",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "^VIX",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: ^VIX/IEF (decorrelating, delta=-0.432)",
+        "evidence": [
+          "Corr 20d: -0.575",
+          "Corr 120d: -0.144",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.72,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.575
+      },
+      {
+        "lead_id": "e7c16ada1bf8",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLI",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLI/^TNX (decorrelating, delta=-0.413)",
+        "evidence": [
+          "Corr 20d: -0.645",
+          "Corr 120d: -0.232",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.6883333333333334,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5671
+      },
+      {
+        "lead_id": "0b49eac77a6b",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLK",
+          "HYG"
+        ],
+        "summary": "Relative Value Setup: XLK/HYG (converging, delta=0.403)",
+        "evidence": [
+          "Corr 20d: 0.879",
+          "Corr 120d: 0.475",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6716666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5629
+      },
+      {
+        "lead_id": "ea382fc0649a",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "^TNX",
+          "GLD"
+        ],
+        "summary": "Relative Value Setup: ^TNX/GLD (decorrelating, delta=-0.403)",
+        "evidence": [
+          "Corr 20d: -0.490",
+          "Corr 120d: -0.087",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.6716666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5629
+      },
+      {
+        "lead_id": "727abd6713dd",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "SPY",
+          "TLT"
+        ],
+        "summary": "Relative Value Setup: SPY/TLT (converging, delta=0.397)",
+        "evidence": [
+          "Corr 20d: 0.672",
+          "Corr 120d: 0.275",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6616666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5604
+      },
+      {
+        "lead_id": "e11ad918477e",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLE",
+          "GLD"
+        ],
+        "summary": "Correlation Break: XLE/GLD (decorrelating, delta=-0.562)",
+        "evidence": [
+          "Corr 20d: -0.328",
+          "Corr 120d: 0.235",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.9366666666666668,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5592
+      },
+      {
+        "lead_id": "00835bf25ed9",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLF",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLF/^TNX (decorrelating, delta=-0.391)",
+        "evidence": [
+          "Corr 20d: -0.419",
+          "Corr 120d: -0.028",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.6516666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5579
+      },
+      {
+        "lead_id": "93014debde25",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLY",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLY/IEF (converging, delta=0.376)",
+        "evidence": [
+          "Corr 20d: 0.625",
+          "Corr 120d: 0.249",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6266666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5517
+      },
+      {
+        "lead_id": "7f187699c4dc",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLF",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLF/IEF (converging, delta=0.373)",
+        "evidence": [
+          "Corr 20d: 0.389",
+          "Corr 120d: 0.016",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6216666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5504
+      },
+      {
+        "lead_id": "bbfdc52c0ab3",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLY",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLY/^TNX (decorrelating, delta=-0.362)",
+        "evidence": [
+          "Corr 20d: -0.617",
+          "Corr 120d: -0.255",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.6033333333333334,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5458
+      },
+      {
+        "lead_id": "f77d95a0b2b0",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLC",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLC/^TNX (decorrelating, delta=-0.343)",
+        "evidence": [
+          "Corr 20d: -0.657",
+          "Corr 120d: -0.313",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.5716666666666668,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5379
+      },
+      {
+        "lead_id": "c8d1325cd7ec",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLC",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLC/IEF (converging, delta=0.342)",
+        "evidence": [
+          "Corr 20d: 0.648",
+          "Corr 120d: 0.306",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5700000000000001,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5375
+      },
+      {
+        "lead_id": "02705be1d398",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "GLD",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: GLD/IEF (converging, delta=0.333)",
+        "evidence": [
+          "Corr 20d: 0.423",
+          "Corr 120d: 0.090",
+          "Direction: converging"
+        ],
+        "severity_score": 0.555,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5338
+      },
+      {
+        "lead_id": "cacef819d6d8",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLP",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLP/^TNX (decorrelating, delta=-0.326)",
+        "evidence": [
+          "Corr 20d: -0.619",
+          "Corr 120d: -0.293",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.5433333333333333,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5308
+      },
+      {
+        "lead_id": "8714012c4dc3",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLRE",
+          "^TNX"
+        ],
+        "summary": "Relative Value Setup: XLRE/^TNX (decorrelating, delta=-0.314)",
+        "evidence": [
+          "Corr 20d: -0.729",
+          "Corr 120d: -0.415",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.5233333333333333,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5258
+      },
+      {
+        "lead_id": "980b6e3b617c",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLB",
+          "IEF"
+        ],
+        "summary": "Relative Value Setup: XLB/IEF (converging, delta=0.311)",
+        "evidence": [
+          "Corr 20d: 0.516",
+          "Corr 120d: 0.204",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5183333333333333,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5246
+      },
+      {
+        "lead_id": "b90d20f0f239",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "^TNX",
+          "^VIX"
+        ],
+        "summary": "Relative Value Setup: ^TNX/^VIX (converging, delta=0.307)",
+        "evidence": [
+          "Corr 20d: 0.458",
+          "Corr 120d: 0.151",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5116666666666667,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5229
+      },
+      {
+        "lead_id": "6cb94952f6a7",
+        "category": "RELATIVE_VALUE_SETUP",
+        "subcategory": "corr_break_with_divergence",
+        "tickers": [
+          "XLI",
+          "TLT"
+        ],
+        "summary": "Relative Value Setup: XLI/TLT (converging, delta=0.302)",
+        "evidence": [
+          "Corr 20d: 0.523",
+          "Corr 120d: 0.221",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5033333333333333,
+        "confidence_score": 0.65,
+        "persistence_score": 0.3,
+        "actionability_score": 0.65,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5208
+      },
+      {
+        "lead_id": "ffe067fc247f",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLK",
+          "XLRE"
+        ],
+        "summary": "Correlation Break: XLK/XLRE (converging, delta=0.462)",
+        "evidence": [
+          "Corr 20d: 0.618",
+          "Corr 120d: 0.156",
+          "Direction: converging"
+        ],
+        "severity_score": 0.77,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5175
+      },
+      {
+        "lead_id": "d28471b5ae0b",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLP",
+          "XLE"
+        ],
+        "summary": "Correlation Break: XLP/XLE (decorrelating, delta=-0.457)",
+        "evidence": [
+          "Corr 20d: -0.194",
+          "Corr 120d: 0.263",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.7616666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.5154
+      },
+      {
+        "lead_id": "18c46e92412f",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLC",
+          "XLK"
+        ],
+        "summary": "Correlation Break: XLC/XLK (converging, delta=0.400)",
+        "evidence": [
+          "Corr 20d: 0.820",
+          "Corr 120d: 0.420",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6666666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4917
+      },
+      {
+        "lead_id": "499d6b7994a8",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLF",
+          "XLP"
+        ],
+        "summary": "Correlation Break: XLF/XLP (converging, delta=0.373)",
+        "evidence": [
+          "Corr 20d: 0.363",
+          "Corr 120d: -0.011",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6216666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4804
+      },
+      {
+        "lead_id": "95625cbaff14",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLK",
+          "XLV"
+        ],
+        "summary": "Correlation Break: XLK/XLV (converging, delta=0.373)",
+        "evidence": [
+          "Corr 20d: 0.527",
+          "Corr 120d: 0.154",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6216666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4804
+      },
+      {
+        "lead_id": "bb6c0afd0fef",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLI",
+          "XLV"
+        ],
+        "summary": "Correlation Break: XLI/XLV (converging, delta=0.362)",
+        "evidence": [
+          "Corr 20d: 0.804",
+          "Corr 120d: 0.442",
+          "Direction: converging"
+        ],
+        "severity_score": 0.6033333333333334,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4758
+      },
+      {
+        "lead_id": "975efd4e5545",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLRE",
+          "XLE"
+        ],
+        "summary": "Correlation Break: XLRE/XLE (decorrelating, delta=-0.359)",
+        "evidence": [
+          "Corr 20d: -0.131",
+          "Corr 120d: 0.228",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.5983333333333334,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4746
+      },
+      {
+        "lead_id": "5032d2b8e1eb",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLC",
+          "XLE"
+        ],
+        "summary": "Correlation Break: XLC/XLE (decorrelating, delta=-0.347)",
+        "evidence": [
+          "Corr 20d: -0.329",
+          "Corr 120d: 0.019",
+          "Direction: decorrelating"
+        ],
+        "severity_score": 0.5783333333333334,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4696
+      },
+      {
+        "lead_id": "f37967d0dae5",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLP",
+          "GLD"
+        ],
+        "summary": "Correlation Break: XLP/GLD (converging, delta=0.343)",
+        "evidence": [
+          "Corr 20d: 0.470",
+          "Corr 120d: 0.126",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5716666666666668,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4679
+      },
+      {
+        "lead_id": "b47658df7c2b",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLP",
+          "SPY"
+        ],
+        "summary": "Correlation Break: XLP/SPY (converging, delta=0.325)",
+        "evidence": [
+          "Corr 20d: 0.363",
+          "Corr 120d: 0.038",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5416666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4604
+      },
+      {
+        "lead_id": "24844b42b48c",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLRE",
+          "SPY"
+        ],
+        "summary": "Correlation Break: XLRE/SPY (converging, delta=0.322)",
+        "evidence": [
+          "Corr 20d: 0.740",
+          "Corr 120d: 0.418",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5366666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4592
+      },
+      {
+        "lead_id": "4d560744f4b0",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLV",
+          "GLD"
+        ],
+        "summary": "Correlation Break: XLV/GLD (converging, delta=0.310)",
+        "evidence": [
+          "Corr 20d: 0.451",
+          "Corr 120d: 0.141",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5166666666666667,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4542
+      },
+      {
+        "lead_id": "9be8fe2eb5cf",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLC",
+          "GLD"
+        ],
+        "summary": "Correlation Break: XLC/GLD (converging, delta=0.308)",
+        "evidence": [
+          "Corr 20d: 0.421",
+          "Corr 120d: 0.112",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5133333333333333,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4533
+      },
+      {
+        "lead_id": "aaee46e9c21a",
+        "category": "CORRELATION_BREAK",
+        "subcategory": "structural_decorrelation",
+        "tickers": [
+          "XLV",
+          "SPY"
+        ],
+        "summary": "Correlation Break: XLV/SPY (converging, delta=0.305)",
+        "evidence": [
+          "Corr 20d: 0.704",
+          "Corr 120d: 0.400",
+          "Direction: converging"
+        ],
+        "severity_score": 0.5083333333333333,
+        "confidence_score": 0.5,
+        "persistence_score": 0.3,
+        "actionability_score": 0.45,
+        "regime_relevance": "MEDIUM",
+        "downstream_targets": [
+          "methodology",
+          "portfolio_construction"
+        ],
+        "recommended_followup": "Investigate pair dynamics; check for structural shift",
+        "aging_days": 0,
+        "priority_score": 0.4521
+      },
+      {
+        "lead_id": "3deef8e8d085",
+        "category": "MOMENTUM_DIVERGENCE",
+        "subcategory": "bearish_divergence",
+        "tickers": [
+          "DX-Y.NYB"
+        ],
+        "summary": "Momentum divergence (bearish_divergence): DX-Y.NYB RSI 61->52",
+        "evidence": [
+          "Type: bearish_divergence",
+          "RSI prior: 60.8",
+          "RSI recent: 52.1"
+        ],
+        "severity_score": 0.4,
+        "confidence_score": 0.35,
+        "persistence_score": 0.3,
+        "actionability_score": 0.4,
+        "regime_relevance": "LOW",
+        "downstream_targets": [
+          "methodology"
+        ],
+        "recommended_followup": "Monitor for confirmation or reversal",
+        "aging_days": 0,
+        "priority_score": 0.34
+      }
+    ]
+  }
+]

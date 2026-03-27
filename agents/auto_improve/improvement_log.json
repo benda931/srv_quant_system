@@ -503,6 +503,284 @@
         }
       ],
       "status": "completed"
+    },
+    {
+      "cycle_id": "dd64599d-19e",
+      "timestamp": "2026-03-27T11:01:31.561289+00:00",
+      "governance_status": "all_approved",
+      "mode": "full",
+      "metrics_before": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "weaknesses": [
+        "All 19 strategies have negative Sharpe",
+        "Win rate below 50%: 0.0%"
+      ],
+      "suggestions_generated": 1,
+      "suggestions_tested": 1,
+      "suggestions_promoted": 0,
+      "promoted": 0,
+      "best_improvement": {},
+      "metrics_after": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "gpt_used": false,
+      "gpt_suggestions": [],
+      "details": [
+        {
+          "action_type": "no_action",
+          "target": null,
+          "rationale": "System healthy, monitor only",
+          "decision": "NO_ACTION",
+          "stage_results": {
+            "stage_0_eligibility": "SKIP"
+          },
+          "promoted": false
+        }
+      ],
+      "machine_summary": {
+        "cycle_result": "0_SHADOWED_0_PROMOTED",
+        "primary_mode": "DAILY_MAINTENANCE",
+        "diagnosed_bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
+        "stuck_state": "LOW_PROGRESS",
+        "promote_count": 0,
+        "shadow_count": 0,
+        "freeze_count": 0,
+        "escalation_flag": false,
+        "next_recommended_action": "monitor",
+        "top_blockers": [
+          "No critical bottleneck detected"
+        ],
+        "local_tuning_viable": false,
+        "structural_review_needed": true,
+        "system_health_score": 0.57,
+        "system_improvability_score": 0.4,
+        "downstream_contract": {
+          "methodology": {
+            "action": "continue_normal"
+          },
+          "optimizer": {
+            "action": "continue_normal"
+          },
+          "math": {
+            "action": "continue_normal"
+          },
+          "regime_forecaster": {
+            "action": "continue_normal"
+          },
+          "portfolio_construction": {
+            "action": "continue_normal"
+          },
+          "risk_guardian": {
+            "action": "continue_normal"
+          },
+          "execution": {
+            "action": "continue_normal"
+          },
+          "data_scout": {
+            "action": "continue_normal"
+          },
+          "alpha_decay": {
+            "action": "continue_normal"
+          }
+        }
+      },
+      "available_agents": [
+        "methodology",
+        "alpha_decay",
+        "regime_forecaster",
+        "portfolio_construction",
+        "risk_guardian",
+        "data_scout",
+        "math"
+      ],
+      "diagnosed_bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
+      "bottleneck_confidence": 0.6,
+      "stuck_state": "LOW_PROGRESS",
+      "improvement_mode": "DAILY_MAINTENANCE",
+      "system_scores": {
+        "system_health_score": 0.57,
+        "system_improvability_score": 0.4,
+        "structural_bottleneck_score": 0.8,
+        "local_tuning_viable": false
+      },
+      "status": "completed",
+      "downstream_contract": {
+        "methodology": {
+          "action": "continue_normal"
+        },
+        "optimizer": {
+          "action": "continue_normal"
+        },
+        "math": {
+          "action": "continue_normal"
+        },
+        "regime_forecaster": {
+          "action": "continue_normal"
+        },
+        "portfolio_construction": {
+          "action": "continue_normal"
+        },
+        "risk_guardian": {
+          "action": "continue_normal"
+        },
+        "execution": {
+          "action": "continue_normal"
+        },
+        "data_scout": {
+          "action": "continue_normal"
+        },
+        "alpha_decay": {
+          "action": "continue_normal"
+        }
+      }
+    },
+    {
+      "cycle_id": "1f55551a-587",
+      "timestamp": "2026-03-27T11:03:41.896227+00:00",
+      "governance_status": "all_approved",
+      "mode": "full",
+      "metrics_before": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "weaknesses": [
+        "All 19 strategies have negative Sharpe",
+        "Win rate below 50%: 0.0%"
+      ],
+      "suggestions_generated": 1,
+      "suggestions_tested": 1,
+      "suggestions_promoted": 0,
+      "promoted": 0,
+      "best_improvement": {},
+      "metrics_after": {
+        "sharpe": 0,
+        "win_rate": 0,
+        "max_dd": 0,
+        "best_strategy": "DISPERSION_TIMING",
+        "trades": 0
+      },
+      "gpt_used": false,
+      "gpt_suggestions": [],
+      "details": [
+        {
+          "action_type": "no_action",
+          "target": null,
+          "rationale": "System healthy, monitor only",
+          "decision": "NO_ACTION",
+          "stage_results": {
+            "stage_0_eligibility": "SKIP"
+          },
+          "promoted": false
+        }
+      ],
+      "machine_summary": {
+        "cycle_result": "0_SHADOWED_0_PROMOTED",
+        "primary_mode": "DAILY_MAINTENANCE",
+        "diagnosed_bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
+        "stuck_state": "LOW_PROGRESS",
+        "promote_count": 0,
+        "shadow_count": 0,
+        "freeze_count": 0,
+        "escalation_flag": false,
+        "next_recommended_action": "monitor",
+        "top_blockers": [
+          "No critical bottleneck detected"
+        ],
+        "local_tuning_viable": false,
+        "structural_review_needed": true,
+        "system_health_score": 0.57,
+        "system_improvability_score": 0.4,
+        "downstream_contract": {
+          "methodology": {
+            "action": "continue_normal"
+          },
+          "optimizer": {
+            "action": "continue_normal"
+          },
+          "math": {
+            "action": "continue_normal"
+          },
+          "regime_forecaster": {
+            "action": "continue_normal"
+          },
+          "portfolio_construction": {
+            "action": "continue_normal"
+          },
+          "risk_guardian": {
+            "action": "continue_normal"
+          },
+          "execution": {
+            "action": "continue_normal"
+          },
+          "data_scout": {
+            "action": "continue_normal"
+          },
+          "alpha_decay": {
+            "action": "continue_normal"
+          }
+        }
+      },
+      "available_agents": [
+        "methodology",
+        "alpha_decay",
+        "regime_forecaster",
+        "portfolio_construction",
+        "risk_guardian",
+        "data_scout",
+        "math"
+      ],
+      "diagnosed_bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
+      "bottleneck_confidence": 0.6,
+      "stuck_state": "LOW_PROGRESS",
+      "improvement_mode": "DAILY_MAINTENANCE",
+      "system_scores": {
+        "system_health_score": 0.57,
+        "system_improvability_score": 0.4,
+        "structural_bottleneck_score": 0.8,
+        "local_tuning_viable": false
+      },
+      "status": "completed",
+      "downstream_contract": {
+        "methodology": {
+          "action": "continue_normal"
+        },
+        "optimizer": {
+          "action": "continue_normal"
+        },
+        "math": {
+          "action": "continue_normal"
+        },
+        "regime_forecaster": {
+          "action": "continue_normal"
+        },
+        "portfolio_construction": {
+          "action": "continue_normal"
+        },
+        "risk_guardian": {
+          "action": "continue_normal"
+        },
+        "execution": {
+          "action": "continue_normal"
+        },
+        "data_scout": {
+          "action": "continue_normal"
+        },
+        "alpha_decay": {
+          "action": "continue_normal"
+        }
+      }
     }
   ]
 }

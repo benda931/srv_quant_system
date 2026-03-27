@@ -1,14 +1,17 @@
 {
-  "timestamp": "2026-03-25T17:43:47.145294+00:00",
+  "timestamp": "2026-03-27T00:50:00.435947+00:00",
   "weights": {
-    "XLV": 0.0222,
-    "XLI": 0.0828,
-    "XLF": 0.0183,
-    "XLB": 0.0769,
-    "XLC": 0.0227,
-    "XLE": 0.0154,
-    "XLRE": 0.0583,
-    "XLU": 0.1047
+    "XLC": 0.02,
+    "XLY": 0.0115,
+    "XLP": 0.0117,
+    "XLE": 0.0171,
+    "XLF": 0.0182,
+    "XLV": 0.0198,
+    "XLI": 0.0418,
+    "XLB": 0.0394,
+    "XLRE": 0.0329,
+    "XLK": 0.0111,
+    "XLU": 0.0497
   },
   "method_weights": {
     "mv": {
@@ -20,22 +23,22 @@
       "XLV": -0.2,
       "XLI": 0.2,
       "XLB": 0.2,
-      "XLRE": -0.0,
+      "XLRE": 0.0,
       "XLK": -0.2,
       "XLU": 0.2
     },
     "rp": {
-      "XLC": 0.1045,
-      "XLY": 0.0705,
-      "XLP": 0.1132,
-      "XLE": 0.1128,
-      "XLF": 0.0971,
-      "XLV": 0.1037,
-      "XLI": 0.0713,
-      "XLB": 0.0615,
-      "XLRE": 0.0971,
-      "XLK": 0.0606,
-      "XLU": 0.1078
+      "XLC": 0.1047,
+      "XLY": 0.0728,
+      "XLP": 0.1121,
+      "XLE": 0.1105,
+      "XLF": 0.0986,
+      "XLV": 0.1024,
+      "XLI": 0.0725,
+      "XLB": 0.0592,
+      "XLRE": 0.0975,
+      "XLK": 0.0619,
+      "XLU": 0.108
     },
     "conv": {
       "XLC": 0.0,
@@ -51,11 +54,435 @@
       "XLU": 0.0
     }
   },
+  "legacy_blend_weights": {
+    "XLV": 0.0128,
+    "XLP": 0.0644,
+    "XLB": 0.0453,
+    "XLC": 0.0137,
+    "XLU": 0.0629,
+    "XLRE": 0.0351,
+    "XLI": 0.0501,
+    "XLF": 0.0115,
+    "XLE": 0.0638
+  },
   "blend_regime": "TENSION",
-  "gross_exposure": 0.401,
-  "net_exposure": 0.401,
-  "n_positions": 8,
-  "expected_return": 0.1178,
-  "expected_vol": 0.0411,
-  "sharpe_estimate": 2.863
+  "gross_exposure": 0.273,
+  "net_exposure": 0.273,
+  "n_positions": 11,
+  "expected_return": 0.0701,
+  "expected_vol": 0.0252,
+  "sharpe_estimate": 2.782,
+  "risk_budget": {
+    "XLC": 0.1217,
+    "XLY": 0.1016,
+    "XLP": 0.1193,
+    "XLE": 0.0988,
+    "XLF": 0.1061,
+    "XLV": 0.1201,
+    "XLI": 0.108,
+    "XLB": 0.0927,
+    "XLRE": 0.1156,
+    "XLK": 0.0812,
+    "XLU": 0.1079
+  },
+  "turnover": 0.1001,
+  "governance_loaded": true,
+  "strategies_excluded": [
+    "DISPERSION_TIMING"
+  ],
+  "allocation_sleeves": [
+    {
+      "sleeve_id": "XLC_SECTOR",
+      "sector": "XLC",
+      "role": "DIVERSIFIER",
+      "score": 0.147449,
+      "weight": 0.02,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLY_SECTOR",
+      "sector": "XLY",
+      "role": "DIVERSIFIER",
+      "score": 0.144271,
+      "weight": 0.0115,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLP_SECTOR",
+      "sector": "XLP",
+      "role": "DIVERSIFIER",
+      "score": 0.147132,
+      "weight": 0.0117,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLE_SECTOR",
+      "sector": "XLE",
+      "role": "DIVERSIFIER",
+      "score": 0.143734,
+      "weight": 0.0171,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLF_SECTOR",
+      "sector": "XLF",
+      "role": "DIVERSIFIER",
+      "score": 0.145082,
+      "weight": 0.0182,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLV_SECTOR",
+      "sector": "XLV",
+      "role": "DIVERSIFIER",
+      "score": 0.147238,
+      "weight": 0.0198,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLI_SECTOR",
+      "sector": "XLI",
+      "role": "DIVERSIFIER",
+      "score": 0.145409,
+      "weight": 0.0418,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLB_SECTOR",
+      "sector": "XLB",
+      "role": "DIVERSIFIER",
+      "score": 0.142428,
+      "weight": 0.0394,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLRE_SECTOR",
+      "sector": "XLRE",
+      "role": "DIVERSIFIER",
+      "score": 0.146604,
+      "weight": 0.0329,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLK_SECTOR",
+      "sector": "XLK",
+      "role": "DIVERSIFIER",
+      "score": 0.139438,
+      "weight": 0.0111,
+      "allocable": true,
+      "exclusion_reason": ""
+    },
+    {
+      "sleeve_id": "XLU_SECTOR",
+      "sector": "XLU",
+      "role": "DIVERSIFIER",
+      "score": 0.14539,
+      "weight": 0.0497,
+      "allocable": true,
+      "exclusion_reason": ""
+    }
+  ],
+  "diagnostics": {
+    "sleeve_details": [
+      {
+        "sleeve_id": "XLC_SECTOR",
+        "sector": "XLC",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.147449,
+        "final_weight": 0.02,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLY_SECTOR",
+        "sector": "XLY",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.144271,
+        "final_weight": 0.0115,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLP_SECTOR",
+        "sector": "XLP",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.147132,
+        "final_weight": 0.0117,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLE_SECTOR",
+        "sector": "XLE",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.143734,
+        "final_weight": 0.0171,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLF_SECTOR",
+        "sector": "XLF",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.145082,
+        "final_weight": 0.0182,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLV_SECTOR",
+        "sector": "XLV",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.147238,
+        "final_weight": 0.0198,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLI_SECTOR",
+        "sector": "XLI",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.145409,
+        "final_weight": 0.0418,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLB_SECTOR",
+        "sector": "XLB",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.142428,
+        "final_weight": 0.0394,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLRE_SECTOR",
+        "sector": "XLRE",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.146604,
+        "final_weight": 0.0329,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLK_SECTOR",
+        "sector": "XLK",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.139438,
+        "final_weight": 0.0111,
+        "allocable": true,
+        "regime_haircut": "25%"
+      },
+      {
+        "sleeve_id": "XLU_SECTOR",
+        "sector": "XLU",
+        "role": "DIVERSIFIER",
+        "approval": "APPROVED",
+        "health": "HEALTHY",
+        "conviction": 0.0,
+        "raw_score": 0.14539,
+        "final_weight": 0.0497,
+        "allocable": true,
+        "regime_haircut": "25%"
+      }
+    ],
+    "summary": {
+      "concentration_hhi": 0.116,
+      "top_3_positions": [
+        {
+          "sector": "XLU",
+          "weight": 0.0497
+        },
+        {
+          "sector": "XLI",
+          "weight": 0.0418
+        },
+        {
+          "sector": "XLB",
+          "weight": 0.0394
+        }
+      ],
+      "long_exposure": 0.2732,
+      "short_exposure": 0,
+      "gross_exposure": 0.2732,
+      "net_exposure": 0.2732,
+      "turnover_from_previous": 0.1001,
+      "risk_budget_by_role": {
+        "DIVERSIFIER": 0.2732
+      },
+      "governance_exclusion_count": 0,
+      "decay_haircut_count": 0
+    }
+  },
+  "machine_summary": {
+    "total_positions": 11,
+    "gross_exposure": 0.2732,
+    "net_exposure": 0.2732,
+    "active_regime": "TENSION",
+    "transition_state": "EARLY_WARNING",
+    "core_count": 0,
+    "tactical_count": 0,
+    "diversifier_count": 11,
+    "shadow_count": 0,
+    "excluded_count": 0,
+    "turnover": 0.1001,
+    "target_vol": 0.1,
+    "top_allocations": [
+      {
+        "XLU": 0.0497,
+        "role": "DIVERSIFIER"
+      },
+      {
+        "XLI": 0.0418,
+        "role": "DIVERSIFIER"
+      },
+      {
+        "XLB": 0.0394,
+        "role": "DIVERSIFIER"
+      },
+      {
+        "XLRE": 0.0329,
+        "role": "DIVERSIFIER"
+      },
+      {
+        "XLC": 0.02,
+        "role": "DIVERSIFIER"
+      }
+    ],
+    "largest_haircuts": [
+      {
+        "XLC": "25% regime haircut"
+      },
+      {
+        "XLY": "25% regime haircut"
+      },
+      {
+        "XLP": "25% regime haircut"
+      },
+      {
+        "XLE": "25% regime haircut"
+      },
+      {
+        "XLF": "25% regime haircut"
+      },
+      {
+        "XLV": "25% regime haircut"
+      },
+      {
+        "XLI": "25% regime haircut"
+      },
+      {
+        "XLB": "25% regime haircut"
+      },
+      {
+        "XLRE": "25% regime haircut"
+      },
+      {
+        "XLK": "25% regime haircut"
+      },
+      {
+        "XLU": "25% regime haircut"
+      }
+    ],
+    "excluded_for_governance": [],
+    "excluded_for_decay": [],
+    "execution_instructions": {
+      "XLC": {
+        "action": "BUY",
+        "weight": 0.02,
+        "urgency": "LOW"
+      },
+      "XLY": {
+        "action": "BUY",
+        "weight": 0.0115,
+        "urgency": "LOW"
+      },
+      "XLP": {
+        "action": "BUY",
+        "weight": 0.0117,
+        "urgency": "LOW"
+      },
+      "XLE": {
+        "action": "BUY",
+        "weight": 0.0171,
+        "urgency": "LOW"
+      },
+      "XLF": {
+        "action": "BUY",
+        "weight": 0.0182,
+        "urgency": "LOW"
+      },
+      "XLV": {
+        "action": "BUY",
+        "weight": 0.0198,
+        "urgency": "LOW"
+      },
+      "XLI": {
+        "action": "BUY",
+        "weight": 0.0418,
+        "urgency": "LOW"
+      },
+      "XLB": {
+        "action": "BUY",
+        "weight": 0.0394,
+        "urgency": "LOW"
+      },
+      "XLRE": {
+        "action": "BUY",
+        "weight": 0.0329,
+        "urgency": "LOW"
+      },
+      "XLK": {
+        "action": "BUY",
+        "weight": 0.0111,
+        "urgency": "LOW"
+      },
+      "XLU": {
+        "action": "BUY",
+        "weight": 0.0497,
+        "urgency": "LOW"
+      }
+    },
+    "rebalance_urgency": "MEDIUM"
+  }
 }

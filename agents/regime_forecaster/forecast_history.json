@@ -56,5 +56,272 @@
       "vol_trend": 0.0176,
       "vol_of_vol": 0.0182
     }
+  },
+  {
+    "timestamp": "2026-03-27T00:49:53.659925+00:00",
+    "probabilities": {
+      "CALM": 0.019,
+      "NORMAL": 0.188,
+      "TENSION": 0.167,
+      "CRISIS": 0.626
+    },
+    "predicted_regime": "CRISIS",
+    "transition_probability": 0.457,
+    "regime_safety_score": 0,
+    "features": {
+      "vix": 26.75,
+      "vix_pct": 0.968,
+      "vix_5d_chg": -0.03,
+      "vix_vol": 1.362,
+      "credit_spread": -0.1821,
+      "credit_z": -0.647,
+      "credit_mom": 0.0092,
+      "avg_corr": 0.305,
+      "corr_chg": -0.0356,
+      "dispersion": 0.0095,
+      "breadth_50d": 0.091,
+      "breadth_200d": 0.455,
+      "realized_vol": 0.1312,
+      "vol_trend": 0.0122,
+      "vol_of_vol": 0.017
+    },
+    "hmm": {
+      "current_state": "CRISIS",
+      "state_names": [
+        "CALM",
+        "NORMAL",
+        "TENSION",
+        "CRISIS"
+      ],
+      "transition_matrix": [
+        [
+          0.15,
+          0.0667,
+          0.1,
+          0.6833
+        ],
+        [
+          0.2812,
+          0.625,
+          0.0625,
+          0.0312
+        ],
+        [
+          0.3889,
+          0.4444,
+          0.0556,
+          0.1111
+        ],
+        [
+          0.25,
+          0.0071,
+          0.0643,
+          0.6786
+        ]
+      ],
+      "state_probabilities": {
+        "NORMAL": 0.167,
+        "CRISIS": 0.464,
+        "TENSION": 0.195,
+        "CALM": 0.174
+      },
+      "method": "kmeans_fallback",
+      "detail": "HMM fit (kmeans_fallback): current=CRISIS, probs={'NORMAL': 0.167, 'CRISIS': 0.464, 'TENSION': 0.195, 'CALM': 0.174}"
+    },
+    "empirical_transition_matrix": {
+      "CALM": {
+        "CALM": 0.25,
+        "NORMAL": 0.25,
+        "TENSION": 0.25,
+        "CRISIS": 0.25
+      },
+      "NORMAL": {
+        "CALM": 0.25,
+        "NORMAL": 0.25,
+        "TENSION": 0.25,
+        "CRISIS": 0.25
+      },
+      "TENSION": {
+        "CALM": 0.25,
+        "NORMAL": 0.25,
+        "TENSION": 0.25,
+        "CRISIS": 0.25
+      },
+      "CRISIS": {
+        "CALM": 0.25,
+        "NORMAL": 0.25,
+        "TENSION": 0.25,
+        "CRISIS": 0.25
+      }
+    },
+    "leading_indicators": {
+      "indicators": [],
+      "n_bullish": 0,
+      "n_bearish": 0,
+      "n_neutral": 0,
+      "composite_score": 0.0,
+      "detail": "Leading indicators error: operands could not be broadcast together with shapes (2623,) (2564,) ",
+      "net_risk_off_pressure": 0,
+      "net_stabilization_pressure": 0,
+      "net_fragility_pressure": 0,
+      "indicator_ranking": []
+    },
+    "forecast_accuracy": {
+      "accuracy": null,
+      "hit_rate_per_regime": {},
+      "brier_score": null,
+      "n_forecasts": 0,
+      "detail": "Insufficient forecast history for accuracy tracking"
+    },
+    "multi_horizon": {
+      "horizon_1d": {
+        "probabilities": {
+          "CALM": 0.249,
+          "NORMAL": 0.25,
+          "TENSION": 0.25,
+          "CRISIS": 0.251
+        },
+        "most_likely": "CRISIS",
+        "transition_prob": 0.75,
+        "confidence": 0.613
+      },
+      "horizon_5d": {
+        "probabilities": {
+          "CALM": 0.243,
+          "NORMAL": 0.248,
+          "TENSION": 0.252,
+          "CRISIS": 0.257
+        },
+        "most_likely": "CRISIS",
+        "transition_prob": 0.75,
+        "confidence": 0.563
+      },
+      "horizon_20d": {
+        "probabilities": {
+          "CALM": 0.243,
+          "NORMAL": 0.248,
+          "TENSION": 0.252,
+          "CRISIS": 0.257
+        },
+        "most_likely": "CRISIS",
+        "transition_prob": 0.75,
+        "confidence": 0.376
+      }
+    },
+    "transition_filter": {
+      "transition_state": "EARLY_WARNING",
+      "n_stressed_families": 2,
+      "stressed_families": [
+        "volatility",
+        "breadth"
+      ],
+      "consecutive_elevated_risk_days": 2,
+      "regime_changed_raw": false,
+      "confirmed": false,
+      "previous_regime": "CRISIS"
+    },
+    "persistence": {
+      "current_regime": "CRISIS",
+      "regime_age": 2,
+      "maturity_state": "EMERGING",
+      "persistence_probability_5d": 0.01,
+      "persistence_probability_20d": 0.001,
+      "daily_stay_probability": 0.247,
+      "avg_regime_duration": 10.0,
+      "median_regime_duration": 8.0
+    },
+    "confidence": {
+      "evidence_quality_score": 1.0,
+      "model_disagreement_score": 0.366,
+      "feature_conflict_score": 0.0,
+      "forecast_confidence": 0.854,
+      "stability_score": 1.0,
+      "stress_signals": [
+        "vix_high",
+        "breadth_weak"
+      ],
+      "calm_signals": []
+    },
+    "safety_scores": {
+      "regime_safety_score": 0.0,
+      "regime_risk_score": 1.0,
+      "execution_safety_score": 0.0,
+      "portfolio_safety_score": 0.0,
+      "research_stability_score": 0.281
+    },
+    "downstream_actions": {
+      "methodology": {
+        "action": "halt_new_research_validate_existing",
+        "urgency": "CRITICAL"
+      },
+      "optimizer": {
+        "action": "defensive_only_minimize_drawdown",
+        "urgency": "CRITICAL"
+      },
+      "alpha_decay": {
+        "note": "all_decay_suspended_crisis_override"
+      },
+      "portfolio_construction": {
+        "action": "max_defensive_reduce_gross_to_0.5x",
+        "urgency": "CRITICAL"
+      },
+      "risk_guardian": {
+        "action": "crisis_mode_continuous_monitoring",
+        "urgency": "CRITICAL"
+      },
+      "execution": {
+        "action": "halt_new_orders_unwind_only",
+        "urgency": "CRITICAL"
+      },
+      "auto_improve": {
+        "action": "freeze_all_changes",
+        "urgency": "CRITICAL"
+      },
+      "_meta": {
+        "regime": "CRISIS",
+        "overall_urgency": "CRITICAL",
+        "transition_probability": 0.457
+      }
+    },
+    "machine_summary": {
+      "predicted_regime": "CRISIS",
+      "confidence": 0.854,
+      "transition_state": "EARLY_WARNING",
+      "transition_risk_5d": 0.75,
+      "persistence": "EMERGING",
+      "regime_age_days": 2,
+      "safety_score": 0.0,
+      "top_risk_factors": [
+        "VIX at 96th percentile",
+        "weak breadth (9% above 50d)"
+      ],
+      "downstream_urgency": "CRITICAL",
+      "key_instruction": "halt new positions, maximize hedges, unwind risk"
+    },
+    "history_analysis": {
+      "transition_alerts": [],
+      "confidence_drift": [
+        {
+          "timestamp": "2026-03-25T17:02:54.315897+00:00",
+          "regime": "CRISIS",
+          "max_probability": 0.603,
+          "transition_probability": 0.57
+        },
+        {
+          "timestamp": "2026-03-25T17:43:42.124924+00:00",
+          "regime": "CRISIS",
+          "max_probability": 0.603,
+          "transition_probability": 0.57
+        }
+      ],
+      "regime_persistence_history": [
+        {
+          "regime": "CRISIS",
+          "duration_days": 2,
+          "start": "2026-03-25T17:02:54.315897+00:00"
+        }
+      ],
+      "false_transition_events": []
+    }
   }
 ]
