@@ -81,14 +81,33 @@ MAX_POS     = 3     # max simultaneous open positions
 STOP_LOSS   = 0.03  # max loss per trade (3% of notional)
 WARMUP      = 252   # bars skipped before backtest begins
 
-# ── guardrail thresholds ─────────────────────────────────────────────────────
-G_PASS_RATE    = 0.30
-G_N_TRADES     = 50
-G_MAX_DD       = -0.15
-G_ANN_RETURN   = 0.0
+# ── scoring: gate_penalty parameters ────────────────────────────────────────
+GATE_THRESHOLD = 0.75   # pass_rate at or below this → full score (penalty = 0)
+GATE_FLOOR     = 0.25   # minimum gate_penalty at pass_rate = 1.0 (never zero)
+
+# ── guardrail thresholds ──────────────────────────────────────────────────────
+G_ANN_RETURN   = 0.010   # economic floor (76% of baseline 0.0131)
+G_N_TRADES     = 100     # statistical validity floor (baseline 393)
+G_MAX_DD       = -0.020  # 5× baseline of -0.003985; substantially tighter
+G_WIN_RATE     = 0.60    # trade quality floor (baseline 0.733)
+G_GATED_MIN    = 50      # gate must close on at least 50 active days
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+def _gate_penalty(pass_rate: float) -> float:
+    """
+    Strong but non-zero penalty for permissive gates.
+      pass_rate <= 0.75 → 1.00 (full score, no penalty)
+      0.75 < pass_rate < 1.00 → linear ramp from 1.00 down to GATE_FLOOR
+      pass_rate >= 1.00 → GATE_FLOOR (0.25; score still carries information)
+    """
+    if pass_rate <= GATE_THRESHOLD:
+        return 1.00
+    if pass_rate >= 1.00:
+        return GATE_FLOOR
+    return GATE_FLOOR + (1.0 - GATE_FLOOR) * (1.0 - (pass_rate - GATE_THRESHOLD) / (1.0 - GATE_THRESHOLD))
+
 
 def _market_state(vix: float) -> str:
     """Simple VIX-based regime label, consistent with DispersionBacktester."""
