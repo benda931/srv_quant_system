@@ -1,0 +1,14 @@
+{
+  "timestamp": "20260327_003346",
+  "regime": "UNKNOWN",
+  "metrics": {
+    "sharpe": 7.6417,
+    "win_rate": 0.736,
+    "total_pnl": 0.365155,
+    "max_drawdown": -0.002725,
+    "total_trades": 519,
+    "avg_hold": 13.0,
+    "source": "dispersion_backtest"
+  },
+  "raw_response": "Certainly! Here are three proposed trading strategies for sector ETF mean-reversion:\n\n### Strategy 1: \"Volatility Fade\"\n- **SIGNAL**: Use a combination of Bollinger Bands and Relative Strength Index (RSI). Monitor deviations from the mean as indicated by Bollinger Bands, and confirm reversions using RSI overbought/oversold levels.\n- **EDGE**: This strategy capitalizes on the mean-reverting nature of volatility spikes. By waiting for confirmation from RSI, the probability of false signals is reduced.\n- **EXPECTED Sharpe range**: 1.5 to 2.5\n\n### Strategy 2: \"Liquidity Squeeze Play\"\n- **SIGNAL**: Implement a liquidity-based approach using order book imbalance analysis along with Volume Weighted Average Price (VWAP). Identify mean-reversion opportunities when significant order imbalances coincide with deviations in VWAP.\n- **EDGE**: The order book imbalance provides real-time data on supply and demand pressures, offering an edge in timing reversion entries. VWAP deviations help confirm price inefficiencies.\n- **EXPECTED Sharpe range**: 2.0 to 3.0\n\n### Strategy 3: \"Macro Sentiment Feedback Loop\"\n- **SIGNAL**: Utilize sentiment analysis on macroeconomic news and social media feeds, combined with ETF price deviations from a dynamic moving average. Opportunity is signaled when sentiment extremes align with price overextension.\n- **EDGE**: Sentiment analysis provides insight into market psychology, potentially leading price movements. When combined with price deviations, this can identify overreactions in sector ETFs.\n- **EXPECTED Sharpe range**: 1.0 to 2.0\n\nEach strategy leverages a unique aspect of market behavior, combining quantitative signals with practical trading insights to address the unknown market regime and improve upon the current metrics."
+}
