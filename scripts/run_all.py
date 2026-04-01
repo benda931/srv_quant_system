@@ -131,6 +131,59 @@ def _prune_old_data(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Helper: Slack dispatch
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _dispatch_slack(webhook_url: str, text: str) -> bool:
+    """
+    POST a plain-text message to a Slack Incoming Webhook.
+    Returns True on HTTP 200, False on any error (non-fatal).
+    """
+    if not webhook_url:
+        return False
+    try:
+        import urllib.request
+        payload = json.dumps({"text": text}).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as exc:
+        logger.warning("Slack dispatch failed (non-fatal): %s", exc)
+        return False
+
+
+def _build_pipeline_slack_message(status: Dict[str, Any]) -> str:
+    """Build a concise Slack summary message from the pipeline status dict."""
+    run_id     = status.get("run_id", "?")
+    ok_steps   = status.get("steps_ok", [])
+    fail_steps = status.get("steps_failed", [])
+    dur        = status.get("duration_s", 0)
+    regime     = status.get("regime_safety_label") or status.get("current_regime") or status.get("regime", "Unknown")
+    n_active   = status.get("trade_n_active", "?")
+    dt_str     = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    icon = ":white_check_mark:" if not fail_steps else ":warning:"
+    lines = [
+        f"{icon} *SRV DSS Pipeline* — {dt_str}",
+        f"Run ID `{run_id}` | Duration `{dur:.0f}s`",
+        f"Regime: `{regime}` | Active trades: `{n_active}`",
+        f"Steps OK: `{', '.join(ok_steps) or 'none'}`",
+    ]
+    if fail_steps:
+        lines.append(f":x: Failed: `{', '.join(fail_steps)}`")
+    if status.get("dss_brief_path"):
+        lines.append(f"DSS brief: `{status['dss_brief_path']}`")
+    elif status.get("brief_path"):
+        lines.append(f"Brief: `{status['brief_path']}`")
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Main pipeline
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -320,6 +373,7 @@ def run_pipeline(
                     W_b=settings.corr_baseline_window,
                     distortion_z_lookback=settings.corr_distortion_z_lookback,
                     coc_z_lookback=settings.coc_z_lookback,
+                    settings=settings,
                 )
 
                 _cs_summary = measurement_summary(corr_structure_snapshot)
@@ -435,6 +489,15 @@ def run_pipeline(
                 "Step 2d OK — Trade book: %d tickets, %d active, gross=%.3f",
                 len(trade_tickets), n_active, gross,
             )
+
+            # ── Persist trade tickets to DuckDB ──────────────────────────────
+            if db_conn is not None and run_id > 0:
+                try:
+                    from db.writer import DatabaseWriter
+                    DatabaseWriter(settings.db_path).write_trade_book(trade_tickets, run_id)
+                except Exception as _tbe:
+                    logger.warning("Step 2d: write_trade_book failed (non-fatal) — %s", _tbe)
+
             status["steps_ok"].append("trade_structure")
             status["trade_n_active"] = n_active
         else:
@@ -766,6 +829,33 @@ def run_pipeline(
     except Exception as exc:
         logger.warning("Step 7b: DSS brief failed (non-fatal) — %s", exc)
         status["steps_failed"].append("dss_brief")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # STEP 7c: Slack dispatch (non-fatal)
+    # ──────────────────────────────────────────────────────────────────────────
+    _webhook = getattr(settings, "slack_webhook_url", "")
+    _notify_ok   = getattr(settings, "notify_on_pipeline_complete", True)
+    _notify_fail = getattr(settings, "notify_on_pipeline_failure", True)
+    _has_failures = bool(status.get("steps_failed"))
+
+    if _webhook and ((_notify_ok and not _has_failures) or (_notify_fail and _has_failures)):
+        try:
+            status["duration_s"] = (datetime.now(timezone.utc) - started_at).total_seconds()
+            _msg = _build_pipeline_slack_message(status)
+            _sent = _dispatch_slack(_webhook, _msg)
+            if _sent:
+                logger.info("Step 7c OK — Slack notification dispatched")
+                status["steps_ok"].append("slack_dispatch")
+            else:
+                logger.warning("Step 7c: Slack dispatch returned non-200 (non-fatal)")
+                status["steps_failed"].append("slack_dispatch")
+        except Exception as exc:
+            logger.warning("Step 7c: Slack dispatch failed (non-fatal) — %s", exc)
+            status["steps_failed"].append("slack_dispatch")
+    else:
+        if not _webhook:
+            logger.debug("Step 7c: Slack webhook not configured — skipping")
+        status["steps_ok"].append("slack_skipped")
 
     # ──────────────────────────────────────────────────────────────────────────
     # STEP 8 [ALWAYS]: DB audit write + data pruning

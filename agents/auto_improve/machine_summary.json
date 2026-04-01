@@ -2,7 +2,7 @@
   "cycle_result": "0_SHADOWED_0_PROMOTED",
   "primary_mode": "DAILY_MAINTENANCE",
   "diagnosed_bottleneck": "SYSTEM_HEALTHY_MONITOR_ONLY",
-  "stuck_state": "LOW_PROGRESS",
+  "stuck_state": "STUCK_LOCAL",
   "promote_count": 0,
   "shadow_count": 0,
   "freeze_count": 0,

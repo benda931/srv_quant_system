@@ -37,6 +37,7 @@ duckdb>=1.1.0            # Columnar OLAP database — primary data store (db/)
 # ---------------------------------------------------------------------------
 scipy==1.14.1
 scikit-learn==1.5.2      # PCA + StandardScaler in analytics/stat_arb.py
+arch>=7.0.0              # DCC-GARCH univariate GARCH(1,1) fitting (soft dep — EWMA fallback if absent)
 
 # ---------------------------------------------------------------------------
 # Configuration & settings

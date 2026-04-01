@@ -56,7 +56,10 @@
       "Bash(do echo:*)",
       "Read(//c/Users/omrib/OneDrive/Desktop/srv_quant_system/**)",
       "Bash(wc -l /c/Users/omrib/OneDrive/Desktop/srv_quant_system/ui/*.py)",
-      "Bash(ls -la agents/alpha_decay/decay_status.json agents/regime_forecaster/regime_forecast.json agents/risk_guardian/risk_status.json agents/data_scout/scout_report.json agents/portfolio_construction/portfolio_weights.json agents/methodology/reports/*.json)"
+      "Bash(ls -la agents/alpha_decay/decay_status.json agents/regime_forecaster/regime_forecast.json agents/risk_guardian/risk_status.json agents/data_scout/scout_report.json agents/portfolio_construction/portfolio_weights.json agents/methodology/reports/*.json)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" http://localhost:8050)",
+      "Bash(find \"c:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\" -type f -name \"*.py\" -exec wc -l {} +)",
+      "Bash(grep -l \"TODO\\\\|FIXME\\\\|stub\\\\|placeholder\" \"c:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\\\\analytics\"/*.py \"c:\\\\Users\\\\omrib\\\\OneDrive\\\\Desktop\\\\srv_quant_system\\\\reports\"/*.py)"
     ]
   }
 }

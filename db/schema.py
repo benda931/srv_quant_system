@@ -16,7 +16,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 # DDL executed in order — CREATE IF NOT EXISTS makes every statement idempotent
 _SCHEMAS = [
@@ -248,6 +248,36 @@ _TABLES = [
     )
     """,
 
+    # ── Analytics: trade book — persistent trade ticket snapshots ────────────
+    """
+    CREATE TABLE IF NOT EXISTS analytics.trade_book (
+        trade_id          VARCHAR(100) NOT NULL,
+        run_id            BIGINT       NOT NULL,
+        run_date          DATE         NOT NULL,
+        trade_type        VARCHAR(30),
+        direction         VARCHAR(10),
+        ticker            VARCHAR(20),
+        conviction_score  DOUBLE,
+        distortion_score  DOUBLE,
+        dislocation_score DOUBLE,
+        mr_score          DOUBLE,
+        regime_safety_score DOUBLE,
+        raw_weight        DOUBLE,
+        final_weight      DOUBLE,
+        size_multiplier   DOUBLE,
+        entry_z           DOUBLE,
+        entry_residual    DOUBLE,
+        half_life_est     DOUBLE,
+        is_active         BOOLEAN,
+        legs_json         VARCHAR,
+        greeks_json       VARCHAR,
+        exit_conditions_json VARCHAR,
+        pm_note           VARCHAR(2000),
+        inserted_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (trade_id, run_id)
+    )
+    """,
+
     # ── Analytics: per-sector signals per run ─────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS analytics.sector_signals (
@@ -294,6 +324,9 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_signals_run     ON analytics.sector_signals(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_signals_ticker  ON analytics.sector_signals(sector_ticker, run_id DESC)",
     "CREATE INDEX IF NOT EXISTS idx_runs_date       ON analytics.runs(run_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_book_run  ON analytics.trade_book(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_book_date ON analytics.trade_book(run_date DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_trade_book_tick ON analytics.trade_book(ticker, run_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_regime_hist     ON analytics.regime_history(date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_regime_trans    ON analytics.regime_transitions(transition_date DESC)",
 ]
@@ -304,6 +337,7 @@ _MIGRATIONS = [
     (3, "add_analytics_signals_extended_cols"),
     (4, "add_backtest_ml_optimization_tables"),
     (5, "add_signal_decay_and_regime_tables"),
+    (6, "add_trade_book_table"),
 ]
 
 

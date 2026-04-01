@@ -99,6 +99,24 @@ _SCENARIO_HEBREW: Dict[str, str] = {
 }
 
 
+def _csv_download_link(df: pd.DataFrame, filename: str, label: str = "Export CSV") -> html.A:
+    """
+    Return an <a> tag with a data-URI that triggers a CSV download in-browser.
+    Requires no Dash callback — purely layout-layer.
+    """
+    import base64
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")  # utf-8-sig = Excel-friendly BOM
+    b64 = base64.b64encode(csv_bytes).decode("ascii")
+    href = f"data:text/csv;charset=utf-8;base64,{b64}"
+    return html.A(
+        label,
+        href=href,
+        download=filename,
+        className="btn btn-sm btn-outline-secondary ms-2",
+        style={"fontSize": "0.75rem", "direction": "ltr"},
+    )
+
+
 def build_stress_tab(stress_results: Optional[List[Any]], master_df: Optional[pd.DataFrame] = None) -> html.Div:
     """Full stress-testing tab layout."""
 
@@ -378,6 +396,16 @@ def build_risk_tab(risk_report: Optional[Any], master_df: Optional[pd.DataFrame]
             className="mb-3",
         )
 
+    # ── Risk export DataFrame ────────────────────────────────────────────────
+    _risk_rows = []
+    for _sec in mctr.index:
+        _risk_rows.append({
+            "sector":      _sec,
+            "mctr_pct":    round(float(mctr.get(_sec, float("nan"))) * 100, 3),
+            "risk_budget_pct": round(float(rb.get(_sec, float("nan"))) * 100, 3) if not rb.empty else float("nan"),
+        })
+    _risk_export_df = pd.DataFrame(_risk_rows)
+
     return html.Div(
         [
             html.Div(breach_alerts),
@@ -390,6 +418,10 @@ def build_risk_tab(risk_report: Optional[Any], master_df: Optional[pd.DataFrame]
                 className="mb-3 g-2",
             ),
             factor_section,
+            html.Div(
+                _csv_download_link(_risk_export_df, "portfolio_risk.csv", "Export Risk CSV"),
+                className="mt-2",
+            ),
         ],
         className="mt-3",
     )
@@ -420,25 +452,32 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
     br = backtest_result
 
     # ── KPI row ──────────────────────────────────────────────────────────────
-    ic_mean  = getattr(br, "ic_mean",  float("nan"))
-    ic_ir    = getattr(br, "ic_ir",    float("nan"))
-    hit_rate = getattr(br, "hit_rate", float("nan"))
-    sharpe   = getattr(br, "sharpe",   float("nan"))
-    max_dd   = getattr(br, "max_drawdown", float("nan"))
-    n_walks  = getattr(br, "n_walks",  0)
+    ic_mean    = getattr(br, "ic_mean",         float("nan"))
+    ic_ir      = getattr(br, "ic_ir",           float("nan"))
+    hit_rate   = getattr(br, "hit_rate",        float("nan"))
+    sharpe     = getattr(br, "sharpe",          float("nan"))
+    net_sharpe = getattr(br, "net_sharpe",      float("nan"))
+    max_dd     = getattr(br, "max_drawdown",    float("nan"))
+    net_max_dd = getattr(br, "net_max_drawdown",float("nan"))
+    tc_bps     = getattr(br, "tc_bps",          15.0)
+    tc_drag    = getattr(br, "annualized_tc_drag", float("nan"))
+    n_walks    = getattr(br, "n_walks",         0)
 
-    ic_color   = "success" if ic_mean > 0.05 else "warning" if ic_mean > 0 else "danger"
-    hit_color  = "success" if hit_rate > 0.55 else "warning" if hit_rate > 0.5 else "danger"
-    sh_color   = "success" if sharpe > 1.0 else "warning" if sharpe > 0.5 else "danger"
+    ic_color     = "success" if ic_mean > 0.05 else "warning" if ic_mean > 0 else "danger"
+    hit_color    = "success" if hit_rate > 0.55 else "warning" if hit_rate > 0.5 else "danger"
+    sh_color     = "success" if sharpe > 1.0 else "warning" if sharpe > 0.5 else "danger"
+    net_sh_color = "success" if net_sharpe > 1.0 else "warning" if net_sharpe > 0.5 else "danger"
 
     kpi_row = dbc.Row(
         [
-            _kpi("IC ממוצע",           _ff(ic_mean,  "{:.3f}"), ic_color),
-            _kpi("IC IR (IC/StdIC)",    _ff(ic_ir,    "{:.2f}"), "primary"),
-            _kpi("Hit Rate",            _pct(hit_rate),          hit_color),
-            _kpi("Sharpe (אות)",        _ff(sharpe,   "{:.2f}"), sh_color),
-            _kpi("Max Drawdown",        _pct(max_dd),            "danger"),
-            _kpi("חלונות שנבדקו",      str(n_walks),             "secondary", small=True),
+            _kpi("IC ממוצע",              _ff(ic_mean,    "{:.3f}"), ic_color),
+            _kpi("IC IR (IC/StdIC)",       _ff(ic_ir,      "{:.2f}"), "primary"),
+            _kpi("Hit Rate",               _pct(hit_rate),            hit_color),
+            _kpi("Sharpe (Gross)",         _ff(sharpe,     "{:.2f}"), sh_color),
+            _kpi(f"Sharpe (Net {tc_bps:.0f}bps)", _ff(net_sharpe, "{:.2f}"), net_sh_color),
+            _kpi("TC Drag /yr",            _ff(tc_drag,    "{:.2%}") if _m.isfinite(tc_drag) else "—", "secondary", small=True),
+            _kpi("Max DD (Net)",           _pct(net_max_dd),          "danger", small=True),
+            _kpi("חלונות שנבדקו",         str(n_walks),              "secondary", small=True),
         ],
         className="g-2 mb-3",
     )
@@ -450,19 +489,26 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
         try:
             dates_eq = [w.test_start for w in walk_metrics]
             returns_eq = [w.signal_return for w in walk_metrics]
+            net_returns_eq = [getattr(w, "net_signal_return", w.signal_return) for w in walk_metrics]
             cum_eq = np.cumprod(1 + np.array(returns_eq, dtype=float))
+            net_cum_eq = np.cumprod(1 + np.array(net_returns_eq, dtype=float))
             eq_fig.add_trace(go.Scatter(
                 x=dates_eq, y=cum_eq,
-                mode="lines", name="Strategy (signal-weighted)",
+                mode="lines", name="Gross (before TC)",
                 line=dict(color="#0dcaf0", width=2),
                 fill="tozeroy", fillcolor="rgba(13,202,240,0.08)",
+            ))
+            eq_fig.add_trace(go.Scatter(
+                x=dates_eq, y=net_cum_eq,
+                mode="lines", name=f"Net (after {tc_bps:.0f}bps TC)",
+                line=dict(color="#ffc107", width=1.5, dash="dash"),
             ))
             # Drawdown shading
             running_max = np.maximum.accumulate(cum_eq)
             dd_eq = (cum_eq - running_max) / running_max
             eq_fig.add_trace(go.Scatter(
                 x=dates_eq, y=dd_eq,
-                mode="lines", name="Drawdown",
+                mode="lines", name="Drawdown (Gross)",
                 line=dict(color="#dc3545", width=1),
                 fill="tozeroy", fillcolor="rgba(220,53,69,0.12)",
                 yaxis="y2",
@@ -620,13 +666,20 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
             "walk_id", "period_start", "period_end", "ic", "hit_rate", "sharpe", "n_signals", "regime"
         ]]
         if cols_to_show:
+            _export_df = summary_df[cols_to_show].round(3)
             summary_section = dbc.Card(
                 dbc.CardBody(
                     [
-                        html.H6("פירוט Walk-Forward", style={"textAlign": "right"}),
+                        html.Div(
+                            [
+                                html.H6("פירוט Walk-Forward", style={"textAlign": "right", "display": "inline-block"}),
+                                _csv_download_link(_export_df, "backtest_walks.csv", "Export CSV"),
+                            ],
+                            style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"},
+                        ),
                         DataTable(
                             columns=[{"name": c, "id": c} for c in cols_to_show],
-                            data=summary_df[cols_to_show].round(3).to_dict("records"),
+                            data=_export_df.to_dict("records"),
                             page_size=15,
                             sort_action="native",
                             style_table={"overflowX": "auto"},
@@ -1639,6 +1692,7 @@ def build_dss_tab(
     methodology_ranking: Optional[List[Dict]] = None,
     paper_portfolio: Optional[Dict] = None,
     dispersion_result: Any = None,
+    trade_book_history: Optional[pd.DataFrame] = None,
 ) -> html.Div:
     """
     Build the Decision Support System tab:
@@ -1762,8 +1816,24 @@ def build_dss_tab(
                 html.Td(entry_icon, style={"textAlign": "center"}),
             ]))
 
+        _signal_export_df = pd.DataFrame([
+            {
+                "ticker": r.ticker, "direction": r.direction,
+                "residual_z": round(r.residual_z, 3),
+                "distortion_score": round(r.distortion_score, 3),
+                "dislocation_score": round(r.dislocation_score, 3),
+                "mean_reversion_score": round(r.mean_reversion_score, 3),
+                "regime_safety_score": round(r.regime_safety_score, 3),
+                "conviction_score": round(r.conviction_score, 3),
+                "passes_entry": r.passes_entry,
+            }
+            for r in signal_results[:15]
+        ])
         signal_table = dbc.Card([
-            dbc.CardHeader(html.H6("📊 Signal Stack — 4-Layer Conviction Scoring", className="mb-0 text-center")),
+            dbc.CardHeader(html.Div([
+                html.H6("📊 Signal Stack — 4-Layer Conviction Scoring", className="mb-0 d-inline"),
+                _csv_download_link(_signal_export_df, "signal_scanner.csv", "Export CSV"),
+            ], style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"})),
             dbc.CardBody([
                 kpi_row,
                 html.Div(
@@ -2297,6 +2367,58 @@ def build_dss_tab(
             ])
         ], className="mb-3", style={"backgroundColor": "#2d2d44"})
         sections.append(_disp_section)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SECTION 10: Historical Trade Book — from DuckDB
+    # ══════════════════════════════════════════════════════════════════════
+    if trade_book_history is not None and not trade_book_history.empty:
+        hist_rows = []
+        for _, row in trade_book_history.iterrows():
+            n_active = int(row.get("n_active", 0))
+            n_total = int(row.get("n_tickets", 0))
+            gross = row.get("gross_weight", 0) or 0
+            avg_conv = row.get("avg_conviction", 0) or 0
+            run_date = str(row.get("run_date", ""))[:10]
+            run_id_val = int(row.get("run_id", 0))
+
+            activity_color = "success" if n_active > 0 else "secondary"
+            hist_rows.append(html.Tr([
+                html.Td(run_date, style={"fontSize": "11px", "fontFamily": "monospace"}),
+                html.Td(f"#{run_id_val}", style={"fontSize": "10px", "color": "#888"}),
+                html.Td(
+                    dbc.Badge(f"{n_active} active", color=activity_color,
+                              style={"fontSize": "9px"}),
+                ),
+                html.Td(f"{n_total}", style={"fontSize": "11px"}),
+                html.Td(f"{gross:.1%}", style={"fontSize": "11px"}),
+                html.Td(f"{avg_conv:.2f}", style={"fontSize": "11px"}),
+            ]))
+
+        hist_section = dbc.Card([
+            dbc.CardHeader(html.Div([
+                html.H6("📂 Trade Book — היסטוריית Runs (DuckDB)", className="mb-0 d-inline"),
+                _csv_download_link(trade_book_history, "trade_book_history.csv", "Export CSV"),
+            ], style={"display": "flex", "alignItems": "center", "justifyContent": "space-between"})),
+            dbc.CardBody(
+                html.Div(
+                    dbc.Table([
+                        html.Thead(html.Tr([
+                            html.Th("תאריך", style={"fontSize": "10px"}),
+                            html.Th("Run ID", style={"fontSize": "10px"}),
+                            html.Th("Status", style={"fontSize": "10px"}),
+                            html.Th("Tickets", style={"fontSize": "10px"}),
+                            html.Th("Gross", style={"fontSize": "10px"}),
+                            html.Th("Avg Conv", style={"fontSize": "10px"}),
+                        ])),
+                        html.Tbody(hist_rows),
+                    ], bordered=True, hover=True, responsive=True, size="sm",
+                       className="mb-0", style={"fontSize": "11px"}),
+                    style={"maxHeight": "240px", "overflowY": "auto"},
+                )
+            ),
+        ], className="border-secondary mb-3",
+           style={"borderTop": "3px solid var(--bs-secondary)"})
+        sections.append(hist_section)
 
     if not sections:
         return html.Div(dbc.Alert("DSS: אין נתונים זמינים.", color="secondary"),

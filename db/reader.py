@@ -239,6 +239,78 @@ class DatabaseReader:
                 stats[name] = {"rows": 0, "latest": None}
         return stats
 
+    def read_trade_book(self, run_id: Optional[int] = None, active_only: bool = False) -> pd.DataFrame:
+        """
+        Read trade book records.
+
+        Parameters
+        ----------
+        run_id      : if provided, return tickets for that specific run;
+                      otherwise return the latest run's tickets.
+        active_only : if True, only return rows where is_active = True.
+
+        Returns a flat DataFrame with all scalar columns.
+        legs_json / greeks_json / exit_conditions_json remain as JSON strings
+        for the caller to deserialise if needed.
+        """
+        try:
+            if run_id is None:
+                row = self.conn.execute(
+                    "SELECT max(run_id) FROM analytics.trade_book"
+                ).fetchone()
+                if not row or row[0] is None:
+                    return pd.DataFrame()
+                run_id = int(row[0])
+
+            where = f"run_id = {run_id}"
+            if active_only:
+                where += " AND is_active = true"
+
+            df = self.conn.execute(f"""
+                SELECT
+                    trade_id, run_id, run_date, trade_type, direction, ticker,
+                    conviction_score, distortion_score, dislocation_score, mr_score,
+                    regime_safety_score, raw_weight, final_weight, size_multiplier,
+                    entry_z, entry_residual, half_life_est, is_active,
+                    legs_json, greeks_json, exit_conditions_json, pm_note,
+                    inserted_at
+                FROM analytics.trade_book
+                WHERE {where}
+                ORDER BY conviction_score DESC
+            """).df()
+
+            logger.debug("read_trade_book: run_id=%d, %d rows", run_id, len(df))
+            return df
+        except Exception as exc:
+            logger.warning("read_trade_book failed: %s", exc)
+            return pd.DataFrame()
+
+    def read_trade_book_history(self, n_runs: int = 10) -> pd.DataFrame:
+        """
+        Return trade book summary across the last N distinct runs.
+        Useful for the UI's historical trade book view.
+        """
+        try:
+            return self.conn.execute(f"""
+                SELECT
+                    run_date,
+                    run_id,
+                    count(*) AS n_tickets,
+                    sum(is_active::int) AS n_active,
+                    round(avg(conviction_score), 4) AS avg_conviction,
+                    round(sum(CASE WHEN is_active THEN final_weight ELSE 0 END), 4) AS gross_weight
+                FROM analytics.trade_book
+                WHERE run_id IN (
+                    SELECT DISTINCT run_id FROM analytics.trade_book
+                    ORDER BY run_id DESC LIMIT {n_runs}
+                )
+                GROUP BY run_date, run_id
+                ORDER BY run_id DESC
+            """).df()
+        except Exception as exc:
+            logger.warning("read_trade_book_history failed: %s", exc)
+            return pd.DataFrame()
+
     def last_runs(self, n: int = 5) -> pd.DataFrame:
         """Return the N most recent analytics run records."""
         try:

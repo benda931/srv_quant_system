@@ -836,6 +836,40 @@ class DataLakeManager:
         return df
 
     # =====================================================
+    # Incremental price helpers
+    # =====================================================
+    _INCREMENTAL_THRESHOLD_DAYS: int = 5  # If prices are < 5 trading days stale, do incremental
+
+    def _prices_last_date(self) -> Optional[date]:
+        """Return latest date in the prices parquet, or None if it doesn't exist."""
+        if not self.artifacts.prices_path.exists():
+            return None
+        try:
+            idx = pd.read_parquet(
+                self.artifacts.prices_path,
+                engine="pyarrow",
+                columns=[],
+            ).index
+            if idx.empty:
+                return None
+            last = pd.Timestamp(idx.max())
+            return last.date()
+        except Exception as e:
+            self.logger.debug("_prices_last_date: could not read parquet index — %s", e)
+            return None
+
+    def _merge_incremental_prices(self, existing: pd.DataFrame, new_rows: pd.DataFrame) -> pd.DataFrame:
+        """Merge new rows into existing prices DataFrame, handling column superset."""
+        if existing.empty:
+            return new_rows
+        if new_rows.empty:
+            return existing
+        combined = pd.concat([existing, new_rows], axis=0)
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        combined = combined.ffill(limit=5)
+        return combined
+
+    # =====================================================
     # Snapshot orchestration
     # =====================================================
     def build_snapshot(self, force_refresh: bool = False) -> ParquetArtifacts:
@@ -843,39 +877,80 @@ class DataLakeManager:
             self.logger.info("Using fresh cached snapshot under %s", self.settings.parquet_dir)
             return self.artifacts
 
-        self.logger.info("Building fresh snapshot...")
-
         _db_writer = _get_db_writer(self.settings.db_path)
-
         today = date.today()
-        start_date = today - timedelta(days=int(self.settings.history_years * 365.25))
-        end_date = None
+
+        # ── Decide: incremental or full fetch ─────────────────────────────────
+        last_price_date = self._prices_last_date()
+        days_stale = (today - last_price_date).days if last_price_date else 9999
+        do_incremental = (
+            not force_refresh
+            and last_price_date is not None
+            and days_stale <= self._INCREMENTAL_THRESHOLD_DAYS
+        )
 
         sector_and_spy = self.settings.sector_list() + [self.settings.spy_ticker]
         macro = list(self.settings.macro_tickers.values()) + list(self.settings.vol_tickers.values())
         credit = list(self.settings.credit_tickers.values())
+        all_tickers = sector_and_spy + macro + credit
 
-        self.logger.info(
-            "Fetching price histories: %s tickers",
-            len(sector_and_spy) + len(macro) + len(credit),
-        )
+        if do_incremental:
+            # ── INCREMENTAL: fetch only missing days ─────────────────────────
+            incremental_start = last_price_date + timedelta(days=1)
+            self.logger.info(
+                "Incremental price refresh: %d tickers from %s (last=%s, stale=%dd)",
+                len(all_tickers), incremental_start, last_price_date, days_stale,
+            )
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                futs = {
+                    "equities": ex.submit(self._fetch_prices_block, sector_and_spy,
+                                          incremental_start, today),
+                    "macro":    ex.submit(self._fetch_prices_block, macro,
+                                          incremental_start, today),
+                    "credit":   ex.submit(self._fetch_prices_block, credit,
+                                          incremental_start, today),
+                }
+                new_blocks: Dict[str, pd.DataFrame] = {k: fut.result() for k, fut in futs.items()}
 
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futs = {
-                "equities": ex.submit(self._fetch_prices_block, sector_and_spy, start_date, end_date),
-                "macro": ex.submit(self._fetch_prices_block, macro, start_date, end_date),
-                "credit": ex.submit(self._fetch_prices_block, credit, start_date, end_date),
-            }
-            blocks: Dict[str, pd.DataFrame] = {k: fut.result() for k, fut in futs.items()}
+            new_rows = pd.concat(
+                [new_blocks.get(k, pd.DataFrame()) for k in ("equities", "macro", "credit")],
+                axis=1,
+            )
 
-        prices = pd.concat(
-            [
-                blocks.get("equities", pd.DataFrame()),
-                blocks.get("macro", pd.DataFrame()),
-                blocks.get("credit", pd.DataFrame()),
-            ],
-            axis=1,
-        )
+            if new_rows.empty:
+                self.logger.info(
+                    "Incremental fetch returned no new rows (market may be closed). "
+                    "Using existing parquet as-is."
+                )
+                # Touch parquet to refresh cache timestamp
+                self.artifacts.prices_path.touch()
+                prices = pd.read_parquet(self.artifacts.prices_path, engine="pyarrow")
+            else:
+                existing = pd.read_parquet(self.artifacts.prices_path, engine="pyarrow")
+                prices = self._merge_incremental_prices(existing, new_rows)
+                self.logger.info(
+                    "Incremental merge: %d existing + %d new rows = %d total (%d cols)",
+                    len(existing), len(new_rows), len(prices), prices.shape[1],
+                )
+        else:
+            # ── FULL FETCH ───────────────────────────────────────────────────
+            start_date = today - timedelta(days=int(self.settings.history_years * 365.25))
+            self.logger.info(
+                "Full price fetch: %d tickers from %s (stale=%dd)",
+                len(all_tickers), start_date, days_stale,
+            )
+            with ThreadPoolExecutor(max_workers=3) as ex:
+                futs = {
+                    "equities": ex.submit(self._fetch_prices_block, sector_and_spy, start_date, None),
+                    "macro":    ex.submit(self._fetch_prices_block, macro, start_date, None),
+                    "credit":   ex.submit(self._fetch_prices_block, credit, start_date, None),
+                }
+                blocks: Dict[str, pd.DataFrame] = {k: fut.result() for k, fut in futs.items()}
+
+            prices = pd.concat(
+                [blocks.get(k, pd.DataFrame()) for k in ("equities", "macro", "credit")],
+                axis=1,
+            )
 
         if prices.empty:
             raise RuntimeError("Price snapshot is empty; cannot proceed.")
@@ -886,13 +961,14 @@ class DataLakeManager:
         self.artifacts.prices_path.parent.mkdir(parents=True, exist_ok=True)
         prices.to_parquet(self.artifacts.prices_path, engine="pyarrow", compression="snappy")
         self.logger.info(
-            "Saved prices to %s (rows=%s cols=%s)",
-            self.artifacts.prices_path,
-            len(prices),
-            prices.shape[1],
+            "Saved prices to %s (rows=%s cols=%s) [%s]",
+            self.artifacts.prices_path, len(prices), prices.shape[1],
+            "incremental" if do_incremental else "full",
         )
         if _db_writer is not None:
             try:
+                # DuckDB write is always safe (INSERT OR REPLACE) —
+                # on incremental run, only new rows land; on full run everything upserts.
                 _db_writer.write_prices(prices)
             except Exception as _e:
                 self.logger.warning("DB write_prices failed (non-fatal): %s", _e)

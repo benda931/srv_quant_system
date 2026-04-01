@@ -808,11 +808,12 @@ def build_app() -> dash.Dash:
         raise RuntimeError("master_df is empty; cannot build dashboard.")
 
     # ── Persist analytics run to DB audit trail ───────────────────────────────
+    _startup_run_id: int = -1
     try:
         from datetime import timezone as _tz
         from db.writer import DatabaseWriter as _DBWriter
         _dw = _DBWriter(settings.db_path)
-        _dw.write_run(
+        _startup_run_id = _dw.write_run(
             master_df,
             started_at=data_state.cycle_completed_at.replace(tzinfo=_tz.utc)
                        if data_state.cycle_completed_at.tzinfo is None
@@ -881,6 +882,7 @@ def build_app() -> dash.Dash:
     _tail_risk_es = None
     _methodology_ranking = None
     _paper_portfolio = None
+    _dss_trade_book_history = None
     try:
         import json as _json
         from dataclasses import dataclass as _dc
@@ -916,6 +918,7 @@ def build_app() -> dash.Dash:
                         W_s=settings.corr_window, W_b=settings.corr_baseline_window,
                         distortion_z_lookback=settings.corr_distortion_z_lookback,
                         coc_z_lookback=settings.coc_z_lookback,
+                        settings=settings,
                     )
                     _dss_corr_snapshot = _CorrSnap(
                         frob_distortion_z=_cs_snap.frob_distortion_z,
@@ -1206,6 +1209,22 @@ def build_app() -> dash.Dash:
             len(_dss_signal_results), _n_pass, len(_dss_trade_tickets), _n_active,
             _dss_regime_safety.label,
         )
+
+        # ── Persist trade book to DuckDB ──────────────────────────
+        if _startup_run_id > 0:
+            try:
+                from db.writer import DatabaseWriter as _TBWriter
+                _TBWriter(settings.db_path).write_trade_book(_dss_trade_tickets, _startup_run_id)
+            except Exception as _tbe:
+                logger.warning("DSS: write_trade_book failed (non-fatal): %s", _tbe)
+
+        # ── Read trade book history for DSS tab display ───────────
+        try:
+            from db.reader import DatabaseReader as _TBReader
+            _dss_trade_book_history = _TBReader(settings.db_path).read_trade_book_history(n_runs=10)
+        except Exception as _tbhe:
+            logger.warning("DSS: read_trade_book_history failed (non-fatal): %s", _tbhe)
+            _dss_trade_book_history = None
 
         # ── P1-3 FIX: Trade state persistence for days_held ──────
         _trade_state_path = settings.project_root / "data" / "dss_trade_state.json"
@@ -1736,7 +1755,8 @@ def build_app() -> dash.Dash:
                                       _dss_regime_safety, _dss_corr_snapshot,
                                       _dss_monitor_summary, _options_surface,
                                       _tail_risk_es, _methodology_ranking,
-                                      _paper_portfolio, _dispersion_result),
+                                      _paper_portfolio, _dispersion_result,
+                                      _dss_trade_book_history),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},

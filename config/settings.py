@@ -131,15 +131,21 @@ class Settings(BaseSettings):
 
     # =====================================================
     # Correlation Structure Measurement Engine
-    # (Short Vol via Correlation/Dispersion research brief)
+    # (Sector RV regime context + Short Vol / Dispersion research)
     # =====================================================
     # Frobenius distortion z-score lookback
     corr_distortion_z_lookback: int = Field(default=252, ge=60, le=756)
     # CoC instability z-score lookback
     coc_z_lookback: int = Field(default=252, ge=60, le=756)
+    # DCC-GARCH conditional correlation (replaces static Pearson for short window)
+    use_dcc_garch: bool = Field(default=True)
+    dcc_a_param: float = Field(default=0.05, ge=0.001, le=0.3,
+                               description="DCC alpha — innovation weight (Engle 2002)")
+    dcc_b_param: float = Field(default=0.93, ge=0.5, le=0.999,
+                               description="DCC beta — persistence weight; a+b must be < 1")
 
     # =====================================================
-    # Signal Stack (Short Vol / Dispersion)
+    # Signal Stack — Sector RV trend + Short Vol / Dispersion
     # Layer 1: Distortion Score logistic coefficients
     # S^dist = σ(a1·z_D + a2·rank(m_t) + a3·z_CoC)
     # =====================================================
@@ -203,13 +209,13 @@ class Settings(BaseSettings):
     signal_vix_kill: float = Field(default=45.0, ge=25.0, le=80.0)   # Was 35 (99th=44.9)
 
     # =====================================================
-    # Trade Structure & Execution
+    # Trade Structure — Sector RV + Short Vol / Dispersion
     # =====================================================
     trade_dte_short_index: int = Field(default=30, ge=7, le=90)
     trade_dte_long_sector: int = Field(default=45, ge=14, le=120)
     trade_max_loss_pct: float = Field(default=0.02, ge=0.005, le=0.10)
     trade_profit_target_pct: float = Field(default=0.015, ge=0.005, le=0.10)
-    # CALIBRATED: hold=20d matches alpha research optimal
+    # CALIBRATED: hold=20d matches alpha research optimal (medium-term trend)
     trade_max_holding_days: int = Field(default=20, ge=7, le=180)
     trade_max_gross_dispersion: float = Field(default=0.40, ge=0.05, le=1.0)
 
@@ -342,6 +348,13 @@ class Settings(BaseSettings):
     dashboard_host: str = Field(default="0.0.0.0")
     dashboard_port: int = Field(default=8050, ge=1, le=65535)
     dashboard_debug: bool = Field(default=False)
+
+    # =====================================================
+    # Notifications (Slack / email)
+    # =====================================================
+    slack_webhook_url: str = Field(default="", description="Incoming Webhook URL; leave empty to disable")
+    notify_on_pipeline_complete: bool = Field(default=True)
+    notify_on_pipeline_failure: bool = Field(default=True)
 
     # =====================================================
     # FMP sector alias normalization

@@ -375,6 +375,10 @@ class DatabaseWriter:
             "train_window": result.train_window,
             "fwd_period": result.fwd_period,
             "step": result.step,
+            "net_sharpe": _sf(getattr(result, "net_sharpe", None)),
+            "net_max_drawdown": _sf(getattr(result, "net_max_drawdown", None)),
+            "tc_bps": getattr(result, "tc_bps", None),
+            "annualized_tc_drag": _sf(getattr(result, "annualized_tc_drag", None)),
         })
         self.conn.execute("""
             INSERT OR REPLACE INTO analytics.backtest_cache
@@ -384,8 +388,12 @@ class DatabaseWriter:
         """, [result.ic_mean, result.ic_ir, result.hit_rate, result.sharpe,
               result.max_drawdown, result.n_walks, result.n_sectors,
               regime_json, params_json])
-        logger.info("write_backtest_cache: cached IC_mean=%.4f, Sharpe=%.2f",
-                    result.ic_mean or 0, result.sharpe or 0)
+        logger.info(
+            "write_backtest_cache: cached IC_mean=%.4f, Sharpe=%.2f (net=%.2f), TC=%.0fbps",
+            result.ic_mean or 0, result.sharpe or 0,
+            getattr(result, "net_sharpe", float("nan")) or 0,
+            getattr(result, "tc_bps", 0) or 0,
+        )
 
     # ── ML predictions ────────────────────────────────────────────────────────
 
@@ -428,6 +436,117 @@ class DatabaseWriter:
         """)
         self.conn.unregister("_opt_staging")
         logger.info("write_optimization_results: %d sectors", len(df))
+
+    # ── Trade book ───────────────────────────────────────────────────────────
+
+    def write_trade_book(self, trade_tickets: list, run_id: int) -> int:
+        """
+        Persist a list of TradeTicket objects to analytics.trade_book.
+
+        Serialises legs, greeks, and exit_conditions as JSON blobs.
+        Idempotent — PRIMARY KEY (trade_id, run_id) prevents duplicate inserts.
+        Returns number of rows upserted.
+        """
+        import json
+        from dataclasses import asdict
+        from datetime import date as _date
+
+        if not trade_tickets:
+            return 0
+
+        rows = []
+        for t in trade_tickets:
+            try:
+                legs_json = json.dumps([
+                    {
+                        "instrument": leg.instrument,
+                        "direction": leg.direction,
+                        "notional_weight": _sf(leg.notional_weight),
+                        "hedge_ratio": _sf(leg.hedge_ratio),
+                        "instrument_type": leg.instrument_type,
+                        "expiry_target_days": int(leg.expiry_target_days),
+                    }
+                    for leg in (t.legs or [])
+                ])
+                g = t.greeks
+                greeks_json = json.dumps({
+                    "delta_spy": _sf(g.delta_spy),
+                    "delta_tnx": _sf(g.delta_tnx),
+                    "delta_dxy": _sf(g.delta_dxy),
+                    "vega_net": _sf(g.vega_net),
+                    "gamma_net": _sf(g.gamma_net),
+                    "theta_daily": _sf(g.theta_daily),
+                    "rho_corr": _sf(g.rho_corr),
+                    "rho_dispersion": _sf(g.rho_dispersion),
+                })
+                ec = t.exit_conditions
+                exit_json = json.dumps({
+                    "z_entry": _sf(ec.z_entry),
+                    "z_target": _sf(ec.z_target),
+                    "z_stop": _sf(ec.z_stop),
+                    "max_holding_days": int(ec.max_holding_days),
+                    "half_life_est": _sf(ec.half_life_est),
+                    "max_loss_pct": _sf(ec.max_loss_pct),
+                    "profit_target_pct": _sf(ec.profit_target_pct),
+                    "safety_floor": _sf(ec.safety_floor),
+                    "regime_kill_states": ec.regime_kill_states,
+                })
+            except Exception as e:
+                logger.warning("write_trade_book: serialisation failed for %s — %s", getattr(t, "trade_id", "?"), e)
+                continue
+
+            rows.append({
+                "trade_id":           str(t.trade_id),
+                "run_id":             int(run_id),
+                "run_date":           _date.today(),
+                "trade_type":         str(t.trade_type),
+                "direction":          str(t.direction),
+                "ticker":             str(t.ticker),
+                "conviction_score":   _sf(t.conviction_score),
+                "distortion_score":   _sf(t.distortion_score),
+                "dislocation_score":  _sf(t.dislocation_score),
+                "mr_score":           _sf(t.mean_reversion_score),
+                "regime_safety_score":_sf(t.regime_safety_score),
+                "raw_weight":         _sf(t.raw_weight),
+                "final_weight":       _sf(t.final_weight),
+                "size_multiplier":    _sf(t.size_multiplier),
+                "entry_z":            _sf(t.entry_z),
+                "entry_residual":     _sf(t.entry_residual),
+                "half_life_est":      _sf(t.half_life_est),
+                "is_active":          bool(t.is_active),
+                "legs_json":          legs_json,
+                "greeks_json":        greeks_json,
+                "exit_conditions_json": exit_json,
+                "pm_note":            str(t.pm_note or "")[:2000],
+            })
+
+        if not rows:
+            return 0
+
+        import pandas as pd
+        df = pd.DataFrame(rows)
+        self.conn.register("_trade_book_staging", df)
+        self.conn.execute("""
+            INSERT OR REPLACE INTO analytics.trade_book (
+                trade_id, run_id, run_date, trade_type, direction, ticker,
+                conviction_score, distortion_score, dislocation_score, mr_score,
+                regime_safety_score, raw_weight, final_weight, size_multiplier,
+                entry_z, entry_residual, half_life_est, is_active,
+                legs_json, greeks_json, exit_conditions_json, pm_note
+            )
+            SELECT
+                trade_id, run_id, run_date, trade_type, direction, ticker,
+                conviction_score, distortion_score, dislocation_score, mr_score,
+                regime_safety_score, raw_weight, final_weight, size_multiplier,
+                entry_z, entry_residual, half_life_est, is_active,
+                legs_json, greeks_json, exit_conditions_json, pm_note
+            FROM _trade_book_staging
+        """)
+        self.conn.unregister("_trade_book_staging")
+        n = len(rows)
+        active = sum(1 for r in rows if r["is_active"])
+        logger.info("write_trade_book: upserted %d tickets (%d active) for run_id=%d", n, active, run_id)
+        return n
 
     # ── Data pruning ──────────────────────────────────────────────────────────
 

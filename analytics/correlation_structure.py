@@ -109,6 +109,154 @@ class CorrelationStructureTimeSeries:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DCC-GARCH conditional correlation estimator (Engle 2002)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class DCCGARCHCorrelation:
+    """
+    Two-step DCC-GARCH(1,1) estimator (Engle 2002).
+
+    Step 1: Univariate GARCH(1,1) per series → standardized residuals ε_t.
+            Uses `arch` library when available; falls back to EWMA (pure NumPy)
+            per-series if arch is not installed or fitting fails.
+
+    Step 2: DCC forward pass with scalar (a, b):
+            Q_t = (1-a-b)·Q̄ + a·ε_{t-1}·ε_{t-1}' + b·Q_{t-1}
+            R_t = diag(Q_t)^{-1/2} · Q_t · diag(Q_t)^{-1/2}
+
+    Returns R_T — the conditional correlation matrix at the last observation.
+    Falls back silently to Pearson if any numeric failure occurs.
+    """
+
+    def __init__(
+        self,
+        a: float = 0.05,
+        b: float = 0.93,
+        ewma_lambda: float = 0.94,
+        min_obs: int = 60,
+    ) -> None:
+        self.a = a
+        self.b = b
+        self.ewma_lambda = ewma_lambda
+        self.min_obs = min_obs
+
+    # ── Public entry point ────────────────────────────────────────────────────
+
+    def fit_and_predict(self, returns_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return N×N conditional correlation matrix R_T as a DataFrame.
+        Guaranteed to return a valid correlation matrix — falls back to
+        Pearson on any failure.
+        """
+        if len(returns_df) < self.min_obs:
+            log.debug("DCC: insufficient data (%d < %d) — Pearson fallback",
+                      len(returns_df), self.min_obs)
+            return returns_df.corr()
+        try:
+            _sigma, eps = self._fit_garch_univariate(returns_df)
+            R_t = self._dcc_forward_pass(eps, self.a, self.b,
+                                          returns_df.columns.tolist())
+            if not np.isfinite(R_t.values).all():
+                raise ValueError("non-finite values in DCC R_t")
+            log.debug(
+                "DCC-GARCH R_t: avg_off_diag=%.4f (a=%.3f b=%.3f N=%d T=%d)",
+                float(R_t.values[~np.eye(len(R_t), dtype=bool)].mean()),
+                self.a, self.b, len(returns_df.columns), len(returns_df),
+            )
+            return R_t
+        except Exception as exc:
+            log.warning("DCC-GARCH failed (%s) — Pearson fallback", exc)
+            return returns_df.corr()
+
+    # ── Step 1: univariate GARCH(1,1) ────────────────────────────────────────
+
+    def _fit_garch_univariate(
+        self, returns_df: pd.DataFrame
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Fit GARCH(1,1) to each column. Returns (sigma [T×N], eps [T×N]).
+        Tries arch library first; falls back to EWMA per-series on any failure.
+        """
+        r = returns_df.values.astype(float)
+        T, N = r.shape
+        sigma = np.zeros((T, N))
+        eps = np.zeros((T, N))
+
+        for i in range(N):
+            ri = r[:, i]
+            if ri.std() < 1e-8:
+                # Constant / near-zero series — assign unit vol, zero residual
+                sigma[:, i] = 1e-8
+                eps[:, i] = 0.0
+                continue
+            try:
+                from arch import arch_model  # type: ignore
+                # Scale to percent-returns for numerical stability in arch optimizer
+                res = arch_model(
+                    ri * 100, vol="Garch", p=1, q=1,
+                    mean="Zero", dist="Normal"
+                ).fit(disp="off", show_warning=False)
+                cond_vol = np.maximum(res.conditional_volatility / 100, 1e-8)
+                sigma[:, i] = cond_vol
+                eps[:, i] = ri / cond_vol
+            except Exception:
+                sv, ei = self._ewma_garch(ri)
+                sigma[:, i] = sv
+                eps[:, i] = ei
+
+        return sigma, eps
+
+    def _ewma_garch(self, ri: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """EWMA (RiskMetrics IGARCH) fallback — pure NumPy."""
+        T = len(ri)
+        h = np.empty(T)
+        h[0] = ri[0] ** 2
+        lam = self.ewma_lambda
+        for t in range(1, T):
+            h[t] = lam * h[t - 1] + (1 - lam) * ri[t - 1] ** 2
+        sv = np.sqrt(np.maximum(h, 1e-12))
+        return sv, ri / sv
+
+    # ── Step 2: DCC forward pass ──────────────────────────────────────────────
+
+    def _dcc_forward_pass(
+        self,
+        eps: np.ndarray,
+        a: float,
+        b: float,
+        tickers: List[str],
+    ) -> pd.DataFrame:
+        """Standard DCC recurrence → R_T as DataFrame."""
+        T, N = eps.shape
+        Q_bar = eps.T @ eps / T          # Unconditional covariance of std residuals
+        Q = Q_bar.copy()
+
+        for t in range(1, T):
+            Q = (1 - a - b) * Q_bar + a * np.outer(eps[t - 1], eps[t - 1]) + b * Q
+
+        # Extract R_T from Q_T
+        d = np.sqrt(np.maximum(np.diag(Q), 1e-10))
+        R = Q / np.outer(d, d)
+        np.fill_diagonal(R, 1.0)
+        R = 0.5 * (R + R.T)             # Enforce exact symmetry
+        np.fill_diagonal(R, 1.0)
+
+        # Clip off-diagonal to valid correlation range
+        mask = ~np.eye(N, dtype=bool)
+        R[mask] = np.clip(R[mask], -0.9999, 0.9999)
+
+        # PSD projection if floating-point drift created negative eigenvalues
+        ev = np.linalg.eigvalsh(R)
+        if ev.min() < 0:
+            R += (-ev.min() + 1e-6) * np.eye(N)
+            d2 = np.sqrt(np.diag(R))
+            R = R / np.outer(d2, d2)
+            np.fill_diagonal(R, 1.0)
+
+        return pd.DataFrame(R, index=tickers, columns=tickers)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Core computation functions (stateless, testable)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -398,6 +546,7 @@ class CorrelationStructureEngine:
         returns_prev_window: Optional[pd.DataFrame] = None,
         distortion_history: Optional[pd.Series] = None,
         coc_history: Optional[pd.Series] = None,
+        settings=None,
     ) -> CorrelationStructureSnapshot:
         """
         Compute full measurement engine snapshot at the latest date.
@@ -431,7 +580,14 @@ class CorrelationStructureEngine:
         R_short = returns.iloc[-W_s:]
         R_base = returns.iloc[-W_b:]
 
-        C_short = compute_corr_matrix(R_short)
+        if settings is not None and getattr(settings, "use_dcc_garch", False):
+            _dcc = DCCGARCHCorrelation(
+                a=getattr(settings, "dcc_a_param", 0.05),
+                b=getattr(settings, "dcc_b_param", 0.93),
+            )
+            C_short = _dcc.fit_and_predict(R_short)
+        else:
+            C_short = compute_corr_matrix(R_short)
         C_base = compute_corr_matrix(R_base)
         delta_C = C_short - C_base
 
@@ -660,6 +816,7 @@ class CorrelationStructureEngine:
         distortion_z_lookback: int = 252,
         coc_z_lookback: int = 252,
         history_step: int = 5,
+        settings=None,
     ) -> CorrelationStructureSnapshot:
         """
         Compute snapshot WITH proper z-scores by building a lightweight
@@ -682,6 +839,7 @@ class CorrelationStructureEngine:
             return self.compute_snapshot(
                 returns, sector_groups, W_s, W_b,
                 distortion_z_lookback, coc_z_lookback,
+                settings=settings,
             )
 
         # Build lightweight rolling history
@@ -717,11 +875,14 @@ class CorrelationStructureEngine:
         coc_series = pd.Series(coc_hist) if coc_hist else None
 
         # Now compute the proper snapshot with history
+        # Note: history loop above intentionally uses Pearson (performance-critical).
+        # DCC is applied only to the final production snapshot via the settings flag.
         return self.compute_snapshot(
             returns, sector_groups, W_s, W_b,
             distortion_z_lookback, coc_z_lookback,
             distortion_history=frob_series,
             coc_history=coc_series,
+            settings=settings,
         )
 
     @staticmethod

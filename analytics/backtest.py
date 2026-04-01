@@ -136,7 +136,9 @@ class WalkMetrics:
     regime: str
     ic: float                     # cross-sectional Spearman IC
     hit_rate: float               # directional accuracy (this walk only)
-    signal_return: float          # signal-weighted portfolio log-return
+    signal_return: float          # gross signal-weighted portfolio log-return
+    net_signal_return: float      # net return after transaction cost deduction
+    tc_cost: float                # transaction cost drag for this walk
     n_sectors: int                # sectors with valid signal + fwd return
 
 
@@ -158,12 +160,18 @@ class BacktestResult:
     # Per-walk IC time series (DatetimeIndex = test_start date)
     ic_series: pd.Series
 
-    # Aggregate metrics over all walks
+    # Aggregate metrics over all walks — gross (before TC)
     ic_mean: float
     ic_ir: float           # IC_mean / std(IC) — information ratio of the signal
     hit_rate: float        # fraction of (sector, walk) pairs with correct direction
-    sharpe: float          # annualised Sharpe of signal-weighted portfolio
+    sharpe: float          # annualised Sharpe of gross signal-weighted portfolio
     max_drawdown: float    # maximum peak-to-trough drawdown of cumulative P&L
+
+    # Net-of-cost metrics
+    net_sharpe: float      # annualised Sharpe after transaction cost deduction
+    net_max_drawdown: float
+    tc_bps: float          # round-trip TC assumption used (bps)
+    annualized_tc_drag: float  # estimated annual TC drag (fraction)
 
     # Regime-conditional breakdown
     regime_breakdown: Dict[str, RegimeBreakdown]
@@ -191,27 +199,36 @@ class WalkForwardBacktester:
     """
     Rolling walk-forward evaluator for the SRV sector-rotation signal.
 
-    Walk parameters (class-level constants, override via subclass if needed):
+    Walk parameters (class-level defaults — overridden by settings at __init__):
         TRAIN_WINDOW = 252  days of in-sample training data
         TEST_WINDOW  = 21   days of out-of-sample evaluation
-        STEP         = 5    days between consecutive walk anchors
-        FWD_PERIOD   = 5    days ahead used for IC / hit-rate / Sharpe
+        STEP         = 21   days between consecutive walk anchors (monthly rebalance)
+        FWD_PERIOD   = 20   days ahead used for IC / hit-rate / Sharpe
+                            Aligns with signal_optimal_hold — medium-term sector trend
 
     Signal convention:
         signal_i = -pca_residual_z_i
         Positive z → sector rich vs PCA reconstruction → expect mean reversion
         down → SHORT → negative signal, so -z makes positive signal = LONG bias.
         IC > 0 means the signal correctly predicts the direction of forward return.
+
+    This is a medium-term sector RV signal (20-day hold) evaluated monthly.
     """
 
     TRAIN_WINDOW: int = 252
     TEST_WINDOW: int = 21
-    STEP: int = 5
-    FWD_PERIOD: int = 5
+    STEP: int = 21          # Monthly evaluation step (not weekly)
+    FWD_PERIOD: int = 20    # 20-day forward return — matches signal_optimal_hold
+    TC_BPS_ROUNDTRIP: float = 15.0  # Round-trip TC per gross unit (ETF spreads ~5bps/side)
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.logger = logging.getLogger(self.__class__.__name__)
+        # Override class-level defaults with settings if available
+        # FWD_PERIOD aligns with the PM's intended holding horizon
+        optimal_hold = getattr(settings, "signal_optimal_hold", None)
+        if optimal_hold and isinstance(optimal_hold, int) and 5 <= optimal_hold <= 60:
+            self.FWD_PERIOD = optimal_hold  # type: ignore[assignment]
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,6 +296,7 @@ class WalkForwardBacktester:
         # Per-walk accumulation
         walk_metrics: List[WalkMetrics] = []
         all_signal_returns: List[float] = []
+        all_net_signal_returns: List[float] = []
         hit_correct: int = 0
         hit_total: int = 0
 
@@ -340,7 +358,14 @@ class WalkForwardBacktester:
             else:
                 port_ret = 0.0
 
+            # Transaction cost: round-trip at TC_BPS_ROUNDTRIP bps per unit of gross exposure.
+            # Each walk opens and closes all positions → full round-trip cost.
+            # Sector ETF bid-ask spread ~5 bps + SPY hedge ~3 bps = ~8 bps × 2 legs ≈ 15 bps rt.
+            tc_cost = gross * (self.TC_BPS_ROUNDTRIP / 10_000.0)
+            net_port_ret = port_ret - tc_cost
+
             all_signal_returns.append(port_ret)
+            all_net_signal_returns.append(net_port_ret)
 
             test_end_idx = min(fwd_end_idx, n - 1)
             walk_metrics.append(WalkMetrics(
@@ -352,6 +377,8 @@ class WalkForwardBacktester:
                 ic=ic,
                 hit_rate=walk_hit_rate,
                 signal_return=port_ret,
+                net_signal_return=net_port_ret,
+                tc_cost=tc_cost,
                 n_sectors=n_valid,
             ))
 
@@ -381,6 +408,13 @@ class WalkForwardBacktester:
         sharpe = _sharpe(all_signal_returns, ann_factor)
         max_dd = _max_drawdown(all_signal_returns)
 
+        # Net-of-cost metrics
+        net_sharpe = _sharpe(all_net_signal_returns, ann_factor)
+        net_max_dd = _max_drawdown(all_net_signal_returns)
+        walks_per_year = 252.0 / self.STEP
+        total_tc = sum(w.tc_cost for w in walk_metrics)
+        annualized_tc_drag = (total_tc / max(1, len(walk_metrics))) * walks_per_year
+
         ic_series = pd.Series(
             [w.ic for w in walk_metrics],
             index=pd.DatetimeIndex([w.test_start for w in walk_metrics]),
@@ -399,13 +433,15 @@ class WalkForwardBacktester:
 
         self.logger.info(
             "Backtest complete: %d walks | IC_mean=%.4f | IC_IR=%.2f | "
-            "hit_rate=%.1f%% | Sharpe=%.2f | MaxDD=%.1f%%",
+            "hit_rate=%.1f%% | Sharpe=%.2f (net=%.2f) | MaxDD=%.1f%% | TC_drag=%.0fbps/yr",
             len(walk_metrics),
             ic_mean,
             ic_ir if math.isfinite(ic_ir) else float("nan"),
             hit_rate * 100 if math.isfinite(hit_rate) else float("nan"),
             sharpe if math.isfinite(sharpe) else float("nan"),
+            net_sharpe if math.isfinite(net_sharpe) else float("nan"),
             max_dd * 100 if math.isfinite(max_dd) else float("nan"),
+            annualized_tc_drag * 10_000,
         )
 
         return BacktestResult(
@@ -415,6 +451,10 @@ class WalkForwardBacktester:
             hit_rate=hit_rate,
             sharpe=sharpe,
             max_drawdown=max_dd,
+            net_sharpe=net_sharpe,
+            net_max_drawdown=net_max_dd,
+            tc_bps=self.TC_BPS_ROUNDTRIP,
+            annualized_tc_drag=annualized_tc_drag,
             regime_breakdown=regime_breakdown,
             walk_metrics=walk_metrics,
             summary_df=summary_df,
@@ -789,35 +829,43 @@ class WalkForwardBacktester:
         """
         rows = []
         cum = 0.0
+        net_cum = 0.0
         for w in sorted(walk_metrics, key=lambda x: x.test_start):
             cum += w.signal_return if math.isfinite(w.signal_return) else 0.0
+            net_cum += w.net_signal_return if math.isfinite(w.net_signal_return) else 0.0
             rows.append({
-                "date":          w.test_start,
-                "regime":        w.regime,
-                "ic":            round(w.ic, 4) if math.isfinite(w.ic) else float("nan"),
-                "hit_rate":      round(w.hit_rate, 4) if math.isfinite(w.hit_rate) else float("nan"),
-                "signal_return": round(w.signal_return, 6) if math.isfinite(w.signal_return) else float("nan"),
-                "cum_pnl":       round(cum, 6),
-                "n_sectors":     w.n_sectors,
-                "train_start":   w.train_start,
-                "train_end":     w.train_end,
-                "test_end":      w.test_end,
+                "date":             w.test_start,
+                "regime":           w.regime,
+                "ic":               round(w.ic, 4) if math.isfinite(w.ic) else float("nan"),
+                "hit_rate":         round(w.hit_rate, 4) if math.isfinite(w.hit_rate) else float("nan"),
+                "signal_return":    round(w.signal_return, 6) if math.isfinite(w.signal_return) else float("nan"),
+                "net_signal_return":round(w.net_signal_return, 6) if math.isfinite(w.net_signal_return) else float("nan"),
+                "tc_cost":          round(w.tc_cost, 6),
+                "cum_pnl":          round(cum, 6),
+                "net_cum_pnl":      round(net_cum, 6),
+                "n_sectors":        w.n_sectors,
+                "train_start":      w.train_start,
+                "train_end":        w.train_end,
+                "test_end":         w.test_end,
             })
 
         df = pd.DataFrame(rows)
 
         # Append aggregate summary row
         agg = {
-            "date":          pd.NaT,
-            "regime":        "ALL",
-            "ic":            round(ic_mean, 4) if math.isfinite(ic_mean) else float("nan"),
-            "hit_rate":      round(hit_rate, 4) if math.isfinite(hit_rate) else float("nan"),
-            "signal_return": round(float(df["signal_return"].sum(skipna=True)), 6),
-            "cum_pnl":       round(cum, 6),
-            "n_sectors":     int(df["n_sectors"].mean()) if not df.empty else 0,
-            "train_start":   pd.NaT,
-            "train_end":     pd.NaT,
-            "test_end":      pd.NaT,
+            "date":             pd.NaT,
+            "regime":           "ALL",
+            "ic":               round(ic_mean, 4) if math.isfinite(ic_mean) else float("nan"),
+            "hit_rate":         round(hit_rate, 4) if math.isfinite(hit_rate) else float("nan"),
+            "signal_return":    round(float(df["signal_return"].sum(skipna=True)), 6),
+            "net_signal_return":round(float(df["net_signal_return"].sum(skipna=True)), 6) if "net_signal_return" in df.columns else float("nan"),
+            "tc_cost":          round(float(df["tc_cost"].sum(skipna=True)), 6) if "tc_cost" in df.columns else 0.0,
+            "cum_pnl":          round(cum, 6),
+            "net_cum_pnl":      round(net_cum, 6),
+            "n_sectors":        int(df["n_sectors"].mean()) if not df.empty else 0,
+            "train_start":      pd.NaT,
+            "train_end":        pd.NaT,
+            "test_end":         pd.NaT,
         }
         df = pd.concat([df, pd.DataFrame([agg])], ignore_index=True)
         return df
