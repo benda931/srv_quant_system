@@ -1,17 +1,25 @@
 """
 analytics/tail_risk.py
 ========================
-Expected Shortfall (ES) and Parametric Correlation Stress Tests
+Expected Shortfall (ES), Extreme Value Theory (EVT), and Tail Risk Analytics
 
-From the Research Brief:
-  - ES at chosen confidence level (replacing VaR for better tail-risk capture)
-  - Parametric correlation shock: C_stress = (1-η)C + η·11' where η = stress intensity
-  - Tail-correlation diagnostic (panic coupling detection)
-  - Convexity-aware risk metrics for short-vol strategies
+Full tail-risk measurement suite for a Short Vol / Dispersion DSS:
+
+  1. Expected Shortfall (ES) — parametric, historical, Cornish-Fisher
+  2. Parametric correlation stress: C_stress = (1-η)C + η·11'
+  3. Tail-correlation diagnostic (panic coupling detection)
+  4. VaR backtesting — Kupiec + Christoffersen conditional coverage
+  5. EVT: Peaks-over-Threshold (POT) + Generalized Pareto Distribution (GPD)
+  6. Hill tail index estimator (power-law tail fatness)
+  7. Regime-conditional tail metrics (per CALM/NORMAL/TENSION/CRISIS)
+  8. Short-vol specific tail analysis: convexity P&L, gap risk, vol-of-vol
 
 Ref: Basel III market-risk standards (FRTB) — ES replaces VaR
 Ref: Longin & Solnik — Extreme Correlation of International Equity Markets
 Ref: Carr & Wu — Variance Risk Premia
+Ref: McNeil & Frey (2000) — Estimation of tail-related risk measures (EVT)
+Ref: Pickands (1975) — Generalized Pareto Distribution
+Ref: Hill (1975) — Tail index estimator for heavy-tailed distributions
 """
 from __future__ import annotations
 
@@ -615,4 +623,567 @@ def christoffersen_independence_test(
         independence_p_value=round(ind_p_value, 4),
         independence_pass=ind_pass,
         overall_pass=overall,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# EXTREME VALUE THEORY — Peaks-over-Threshold + GPD
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class EVTResult:
+    """
+    Extreme Value Theory result using Peaks-over-Threshold (POT) method
+    with Generalized Pareto Distribution (GPD) fitted to exceedances.
+
+    The GPD models the distribution of losses that exceed a high threshold u:
+        F_u(y) = 1 - (1 + ξ·y/β)^{-1/ξ}   for ξ ≠ 0
+    where:
+        ξ (shape/xi) — tail index; ξ > 0 = heavy tail (Pareto), ξ = 0 = exponential, ξ < 0 = finite tail
+        β (scale/sigma) — scale parameter
+        u — threshold (e.g., 95th percentile of losses)
+    """
+    # GPD parameters
+    xi: float                       # Shape parameter (tail index)
+    beta: float                     # Scale parameter
+    threshold: float                # Threshold u (absolute value of loss)
+    n_exceedances: int              # Number of observations beyond threshold
+    n_total: int
+
+    # EVT-derived risk measures
+    evt_var_95: float               # VaR at 95% from GPD
+    evt_var_99: float               # VaR at 99% from GPD
+    evt_es_95: float                # ES at 95% from GPD (if ξ < 1)
+    evt_es_99: float                # ES at 99% from GPD (if ξ < 1)
+
+    # Tail classification
+    tail_type: str                  # "heavy" (ξ > 0.1), "medium" (0 < ξ ≤ 0.1), "thin" (ξ ≤ 0)
+    tail_warning: str               # PM-facing interpretation
+
+    # Goodness-of-fit
+    ks_statistic: float = 0.0      # Kolmogorov-Smirnov test statistic
+    ks_p_value: float = 0.0        # p-value (> 0.05 = GPD fits well)
+
+    # Per-sector EVT (optional)
+    sector_xi: Dict[str, float] = field(default_factory=dict)
+
+
+def fit_evt_pot(
+    returns: pd.DataFrame,
+    weights: Dict[str, float],
+    threshold_quantile: float = 0.95,
+) -> EVTResult:
+    """
+    Fit Generalized Pareto Distribution to portfolio loss exceedances
+    using the Peaks-over-Threshold (POT) method.
+
+    Parameters
+    ----------
+    returns : pd.DataFrame — daily returns (columns = tickers)
+    weights : Dict[str, float] — portfolio weights
+    threshold_quantile : float — quantile for threshold selection (default 0.95)
+
+    Returns
+    -------
+    EVTResult
+    """
+    # Portfolio returns
+    tickers = [t for t in weights if t in returns.columns and abs(weights[t]) > 1e-8]
+    if not tickers:
+        return _empty_evt()
+
+    w = np.array([weights[t] for t in tickers])
+    r = returns[tickers].dropna()
+    if len(r) < 100:
+        return _empty_evt()
+
+    port_ret = r.values @ w
+    n_total = len(port_ret)
+
+    # Work with losses (negate returns)
+    losses = -port_ret
+
+    # Threshold: quantile of losses
+    u = float(np.quantile(losses, threshold_quantile))
+    if u <= 0:
+        u = float(np.quantile(losses, 0.90))  # fallback to 90th pct
+    if u <= 0:
+        return _empty_evt()
+
+    # Exceedances: losses above threshold
+    exceedances = losses[losses > u] - u
+    n_exc = len(exceedances)
+
+    if n_exc < 15:
+        log.warning("EVT: only %d exceedances (need >= 15) — results unreliable", n_exc)
+        if n_exc < 5:
+            return _empty_evt()
+
+    # Fit GPD via Maximum Likelihood
+    xi, beta = _fit_gpd_mle(exceedances)
+
+    # EVT-derived VaR and ES
+    # VaR_p = u + (β/ξ) * [(n/N_u * (1-p))^{-ξ} - 1]  for ξ ≠ 0
+    exc_rate = n_exc / n_total
+
+    evt_var_95 = _gpd_var(0.95, u, xi, beta, exc_rate)
+    evt_var_99 = _gpd_var(0.99, u, xi, beta, exc_rate)
+
+    # ES_p = VaR_p / (1-ξ) + (β - ξ·u) / (1-ξ)   for ξ < 1
+    evt_es_95 = _gpd_es(0.95, evt_var_95, xi, beta, u) if xi < 1.0 else float("nan")
+    evt_es_99 = _gpd_es(0.99, evt_var_99, xi, beta, u) if xi < 1.0 else float("nan")
+
+    # Tail classification
+    if xi > 0.25:
+        tail_type = "heavy"
+        tail_warning = f"HEAVY tail (ξ={xi:.3f}) — fat-tail risk significantly exceeds Gaussian model. Short-vol positions require wider stops."
+    elif xi > 0.10:
+        tail_type = "heavy"
+        tail_warning = f"Moderately heavy tail (ξ={xi:.3f}) — tail losses will exceed Gaussian estimates by ~{(1+xi)*100-100:.0f}%."
+    elif xi > 0:
+        tail_type = "medium"
+        tail_warning = f"Slightly heavy tail (ξ={xi:.3f}) — near-Gaussian but not exactly. Standard risk models approximately valid."
+    else:
+        tail_type = "thin"
+        tail_warning = f"Thin/bounded tail (ξ={xi:.3f}) — tail risk well-contained. Gaussian model is conservative."
+
+    # KS goodness-of-fit test
+    ks_stat, ks_p = _gpd_ks_test(exceedances, xi, beta)
+
+    # Per-sector tail index (Hill estimator on each sector)
+    sector_xi: Dict[str, float] = {}
+    for t in tickers:
+        if t in r.columns:
+            sec_losses = -r[t].values
+            sec_xi = hill_estimator(sec_losses, k=max(15, int(len(sec_losses) * 0.05)))
+            sector_xi[t] = round(sec_xi, 4)
+
+    return EVTResult(
+        xi=round(xi, 4),
+        beta=round(beta, 6),
+        threshold=round(-u, 6),  # Convert back to return space (negative = loss)
+        n_exceedances=n_exc,
+        n_total=n_total,
+        evt_var_95=round(-evt_var_95, 6),  # Negative = loss
+        evt_var_99=round(-evt_var_99, 6),
+        evt_es_95=round(-evt_es_95, 6) if math.isfinite(evt_es_95) else float("nan"),
+        evt_es_99=round(-evt_es_99, 6) if math.isfinite(evt_es_99) else float("nan"),
+        tail_type=tail_type,
+        tail_warning=tail_warning,
+        ks_statistic=round(ks_stat, 4),
+        ks_p_value=round(ks_p, 4),
+        sector_xi=sector_xi,
+    )
+
+
+def _fit_gpd_mle(exceedances: np.ndarray) -> Tuple[float, float]:
+    """
+    Fit GPD parameters (ξ, β) via Maximum Likelihood.
+    Uses scipy.stats.genpareto if available, else Grimshaw's MLE.
+    """
+    try:
+        from scipy.stats import genpareto
+        # genpareto uses (c, loc, scale) where c = ξ
+        c, _loc, scale = genpareto.fit(exceedances, floc=0)
+        return float(c), float(scale)
+    except Exception:
+        pass
+
+    # Fallback: method-of-moments (Hosking & Wallis, 1987)
+    n = len(exceedances)
+    m1 = float(exceedances.mean())
+    m2 = float(exceedances.var())
+    if m1 <= 0:
+        return 0.0, max(m1, 1e-8)
+    xi = 0.5 * (m1 ** 2 / m2 - 1)
+    beta = m1 * (1 - xi) / 2 if abs(1 - xi) > 1e-10 else m1
+    xi = max(-0.5, min(xi, 2.0))
+    beta = max(1e-8, beta)
+    return float(xi), float(beta)
+
+
+def _gpd_var(p: float, u: float, xi: float, beta: float, exc_rate: float) -> float:
+    """GPD-derived VaR at confidence level p."""
+    if exc_rate <= 0 or beta <= 0:
+        return u
+    if abs(xi) < 1e-10:
+        # Exponential case (ξ → 0)
+        return u + beta * np.log(exc_rate / (1 - p))
+    return u + (beta / xi) * ((exc_rate / (1 - p)) ** xi - 1)
+
+
+def _gpd_es(p: float, var_p: float, xi: float, beta: float, u: float) -> float:
+    """GPD-derived Expected Shortfall at confidence level p (valid for ξ < 1)."""
+    if xi >= 1.0:
+        return float("nan")
+    return var_p / (1 - xi) + (beta - xi * u) / (1 - xi)
+
+
+def _gpd_ks_test(exceedances: np.ndarray, xi: float, beta: float) -> Tuple[float, float]:
+    """Kolmogorov-Smirnov goodness-of-fit test for GPD."""
+    try:
+        from scipy.stats import genpareto, kstest
+        stat, p = kstest(exceedances, genpareto.cdf, args=(xi, 0, beta))
+        return float(stat), float(p)
+    except Exception:
+        return 0.0, 0.0
+
+
+def _empty_evt() -> EVTResult:
+    return EVTResult(
+        xi=0.0, beta=0.0, threshold=0.0, n_exceedances=0, n_total=0,
+        evt_var_95=0.0, evt_var_99=0.0, evt_es_95=0.0, evt_es_99=0.0,
+        tail_type="unknown", tail_warning="Insufficient data for EVT analysis",
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Hill Tail Index Estimator
+# ═════════════════════════════════════════════════════════════════════════════
+
+def hill_estimator(losses: np.ndarray, k: Optional[int] = None) -> float:
+    """
+    Hill (1975) tail index estimator for heavy-tailed distributions.
+
+    Estimates α such that P(X > x) ~ x^{-α} for large x.
+    Returns ξ = 1/α (GPD shape parameter convention).
+
+    Parameters
+    ----------
+    losses : np.ndarray — loss values (positive = loss)
+    k : int — number of upper order statistics to use (default: 5% of n)
+
+    Returns
+    -------
+    xi : float — estimated tail index (ξ = 1/α). Higher = heavier tail.
+    """
+    pos_losses = losses[losses > 0]
+    n = len(pos_losses)
+    if n < 30:
+        return 0.0
+
+    if k is None:
+        k = max(15, int(n * 0.05))
+    k = min(k, n - 1)
+
+    sorted_losses = np.sort(pos_losses)[::-1]  # Descending
+    x_k = sorted_losses[k]  # k-th order statistic
+    if x_k <= 0:
+        return 0.0
+
+    # Hill estimator: H_k = (1/k) Σ_{i=1}^{k} log(X_{(i)} / X_{(k+1)})
+    log_ratios = np.log(sorted_losses[:k] / x_k)
+    h_k = float(log_ratios.mean())
+
+    # ξ = H_k (Hill estimate is directly the GPD shape parameter)
+    return max(0.0, h_k)
+
+
+def hill_plot_data(
+    losses: np.ndarray, k_range: Optional[Tuple[int, int]] = None,
+) -> Tuple[List[int], List[float]]:
+    """
+    Generate data for Hill plot (ξ estimates vs k).
+    Stable plateau indicates reliable ξ estimate.
+    """
+    pos_losses = losses[losses > 0]
+    n = len(pos_losses)
+    if n < 50:
+        return [], []
+
+    if k_range is None:
+        k_range = (max(10, int(n * 0.02)), min(int(n * 0.20), n - 1))
+
+    k_values = list(range(k_range[0], k_range[1], max(1, (k_range[1] - k_range[0]) // 50)))
+    xi_values = [hill_estimator(losses, k=k) for k in k_values]
+    return k_values, xi_values
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Regime-Conditional Tail Metrics
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class RegimeTailResult:
+    """Tail metrics computed per-regime."""
+    regime: str
+    n_days: int
+    es_95: float                    # Historical ES at 95% in this regime
+    max_daily_loss: float
+    skewness: float
+    kurtosis: float
+    tail_ratio: float               # |ES| / |VaR| — tail concentration
+    # EVT
+    xi: float                       # GPD shape in this regime
+    tail_type: str
+    # Conditional metrics
+    drawdown_given_tail: float      # Average drawdown following a tail event
+    recovery_days: float            # Average days to recover from tail event
+
+
+@dataclass
+class RegimeConditionalTailReport:
+    """Complete regime-conditional tail analysis."""
+    regime_results: Dict[str, RegimeTailResult]
+    worst_regime: str
+    regime_tail_spread: float       # Ratio of worst to best regime ES
+    warnings: List[str]
+
+
+def regime_conditional_tails(
+    returns: pd.DataFrame,
+    weights: Dict[str, float],
+    vix: Optional[pd.Series] = None,
+    settings=None,
+) -> RegimeConditionalTailReport:
+    """
+    Compute tail metrics for each regime (CALM/NORMAL/TENSION/CRISIS).
+    Uses VIX levels to classify dates into regimes.
+    """
+    tickers = [t for t in weights if t in returns.columns and abs(weights[t]) > 1e-8]
+    if not tickers or len(returns) < 200:
+        return RegimeConditionalTailReport(
+            regime_results={}, worst_regime="N/A",
+            regime_tail_spread=0, warnings=["Insufficient data"],
+        )
+
+    w = np.array([weights[t] for t in tickers])
+    port_ret = returns[tickers].dropna().values @ w
+
+    # Classify regimes from VIX
+    if vix is not None and len(vix) >= len(port_ret):
+        vix_aligned = vix.iloc[-len(port_ret):].values
+    else:
+        vix_aligned = np.full(len(port_ret), 18.0)
+
+    vix_soft = getattr(settings, "vix_level_soft", 21.0) if settings else 21.0
+    vix_hard = getattr(settings, "vix_level_hard", 32.0) if settings else 32.0
+
+    regimes = np.where(
+        vix_aligned > vix_hard, "CRISIS",
+        np.where(vix_aligned > vix_soft, "TENSION",
+                 np.where(vix_aligned > 16, "NORMAL", "CALM"))
+    )
+
+    results: Dict[str, RegimeTailResult] = {}
+    warnings: List[str] = []
+
+    for regime in ["CALM", "NORMAL", "TENSION", "CRISIS"]:
+        mask = regimes == regime
+        r_regime = port_ret[mask]
+        n_days = int(mask.sum())
+
+        if n_days < 30:
+            continue
+
+        losses = -r_regime
+        var_95 = float(np.percentile(losses, 95)) if n_days >= 20 else 0.0
+        tail_mask = losses >= var_95 if var_95 > 0 else np.zeros(n_days, dtype=bool)
+        es_95 = float(losses[tail_mask].mean()) if tail_mask.sum() > 0 else var_95
+
+        skew = float(pd.Series(r_regime).skew())
+        kurt = float(pd.Series(r_regime).kurtosis())
+        max_loss = float(r_regime.min())
+
+        tail_ratio = abs(es_95) / abs(var_95) if abs(var_95) > 1e-10 else 1.0
+
+        # Mini EVT on this regime
+        xi_regime = hill_estimator(losses, k=max(10, int(n_days * 0.05))) if n_days >= 50 else 0.0
+        tail_type = "heavy" if xi_regime > 0.15 else "medium" if xi_regime > 0 else "thin"
+
+        # Conditional drawdown after tail events
+        dd_given_tail = 0.0
+        recovery = 0.0
+        if tail_mask.sum() >= 3:
+            tail_indices = np.where(tail_mask)[0]
+            dd_list = []
+            rec_list = []
+            for idx in tail_indices:
+                if idx + 5 < n_days:
+                    fwd = r_regime[idx + 1: idx + 6]
+                    dd_list.append(float(fwd.min()))
+                    rec_pos = np.where(np.cumsum(fwd) > 0)[0]
+                    rec_list.append(int(rec_pos[0] + 1) if len(rec_pos) > 0 else 5)
+            dd_given_tail = float(np.mean(dd_list)) if dd_list else 0.0
+            recovery = float(np.mean(rec_list)) if rec_list else 0.0
+
+        results[regime] = RegimeTailResult(
+            regime=regime, n_days=n_days,
+            es_95=round(-es_95, 6),
+            max_daily_loss=round(max_loss, 6),
+            skewness=round(skew, 3),
+            kurtosis=round(kurt, 3),
+            tail_ratio=round(tail_ratio, 3),
+            xi=round(xi_regime, 4),
+            tail_type=tail_type,
+            drawdown_given_tail=round(dd_given_tail, 6),
+            recovery_days=round(recovery, 1),
+        )
+
+    # Worst regime
+    es_by_regime = {r: abs(v.es_95) for r, v in results.items()}
+    worst_regime = max(es_by_regime, key=es_by_regime.get) if es_by_regime else "N/A"
+    best_es = min(es_by_regime.values()) if es_by_regime else 1.0
+    worst_es = max(es_by_regime.values()) if es_by_regime else 1.0
+    tail_spread = worst_es / best_es if best_es > 1e-8 else float("inf")
+
+    if "CRISIS" in results and results["CRISIS"].xi > 0.25:
+        warnings.append(f"CRISIS regime has very heavy tail (ξ={results['CRISIS'].xi:.3f}) — short-vol positions highly exposed")
+    if "TENSION" in results and results["TENSION"].es_95 < -0.03:
+        warnings.append(f"TENSION ES 95% = {results['TENSION'].es_95:.2%} — consider reducing gross exposure during elevated VIX")
+    if tail_spread > 3.0:
+        warnings.append(f"Tail spread {tail_spread:.1f}x across regimes — regime-conditional sizing critical")
+
+    return RegimeConditionalTailReport(
+        regime_results=results,
+        worst_regime=worst_regime,
+        regime_tail_spread=round(tail_spread, 2),
+        warnings=warnings,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Short-Vol Specific Tail Analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ShortVolTailResult:
+    """Tail risk metrics specific to short-vol / dispersion strategies."""
+    # Convexity P&L analysis
+    gamma_pnl_tail: float           # Expected gamma P&L in tail events
+    vega_pnl_tail: float            # Expected vega P&L in tail events
+    convexity_drag: float           # Average daily convexity drag (negative = cost)
+
+    # Gap risk
+    overnight_gap_var95: float      # VaR95 of overnight gaps (close-to-open)
+    max_overnight_gap: float        # Worst historical overnight gap
+    gap_frequency: float            # Fraction of days with gap > 1%
+
+    # Vol-of-vol metrics
+    vvix_proxy: float               # Proxy for VVIX (vol-of-VIX, rolling std of VIX changes)
+    vix_mean: float
+    vix_convexity: float            # Kurtosis of VIX daily changes (>3 = dangerous for short vol)
+
+    # Dispersion-specific
+    corr_spike_severity: float      # Max 5-day increase in avg sector correlation
+    corr_spike_pnl_impact: float    # Estimated P&L from worst corr spike
+
+    warnings: List[str] = field(default_factory=list)
+
+
+def short_vol_tail_analysis(
+    prices: pd.DataFrame,
+    weights: Dict[str, float],
+    settings=None,
+) -> ShortVolTailResult:
+    """
+    Analyse tail risk specific to short volatility / dispersion strategies.
+
+    Covers: convexity drag, overnight gap risk, vol-of-vol, correlation spikes.
+    """
+    sectors = [t for t in weights if t in prices.columns]
+    spy_col = "SPY" if "SPY" in prices.columns else None
+    vix_col = next((c for c in prices.columns if "VIX" in c.upper()), None)
+
+    warnings: List[str] = []
+
+    # ── VIX / vol-of-vol metrics ─────────────────────────────────────────
+    vix_mean = 18.0
+    vvix_proxy = 0.0
+    vix_convexity = 3.0
+
+    if vix_col and vix_col in prices.columns:
+        vix = prices[vix_col].dropna()
+        if len(vix) >= 60:
+            vix_mean = float(vix.iloc[-60:].mean())
+            vix_changes = vix.diff().dropna()
+            vvix_proxy = float(vix_changes.iloc[-60:].std())
+            vix_convexity = float(vix_changes.kurtosis()) + 3  # excess + 3 = raw kurtosis
+            if vvix_proxy > 3.0:
+                warnings.append(f"VVIX proxy elevated ({vvix_proxy:.1f}) — vol-of-vol risk high for short-vol")
+
+    # ── Overnight gap risk ───────────────────────────────────────────────
+    overnight_gap_var95 = 0.0
+    max_gap = 0.0
+    gap_freq = 0.0
+
+    if spy_col and spy_col in prices.columns:
+        spy = prices[spy_col].dropna()
+        if len(spy) > 2:
+            # Proxy: daily open-to-close vs close-to-close gap
+            daily_ret = spy.pct_change().dropna()
+            # Use absolute value > 1% as "gap" proxy
+            gaps = daily_ret[daily_ret.abs() > 0.02]  # >2% moves as gap proxy
+            gap_freq = len(gaps) / len(daily_ret) if len(daily_ret) > 0 else 0
+            if len(daily_ret) > 20:
+                overnight_gap_var95 = float(np.percentile(-daily_ret.values, 95))
+                max_gap = float(daily_ret.min())
+            if max_gap < -0.05:
+                warnings.append(f"Max gap event: {max_gap:.1%} — short-vol can realize multi-sigma loss on gaps")
+
+    # ── Convexity P&L in tail events ─────────────────────────────────────
+    gamma_pnl_tail = 0.0
+    vega_pnl_tail = 0.0
+    convexity_drag = 0.0
+
+    if spy_col and spy_col in prices.columns:
+        spy_ret = prices[spy_col].pct_change().dropna()
+        if len(spy_ret) >= 100:
+            # Convexity drag = E[r²] (realized variance per day)
+            convexity_drag = -float((spy_ret ** 2).mean())  # Negative = cost for short gamma
+
+            # Tail events: days where SPY moved > 2 std
+            std_spy = float(spy_ret.std())
+            tail_days = spy_ret[spy_ret.abs() > 2 * std_spy]
+            if len(tail_days) > 0:
+                # Gamma P&L in tail: short gamma loses r² on large moves
+                gamma_pnl_tail = -float((tail_days ** 2).mean())
+                # Vega P&L: VIX spikes on large down-moves → short vega loses
+                vega_pnl_tail = float(tail_days[tail_days < 0].mean()) * 0.5  # VIX beta ~50% of SPY move
+
+    # ── Correlation spike analysis ───────────────────────────────────────
+    corr_spike_severity = 0.0
+    corr_spike_pnl = 0.0
+
+    if len(sectors) >= 3:
+        sec_ret = prices[sectors].pct_change().dropna()
+        if len(sec_ret) >= 60:
+            # Rolling 20-day average pairwise correlation
+            rolling_corrs = []
+            for i in range(20, len(sec_ret)):
+                window = sec_ret.iloc[i - 20: i]
+                corr_mat = window.corr().values
+                mask = ~np.eye(len(sectors), dtype=bool)
+                avg_corr = float(corr_mat[mask].mean())
+                rolling_corrs.append(avg_corr)
+
+            if rolling_corrs:
+                corr_series = np.array(rolling_corrs)
+                # 5-day change in correlation
+                corr_changes_5d = corr_series[5:] - corr_series[:-5]
+                if len(corr_changes_5d) > 0:
+                    corr_spike_severity = float(corr_changes_5d.max())
+                    # P&L impact: corr spike of X means dispersion trade loses ~X * gross_notional
+                    gross = sum(abs(weights.get(s, 0)) for s in sectors)
+                    corr_spike_pnl = -corr_spike_severity * gross * 0.5  # Approximate
+
+                    if corr_spike_severity > 0.15:
+                        warnings.append(
+                            f"Worst 5-day correlation spike: +{corr_spike_severity:.2f} — "
+                            f"dispersion trades face ~{corr_spike_pnl:.2%} P&L impact"
+                        )
+
+    return ShortVolTailResult(
+        gamma_pnl_tail=round(gamma_pnl_tail, 6),
+        vega_pnl_tail=round(vega_pnl_tail, 6),
+        convexity_drag=round(convexity_drag, 6),
+        overnight_gap_var95=round(overnight_gap_var95, 6),
+        max_overnight_gap=round(max_gap, 6),
+        gap_frequency=round(gap_freq, 4),
+        vvix_proxy=round(vvix_proxy, 3),
+        vix_mean=round(vix_mean, 2),
+        vix_convexity=round(vix_convexity, 2),
+        corr_spike_severity=round(corr_spike_severity, 4),
+        corr_spike_pnl_impact=round(corr_spike_pnl, 6),
+        warnings=warnings,
     )
