@@ -6,7 +6,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 from urllib.parse import quote
@@ -309,6 +309,10 @@ class DataLakeManager:
                     self.logger.exception("Failed to fetch history for %s: %s", t, repr(e))
 
         if not series_list:
+            self.logger.warning(
+                "_fetch_prices_block: all %d ticker requests failed — returning empty DataFrame",
+                len(fut_map),
+            )
             return pd.DataFrame()
 
         return pd.concat(series_list, axis=1).sort_index()
@@ -415,7 +419,7 @@ class DataLakeManager:
                 "asset": None,
                 "sharesNumber": None,
                 "marketValue": None,
-                "updated": datetime.utcnow().date().isoformat(),
+                "updated": datetime.now(timezone.utc).date().isoformat(),
             }
         )
 
@@ -448,6 +452,7 @@ class DataLakeManager:
         syms_unique = _dedupe_preserve_order(syms)
 
         if not syms_unique:
+            self.logger.warning("fetch_fundamentals_snapshot: ticker list empty after dedup/filter — returning empty")
             return pd.DataFrame(columns=["symbol", "price", "pe", "eps", "marketCap"])
 
         url = self._url_stable("/batch-quote")
@@ -601,6 +606,7 @@ class DataLakeManager:
             if str(t).strip() and not str(t).strip().startswith("^")
         ])
         if not syms:
+            self.logger.warning("fetch_extended_fundamentals: no valid tickers — returning empty")
             return pd.DataFrame(columns=["symbol"])
 
         self.logger.info("Fetching extended fundamentals for %s symbols", len(syms))

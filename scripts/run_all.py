@@ -36,6 +36,7 @@ Usage:
   python scripts/run_all.py --force-refresh  # Force FMP re-fetch
   python scripts/run_all.py --backtest       # Include full backtest (slower)
   python scripts/run_all.py --no-ml          # Skip ML layer
+  python scripts/run_all.py --alpha-research # Force OOS alpha research (weekly auto)
 """
 from __future__ import annotations
 
@@ -192,6 +193,7 @@ def run_pipeline(
     run_backtest: bool = False,
     run_ml: bool = True,
     run_optimizer: bool = True,
+    run_alpha_research: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute all pipeline steps in sequence.
@@ -568,6 +570,52 @@ def run_pipeline(
         status["steps_ok"].append("backtest_skipped")
 
     # ──────────────────────────────────────────────────────────────────────────
+    # STEP 3b [OPTIONAL]: Alpha Research (weekly OOS validation — non-fatal)
+    # Runs only when --alpha-research flag is set OR last report is > 7 days old
+    # ──────────────────────────────────────────────────────────────────────────
+    _run_alpha = run_alpha_research
+    if not _run_alpha:
+        # Check for stale report (> 7 days)
+        import glob as _glob
+        _report_dir = ROOT / "agents" / "methodology" / "reports"
+        _reports = sorted(_glob.glob(str(_report_dir / "*alpha_research*.json")))
+        if _reports:
+            try:
+                _last_report_date = date.fromisoformat(_reports[-1].split("\\")[-1].split("/")[-1][:10])
+                _run_alpha = (date.today() - _last_report_date).days > 7
+            except Exception:
+                _run_alpha = True
+        else:
+            _run_alpha = True  # No report yet — run now
+
+    if _run_alpha:
+        try:
+            from analytics.alpha_research import run_alpha_research
+            from db.reader import DatabaseReader as _AlphaDBR
+            _alpha_prices = _AlphaDBR(settings.db_path).read_prices()
+            if _alpha_prices is not None and len(_alpha_prices) >= 600:
+                _alpha_report = run_alpha_research(
+                    _alpha_prices[settings.sector_list()].dropna(how="all"),
+                    settings,
+                    include_gpt=False,   # GPT optional; skip in automated pipeline
+                )
+                status["steps_ok"].append("alpha_research")
+                status["alpha_oos_sharpe"] = _alpha_report.ensemble_sharpe
+                logger.info(
+                    "Step 3b OK — OOS ensemble Sharpe=%.3f | recs=%d",
+                    _alpha_report.ensemble_sharpe, len(_alpha_report.recommendations),
+                )
+            else:
+                logger.info("Step 3b: Insufficient price history for alpha research — skipping")
+                status["steps_ok"].append("alpha_research_skipped")
+        except Exception as exc:
+            logger.warning("Step 3b: Alpha research failed (non-fatal) — %s", exc)
+            status["steps_failed"].append("alpha_research")
+    else:
+        logger.debug("Step 3b: Alpha research report is fresh — skipping")
+        status["steps_ok"].append("alpha_research_fresh")
+
+    # ──────────────────────────────────────────────────────────────────────────
     # STEP 4 [OPTIONAL]: ML signal quality
     # ──────────────────────────────────────────────────────────────────────────
     quality_scores: Dict[str, float] = {}
@@ -919,6 +967,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip ML signal quality layer",
     )
+    parser.add_argument(
+        "--alpha-research",
+        action="store_true",
+        help="Force alpha research OOS validation (otherwise runs only if report > 7 days old)",
+    )
     return parser.parse_args()
 
 
@@ -928,6 +981,7 @@ if __name__ == "__main__":
         force_refresh=args.force_refresh,
         run_backtest=args.backtest,
         run_ml=not args.no_ml,
+        run_alpha_research=args.alpha_research,
     )
     failed = result.get("steps_failed", [])
     # Exit code 0 if REQUIRED steps succeeded, 1 if any required step failed
