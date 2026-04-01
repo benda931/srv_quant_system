@@ -700,6 +700,7 @@ def run_pipeline(
     # STEP 6 [OPTIONAL]: Stress + Portfolio Risk
     # ──────────────────────────────────────────────────────────────────────────
     stress_results = None
+    mc_stress_result = None
     risk_report = None
     try:
         from analytics.stress import StressEngine
@@ -709,6 +710,24 @@ def run_pipeline(
     except Exception as exc:
         logger.warning("Step 6a: Stress engine failed (non-fatal) — %s", exc)
         status["steps_failed"].append("stress")
+
+    # Monte Carlo stress simulation
+    try:
+        from analytics.stress import MonteCarloStressEngine
+        from db.reader import DatabaseReader as _MCReader
+        _mc_prices = _MCReader(settings.db_path).read_prices()
+        if _mc_prices is not None and len(_mc_prices) > 60:
+            mc_stress_result = MonteCarloStressEngine(
+                n_simulations=10_000, horizon_days=21,
+            ).run(master_df, _mc_prices, settings)
+            status["steps_ok"].append("mc_stress")
+            status["mc_var95"] = round(mc_stress_result.var_95 * 100, 2)
+        else:
+            logger.info("Step 6a-MC: Insufficient prices for Monte Carlo — skipping")
+            status["steps_ok"].append("mc_stress_skipped")
+    except Exception as exc:
+        logger.warning("Step 6a-MC: Monte Carlo stress failed (non-fatal) — %s", exc)
+        status["steps_failed"].append("mc_stress")
 
     try:
         from analytics.portfolio_risk import PortfolioRiskEngine

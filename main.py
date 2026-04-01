@@ -832,6 +832,7 @@ def build_app() -> dash.Dash:
 
     # ── Stress Testing (fast — deterministic, no simulation) ────────────────
     _stress_results: Optional[List] = None
+    _mc_stress_result = None
     try:
         from analytics.stress import StressEngine
         _stress_results = StressEngine().run_all(master_df, settings)
@@ -839,6 +840,18 @@ def build_app() -> dash.Dash:
     except Exception as _e:
         logger.exception("Stress engine failed — tab will show error")
         _engine_errors["stress"] = str(_e)
+
+    try:
+        from analytics.stress import MonteCarloStressEngine
+        _mc_prices = engine.prices
+        if _mc_prices is not None and len(_mc_prices) > 60:
+            _mc_stress_result = MonteCarloStressEngine(
+                n_simulations=10_000, horizon_days=21,
+            ).run(master_df, _mc_prices, settings)
+            logger.info("MC stress: VaR95=%.2f%% CVaR95=%.2f%%",
+                        _mc_stress_result.var_95 * 100, _mc_stress_result.cvar_95 * 100)
+    except Exception as _mce:
+        logger.warning("MC stress failed (non-fatal): %s", _mce)
 
     # ── Portfolio Risk (fast — Ledoit-Wolf on existing prices) ───────────────
     _risk_report = None
@@ -1803,7 +1816,7 @@ def build_app() -> dash.Dash:
                                 html.Div("ניתוח קדימה: השפעת תרחישי קיצון על הספר, P&L מוערך ואמינות האות בכל משטר.", className="text-muted small mb-3", style=RTL_STYLE),
                             ]
                         ),
-                        build_stress_tab(_stress_results, master_df),
+                        build_stress_tab(_stress_results, master_df, mc_result=_mc_stress_result),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},

@@ -117,8 +117,8 @@ def _csv_download_link(df: pd.DataFrame, filename: str, label: str = "Export CSV
     )
 
 
-def build_stress_tab(stress_results: Optional[List[Any]], master_df: Optional[pd.DataFrame] = None) -> html.Div:
-    """Full stress-testing tab layout."""
+def build_stress_tab(stress_results: Optional[List[Any]], master_df: Optional[pd.DataFrame] = None, mc_result: Any = None) -> html.Div:
+    """Full stress-testing tab layout with optional Monte Carlo section."""
 
     if not stress_results:
         return html.Div(
@@ -247,6 +247,81 @@ def build_stress_tab(stress_results: Optional[List[Any]], master_df: Optional[pd
         style={"fontSize": "12px"},
     )
 
+    # ── Monte Carlo section ────────────────────────────────────────────────
+    mc_section = html.Div()
+    if mc_result is not None:
+        mc = mc_result
+        # P&L distribution histogram
+        pnl_pcts = mc.pnl_distribution * 100  # convert to %
+        mc_hist_fig = go.Figure()
+        mc_hist_fig.add_trace(go.Histogram(
+            x=pnl_pcts,
+            nbinsx=80,
+            marker_color="rgba(13, 202, 240, 0.6)",
+            name="P&L Distribution",
+        ))
+        # VaR lines
+        mc_hist_fig.add_vline(x=mc.var_95 * 100, line_dash="dash", line_color="#ffc107",
+                              annotation_text=f"VaR 95%: {mc.var_95*100:.2f}%",
+                              annotation_position="top left",
+                              annotation_font_color="#ffc107")
+        mc_hist_fig.add_vline(x=mc.var_99 * 100, line_dash="dash", line_color="#dc3545",
+                              annotation_text=f"VaR 99%: {mc.var_99*100:.2f}%",
+                              annotation_position="top left",
+                              annotation_font_color="#dc3545")
+        mc_hist_fig.add_vline(x=mc.cvar_95 * 100, line_dash="dot", line_color="#e74c3c",
+                              annotation_text=f"CVaR 95%: {mc.cvar_95*100:.2f}%",
+                              annotation_position="bottom left",
+                              annotation_font_color="#e74c3c")
+        mc_hist_fig.update_layout(
+            template="plotly_dark",
+            height=350,
+            title=f"Monte Carlo P&L Distribution ({mc.n_simulations:,} simulations, 21-day horizon)",
+            xaxis_title="Portfolio P&L (%)",
+            yaxis_title="Frequency",
+            margin=dict(l=10, r=10, t=50, b=30),
+            showlegend=False,
+        )
+
+        # KPI row
+        var95_color = "danger" if mc.var_95 < -0.03 else "warning"
+        mc_kpi_row = dbc.Row([
+            _kpi("VaR 95%", _pct(mc.var_95), var95_color),
+            _kpi("CVaR 95%", _pct(mc.cvar_95), "danger"),
+            _kpi("VaR 99%", _pct(mc.var_99), "danger"),
+            _kpi("Mean P&L", _pct(mc.mean_pnl), "info"),
+            _kpi("Skewness", f"{mc.skewness:+.2f}", "warning" if mc.skewness < -0.5 else "secondary"),
+            _kpi("Kurtosis", f"{mc.kurtosis:.1f}", "warning" if mc.kurtosis > 3 else "secondary"),
+        ], className="g-2 mb-3")
+
+        # Channel attribution
+        ch_fig = go.Figure(go.Bar(
+            x=["SPY", "TNX", "DXY", "Idio"],
+            y=[mc.mean_spy_channel * 100, mc.mean_tnx_channel * 100,
+               mc.mean_dxy_channel * 100, mc.mean_idio_channel * 100],
+            marker_color=["#0dcaf0", "#ffc107", "#20c997", "#6c757d"],
+            text=[f"{v*100:.3f}%" for v in [mc.mean_spy_channel, mc.mean_tnx_channel,
+                                             mc.mean_dxy_channel, mc.mean_idio_channel]],
+            textposition="outside",
+        ))
+        ch_fig.update_layout(
+            template="plotly_dark", height=260,
+            title="Mean P&L Attribution by Channel",
+            yaxis_title="Mean P&L (%)", showlegend=False,
+            margin=dict(l=10, r=10, t=50, b=30),
+        )
+
+        mc_section = dbc.Card([
+            dbc.CardHeader(html.H6("🎲 Monte Carlo Stress — 10,000 Simulations", className="mb-0 text-center")),
+            dbc.CardBody([
+                mc_kpi_row,
+                dbc.Row([
+                    dbc.Col(dcc.Graph(figure=mc_hist_fig, config={"displayModeBar": False}), md=8),
+                    dbc.Col(dcc.Graph(figure=ch_fig, config={"displayModeBar": False}), md=4),
+                ], className="g-2"),
+            ]),
+        ], className="mb-3", style={"borderTop": "3px solid var(--bs-info)"})
+
     return html.Div(
         [
             kpi_row,
@@ -257,6 +332,7 @@ def build_stress_tab(stress_results: Optional[List[Any]], master_df: Optional[pd
                 ],
                 className="mb-3 g-2",
             ),
+            mc_section,
             dbc.Card(
                 dbc.CardBody(
                     [
