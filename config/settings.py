@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(".env", ".env.auto_improve"),
         env_file_encoding="utf-8",
         extra="ignore",
         validate_assignment=True,

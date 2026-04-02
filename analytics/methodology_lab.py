@@ -1000,6 +1000,276 @@ ALL_METHODOLOGIES.extend([
     AlphaWhitelistExtended(),
     AlphaWhitelistMR(z_entry=0.5, max_hold=30, momentum_threshold=0.08),
 ])
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NEW STRATEGIES — Sector Relative Momentum + VRP + Short-Term MR
+#
+# The PCA z-score strategies have negative alpha because:
+#   1. PCA residuals mean-revert in ~1 day (HL=1d) but strategies hold 20-45d
+#   2. IC (z → 20d fwd return) ≈ 0 across all sectors
+#
+# These new strategies exploit what ACTUALLY works on sector ETFs:
+#   A. Relative Momentum: buy sectors outperforming SPY, short underperformers
+#   B. Mean-Reversion with short holding period (1-5 days, matching HL=1d)
+#   C. VRP-filtered entry: only enter when volatility risk premium is favorable
+#   D. Momentum + Value combo: momentum for direction, z-score for timing
+# ═════════════════════════════════════════════════════════════════════════════
+
+class RelativeMomentum(Methodology):
+    """
+    Sector Relative Momentum — the most reliable alpha source on sector ETFs.
+
+    Ranks sectors by 21d relative return vs SPY.
+    Goes LONG top N sectors, SHORT bottom N sectors.
+    Rebalances every `rebal_days`.
+
+    Academic evidence: Moskowitz & Grinblatt (1999) — Industry Momentum.
+    """
+    name = "RELATIVE_MOMENTUM"
+    description = "Cross-sectional sector momentum: long top 3, short bottom 3 by 21d relative return"
+
+    def __init__(self, lookback: int = 21, top_n: int = 3, rebal_days: int = 21,
+                 max_weight: float = 0.10, skip_days: int = 1, vol_scale: bool = True):
+        self.lookback = lookback
+        self.top_n = top_n
+        self.rebal_days = rebal_days
+        self.max_weight = max_weight
+        self.skip_days = skip_days  # Skip most recent N days (avoid reversal)
+        self.vol_scale = vol_scale
+
+    def should_enter(self, ctx):
+        momentum = ctx.get("rel_momentum_ranked")
+        if momentum is None:
+            # Fallback: use raw momentum
+            mom = ctx.get("momentum", 0)
+            rank = ctx.get("momentum_rank", 0.5)
+            n_sectors = ctx.get("n_sectors", 11)
+            if rank is None:
+                return None
+            regime = ctx.get("regime", "NORMAL")
+            if regime == "CRISIS":
+                return None
+            # Top quintile → LONG, bottom quintile → SHORT
+            if rank <= self.top_n:
+                w = self.max_weight
+                if self.vol_scale:
+                    vol = ctx.get("vol", 0.20)
+                    w = min(self.max_weight, 0.10 * 0.15 / max(vol, 0.05))
+                return (ctx["ticker"], "LONG", w, {"entry_mom": mom, "rank": rank})
+            elif rank >= n_sectors - self.top_n + 1:
+                w = self.max_weight
+                if self.vol_scale:
+                    vol = ctx.get("vol", 0.20)
+                    w = min(self.max_weight, 0.10 * 0.15 / max(vol, 0.05))
+                return (ctx["ticker"], "SHORT", w, {"entry_mom": mom, "rank": rank})
+        return None
+
+    def should_exit(self, trade, ctx):
+        days = ctx.get("days_held", 0)
+        if days >= self.rebal_days:
+            return "REBALANCE"
+        if ctx.get("regime") == "CRISIS":
+            return "REGIME_EXIT"
+        # Exit if momentum rank flipped (top → bottom or vice versa)
+        rank = ctx.get("momentum_rank", 0.5)
+        n_sectors = ctx.get("n_sectors", 11)
+        mid = n_sectors / 2
+        if trade.direction == "LONG" and rank > mid + 2:
+            return "RANK_FLIP"
+        if trade.direction == "SHORT" and rank < mid - 2:
+            return "RANK_FLIP"
+        return None
+
+    def get_params(self):
+        return {"lookback": self.lookback, "top_n": self.top_n,
+                "rebal_days": self.rebal_days, "vol_scale": self.vol_scale}
+
+
+class ShortTermMeanReversion(Methodology):
+    """
+    Short-term mean reversion matching the actual HL=1-3 days of PCA residuals.
+
+    Enters when z-score is extreme (|z| > threshold), holds only 1-5 days.
+    This matches the empirical autocorrelation structure of sector ETF residuals.
+    """
+    name = "SHORT_TERM_MR"
+    description = "1-5 day mean-reversion: matches actual HL of PCA residuals"
+
+    def __init__(self, z_entry: float = 1.5, max_hold: int = 5, max_weight: float = 0.08):
+        self.z_entry = z_entry
+        self.max_hold = max_hold
+        self.max_weight = max_weight
+
+    def should_enter(self, ctx):
+        z = ctx.get("z_score", 0)
+        regime = ctx.get("regime", "NORMAL")
+        if regime in ("CRISIS", "TENSION"):
+            return None
+        if abs(z) >= self.z_entry:
+            direction = "LONG" if z < 0 else "SHORT"
+            weight = min(self.max_weight, abs(z) / 20.0)
+            return (ctx["ticker"], direction, weight, {"entry_z": z})
+        return None
+
+    def should_exit(self, trade, ctx):
+        days = ctx.get("days_held", 0)
+        if days >= self.max_hold:
+            return "TIME_EXIT"
+        z = ctx.get("current_z", trade.entry_z)
+        # Exit when z crosses zero (mean-reverted)
+        if trade.direction == "LONG" and z > 0:
+            return "MR_COMPLETE"
+        if trade.direction == "SHORT" and z < 0:
+            return "MR_COMPLETE"
+        if ctx.get("regime") == "CRISIS":
+            return "REGIME_EXIT"
+        return None
+
+    def get_params(self):
+        return {"z_entry": self.z_entry, "max_hold": self.max_hold}
+
+
+class MomentumValueCombo(Methodology):
+    """
+    Momentum for direction + Z-score for timing.
+
+    Only enters in the direction of momentum (trending sectors),
+    but uses z-score dips as entry points (buy the dip in winners,
+    sell the rally in losers).
+
+    This combines the two strongest edges:
+    - Momentum: positive IC at 21d horizon on sector ETFs
+    - Mean-reversion: z-score timing for better entry price
+    """
+    name = "MOMENTUM_VALUE_COMBO"
+    description = "Momentum direction + z-score dip timing — trend-following with MR entry"
+
+    def __init__(self, momentum_lookback: int = 42, z_dip: float = 0.5,
+                 max_hold: int = 21, max_weight: float = 0.08, top_n: int = 4):
+        self.momentum_lookback = momentum_lookback
+        self.z_dip = z_dip
+        self.max_hold = max_hold
+        self.max_weight = max_weight
+        self.top_n = top_n
+
+    def should_enter(self, ctx):
+        regime = ctx.get("regime", "NORMAL")
+        if regime == "CRISIS":
+            return None
+
+        rank = ctx.get("momentum_rank", 0.5)
+        z = ctx.get("z_score", 0)
+        n_sectors = ctx.get("n_sectors", 11)
+
+        # Top momentum sectors + z-score dip → LONG
+        if rank is not None and rank <= self.top_n and z < -self.z_dip:
+            w = min(self.max_weight, 0.05 + abs(z) / 30.0)
+            return (ctx["ticker"], "LONG", w, {"entry_z": z, "rank": rank})
+
+        # Bottom momentum sectors + z-score spike → SHORT
+        if rank is not None and rank >= n_sectors - self.top_n + 1 and z > self.z_dip:
+            w = min(self.max_weight, 0.05 + abs(z) / 30.0)
+            return (ctx["ticker"], "SHORT", w, {"entry_z": z, "rank": rank})
+
+        return None
+
+    def should_exit(self, trade, ctx):
+        days = ctx.get("days_held", 0)
+        if days >= self.max_hold:
+            return "TIME_EXIT"
+        z = ctx.get("current_z", trade.entry_z)
+        # Profit: z normalized back to 0
+        if trade.direction == "LONG" and z > 0.3:
+            return "PROFIT_TARGET"
+        if trade.direction == "SHORT" and z < -0.3:
+            return "PROFIT_TARGET"
+        if ctx.get("regime") == "CRISIS":
+            return "REGIME_EXIT"
+        return None
+
+    def get_params(self):
+        return {"momentum_lookback": self.momentum_lookback, "z_dip": self.z_dip,
+                "max_hold": self.max_hold, "top_n": self.top_n}
+
+
+class LowVolMomentum(Methodology):
+    """
+    Low-volatility momentum: long low-vol winners, short high-vol losers.
+
+    Combines vol anomaly (low-vol outperforms) with momentum.
+    Only enters sectors in the bottom 50% of vol AND top momentum,
+    or top 50% of vol AND bottom momentum.
+    """
+    name = "LOW_VOL_MOMENTUM"
+    description = "Low-vol + momentum combo: long calm winners, short volatile losers"
+
+    def __init__(self, max_hold: int = 21, max_weight: float = 0.08, top_n: int = 3):
+        self.max_hold = max_hold
+        self.max_weight = max_weight
+        self.top_n = top_n
+
+    def should_enter(self, ctx):
+        regime = ctx.get("regime", "NORMAL")
+        if regime == "CRISIS":
+            return None
+
+        rank = ctx.get("momentum_rank")
+        vol = ctx.get("vol", 0.20)
+        median_vol = ctx.get("median_vol", 0.15)
+        n_sectors = ctx.get("n_sectors", 11)
+
+        if rank is None:
+            return None
+
+        # LONG: top momentum + below-median vol
+        if rank <= self.top_n and vol < median_vol:
+            w = min(self.max_weight, 0.10 * median_vol / max(vol, 0.05))
+            return (ctx["ticker"], "LONG", w, {"vol": vol, "rank": rank})
+
+        # SHORT: bottom momentum + above-median vol
+        if rank >= n_sectors - self.top_n + 1 and vol > median_vol:
+            w = min(self.max_weight, 0.06)
+            return (ctx["ticker"], "SHORT", w, {"vol": vol, "rank": rank})
+
+        return None
+
+    def should_exit(self, trade, ctx):
+        days = ctx.get("days_held", 0)
+        if days >= self.max_hold:
+            return "REBALANCE"
+        if ctx.get("regime") == "CRISIS":
+            return "REGIME_EXIT"
+        return None
+
+    def get_params(self):
+        return {"max_hold": self.max_hold, "top_n": self.top_n}
+
+
+# ── Add new strategies to ALL_METHODOLOGIES ──
+ALL_METHODOLOGIES.extend([
+    RelativeMomentum(),
+    RelativeMomentum(lookback=42, rebal_days=42, top_n=3),
+    ShortTermMeanReversion(),
+    ShortTermMeanReversion(z_entry=2.0, max_hold=3),
+    MomentumValueCombo(),
+    MomentumValueCombo(momentum_lookback=21, z_dip=0.3, max_hold=15),
+    LowVolMomentum(),
+])
+
+# Names for variants
+for m in ALL_METHODOLOGIES:
+    if not hasattr(m, '_name_set'):
+        m._name_set = True
+_idx_rm42 = len(ALL_METHODOLOGIES) - 6
+ALL_METHODOLOGIES[_idx_rm42].name = "RELATIVE_MOMENTUM_42D"
+ALL_METHODOLOGIES[_idx_rm42].description = "42-day sector momentum, rebal monthly"
+_idx_stmr2 = len(ALL_METHODOLOGIES) - 4
+ALL_METHODOLOGIES[_idx_stmr2].name = "SHORT_TERM_MR_TIGHT"
+ALL_METHODOLOGIES[_idx_stmr2].description = "Ultra-short MR: z>2.0, hold<=3d"
+_idx_mvc = len(ALL_METHODOLOGIES) - 2
+ALL_METHODOLOGIES[_idx_mvc].name = "MOMENTUM_VALUE_FAST"
+ALL_METHODOLOGIES[_idx_mvc].description = "Fast momentum-value: 21d lookback, z_dip=0.3, 15d hold"
 # Give unique names to variants
 ALL_METHODOLOGIES[1].name = "PCA_Z_REVERSAL_TIGHT"
 ALL_METHODOLOGIES[1].description = "Tighter entry (z>0.7), faster exit (15%), shorter hold (30d)"
@@ -1142,13 +1412,27 @@ class MethodologyLab:
         for anchor in anchors:
             dt = self.rel_rets.index[anchor]
 
-            # Build context for each sector
+            # Build context for each sector — including cross-sectional ranks
+            # Pre-compute momentum ranks at this anchor
+            _mom_vals = {}
+            _vol_vals = {}
+            for s in self.sectors:
+                _m = self.momentum[s].iloc[anchor] if math.isfinite(self.momentum[s].iloc[anchor]) else 0
+                _v = self.vol[s].iloc[anchor] if math.isfinite(self.vol[s].iloc[anchor]) else 0.20
+                _mom_vals[s] = _m
+                _vol_vals[s] = _v
+
+            # Rank sectors by momentum (1 = highest momentum = best)
+            _sorted_mom = sorted(_mom_vals.items(), key=lambda x: x[1], reverse=True)
+            _mom_rank = {s: rank + 1 for rank, (s, _) in enumerate(_sorted_mom)}
+            _median_vol = float(np.median(list(_vol_vals.values()))) if _vol_vals else 0.15
+
             for s in self.sectors:
                 z = self.z_scores[s].iloc[anchor]
                 if not math.isfinite(z):
                     continue
 
-                _mom = self.momentum[s].iloc[anchor] if math.isfinite(self.momentum[s].iloc[anchor]) else 0
+                _mom = _mom_vals.get(s, 0)
                 _vix = self.vix.iloc[anchor] if math.isfinite(self.vix.iloc[anchor]) else 18
                 ctx = {
                     "ticker": s,
@@ -1157,9 +1441,12 @@ class MethodologyLab:
                     "avg_corr": self.avg_corr.iloc[anchor],
                     "vix": _vix,
                     "momentum": _mom,
-                    "rel_momentum": _mom,  # Same as momentum (already relative to SPY)
-                    "vol": self.vol[s].iloc[anchor] if math.isfinite(self.vol[s].iloc[anchor]) else 0.20,
+                    "rel_momentum": _mom,
+                    "vol": _vol_vals.get(s, 0.20),
                     "dispersion": self.dispersion.iloc[anchor] if math.isfinite(self.dispersion.iloc[anchor]) else 0,
+                    "momentum_rank": _mom_rank.get(s),
+                    "n_sectors": len(self.sectors),
+                    "median_vol": _median_vol,
                 }
 
                 # Check entry (only if no existing trade for this sector)
