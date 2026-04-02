@@ -612,6 +612,32 @@ class AutoImprover:
                 "context": {"strategies": len(all_results), "positive": 0},
             })
 
+        # 6. Strategy diversity check — are we using the best available?
+        all_results = metrics.get("all_results", {})
+        if all_results:
+            positive_strats = {k: v for k, v in all_results.items() if v.get("sharpe", 0) > 0}
+            if len(positive_strats) >= 2:
+                best_2 = sorted(positive_strats.items(), key=lambda x: x[1]["sharpe"], reverse=True)[:3]
+                weaknesses.append({
+                    "type": "strategy_diversification",
+                    "description": f"{len(positive_strats)} positive strategies available — consider ensemble allocation",
+                    "severity": "low",
+                    "context": {
+                        "strategies": {k: round(v["sharpe"], 3) for k, v in best_2},
+                        "n_positive": len(positive_strats),
+                    },
+                })
+
+            # Check if any negative strategies should be disabled
+            worst_strats = [k for k, v in all_results.items() if v.get("sharpe", 0) < -0.5 and v.get("total_trades", 0) > 50]
+            if len(worst_strats) > 5:
+                weaknesses.append({
+                    "type": "dead_strategies",
+                    "description": f"{len(worst_strats)} strategies with Sharpe < -0.5 — consider disabling",
+                    "severity": "low",
+                    "context": {"dead_count": len(worst_strats), "strategies": worst_strats[:5]},
+                })
+
         # Sort by severity
         severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         weaknesses.sort(key=lambda w: severity_order.get(w["severity"], 99))

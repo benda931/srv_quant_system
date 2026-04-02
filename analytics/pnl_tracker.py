@@ -139,6 +139,16 @@ class PnLResult:
     # ── Attribution: sector contribution time series ─────────────────────
     sector_contribution: pd.DataFrame  # DatetimeIndex × sector columns
 
+    # ── Factor attribution ──────────────────────────────────────────────
+    factor_attribution: Optional[Dict[str, float]] = None  # {factor: cumulative P&L contribution}
+    # Keys: "spy_beta", "rates_tnx", "dollar_dxy", "credit_hyg", "idiosyncratic"
+    factor_daily: Optional[pd.DataFrame] = None  # DatetimeIndex × factor columns
+
+    # ── Performance ratios ──────────────────────────────────────────────
+    sortino: float = 0.0
+    information_ratio: float = 0.0    # vs SPY benchmark
+    turnover_annual: float = 0.0
+
     # ── Summary table ────────────────────────────────────────────────────
     summary_df: pd.DataFrame
 
@@ -405,6 +415,62 @@ class PnLTracker:
             })
         summary_df = pd.DataFrame(summary_rows).sort_values("total_pnl", ascending=False)
 
+        # ── Factor attribution (SPY/TNX/DXY/HYG/idiosyncratic) ─────────
+        factor_attribution = None
+        factor_daily_df = None
+        sortino_ratio = 0.0
+        info_ratio = 0.0
+        turnover = 0.0
+
+        try:
+            factor_cols = {}
+            spy_col = self._settings.spy_ticker if hasattr(self._settings, 'spy_ticker') else "SPY"
+            if spy_col in log_rets.columns:
+                factor_cols["spy_beta"] = log_rets[spy_col]
+            for name, col in [("rates_tnx", "^TNX"), ("dollar_dxy", "DX-Y.NYB"), ("credit_hyg", "HYG")]:
+                if col in prices_df.columns:
+                    factor_cols[name] = prices_df[col].pct_change().reindex(daily_pnl.index).fillna(0)
+
+            if factor_cols:
+                F = pd.DataFrame(factor_cols).reindex(daily_pnl.index).fillna(0)
+                # Regress portfolio P&L on factors
+                F_with_const = np.column_stack([np.ones(len(F)), F.values])
+                y = daily_pnl.values
+                try:
+                    betas, _, _, _ = np.linalg.lstsq(F_with_const, y, rcond=None)
+                    factor_pnl = F.values @ betas[1:]
+                    idio_pnl = y - factor_pnl
+
+                    factor_daily_df = pd.DataFrame(index=daily_pnl.index)
+                    for i, fname in enumerate(factor_cols.keys()):
+                        factor_daily_df[fname] = F.values[:, i] * betas[i + 1]
+                    factor_daily_df["idiosyncratic"] = idio_pnl
+
+                    factor_attribution = {}
+                    for col in factor_daily_df.columns:
+                        factor_attribution[col] = round(float(factor_daily_df[col].sum()), 6)
+                except np.linalg.LinAlgError:
+                    pass
+
+            # Sortino ratio
+            downside = daily_pnl[daily_pnl < 0]
+            dd_std = float(downside.std()) if len(downside) > 5 else pnl_vol
+            sortino_ratio = float(avg_pnl / dd_std * np.sqrt(252)) if dd_std > 1e-10 else 0.0
+
+            # Information ratio (vs SPY)
+            if spy_col in log_rets.columns:
+                spy_daily = log_rets[spy_col].reindex(daily_pnl.index).fillna(0)
+                active_ret = daily_pnl - spy_daily
+                te = float(active_ret.std())
+                info_ratio = float(active_ret.mean() / te * np.sqrt(252)) if te > 1e-10 else 0.0
+
+            # Turnover estimate (from weight changes)
+            if not sector_contrib.empty:
+                weight_changes = sector_contrib.diff().abs().sum(axis=1)
+                turnover = float(weight_changes.mean() * 252)  # Annualized
+        except Exception as _attr_err:
+            self._log.debug("Factor attribution failed: %s", _attr_err)
+
         self._log.info(
             "P&L tracker: %d days | total=%.2f%% | Sharpe=%.2f | MaxDD=%.2f%% | HR=%.1f%%",
             n_days, total_pnl * 100, sharpe, max_dd * 100, hit_rate * 100,
@@ -432,6 +498,11 @@ class PnLTracker:
             regime_pnl=regime_pnl_results,
             monthly_returns=monthly_pivot,
             sector_contribution=sector_contrib,
+            factor_attribution=factor_attribution,
+            factor_daily=factor_daily_df,
+            sortino=round(sortino_ratio, 4),
+            information_ratio=round(info_ratio, 4),
+            turnover_annual=round(turnover, 2),
             summary_df=summary_df,
         )
 

@@ -2908,28 +2908,73 @@ def build_app() -> dash.Dash:
         prevent_initial_call=True,
     )
     def auto_refresh_overview(n_intervals, active_tab):
-        """Refresh regime hero and VIX display every 5 minutes when on overview."""
+        """
+        Refresh regime hero + VIX display every 5 minutes.
+        Reads fresh prices from parquet for live VIX/SPY updates.
+        """
         if active_tab != "tab-overview":
             raise dash.exceptions.PreventUpdate
         try:
-            # Re-read latest row from master_df (engine already loaded)
-            _row0 = master_df.iloc[0].to_dict() if len(master_df) else {}
-            regime_component = build_regime_hero(_row0)
+            import datetime as _dt
 
-            # Build a compact VIX status line
-            _vix_val = float(master_df["vix_level"].iloc[0]) if "vix_level" in master_df.columns else float("nan")
+            # Try reading fresh VIX from parquet (updates from pipeline)
+            _vix_val = float("nan")
+            _spy_val = float("nan")
+            _spy_chg = float("nan")
+            try:
+                _fresh_prices = pd.read_parquet(
+                    settings.project_root / "data_lake" / "parquet" / "prices.parquet"
+                )
+                _vix_col = next((c for c in _fresh_prices.columns if "VIX" in c.upper()), None)
+                if _vix_col:
+                    _vix_s = _fresh_prices[_vix_col].dropna()
+                    if len(_vix_s) >= 2:
+                        _vix_val = float(_vix_s.iloc[-1])
+                if "SPY" in _fresh_prices.columns:
+                    _spy_s = _fresh_prices["SPY"].dropna()
+                    if len(_spy_s) >= 2:
+                        _spy_val = float(_spy_s.iloc[-1])
+                        _spy_chg = float(_spy_s.iloc[-1] / _spy_s.iloc[-2] - 1)
+            except Exception:
+                pass
+
+            # Fallback to startup master_df
+            if not np.isfinite(_vix_val):
+                _vix_val = float(master_df["vix_level"].iloc[0]) if "vix_level" in master_df.columns else float("nan")
+
             _vix_pct = float(master_df["vix_percentile"].iloc[0]) if "vix_percentile" in master_df.columns else float("nan")
             _ms_val = str(master_df["market_state"].iloc[0]) if "market_state" in master_df.columns else "—"
-            import datetime as _dt
+
+            # Regime classification from live VIX
+            if np.isfinite(_vix_val):
+                if _vix_val > 32:
+                    _ms_val = "CRISIS"
+                elif _vix_val > 21:
+                    _ms_val = "TENSION"
+                elif _vix_val > 16:
+                    _ms_val = "NORMAL"
+                else:
+                    _ms_val = "CALM"
+
+            _row0 = master_df.iloc[0].to_dict() if len(master_df) else {}
+            _row0["market_state"] = _ms_val
+            if np.isfinite(_vix_val):
+                _row0["vix_level"] = _vix_val
+            regime_component = build_regime_hero(_row0)
+
             _ts_now = _dt.datetime.now().strftime("%H:%M:%S")
+            _regime_color = {"CALM": "success", "NORMAL": "info", "TENSION": "warning", "CRISIS": "danger"}.get(_ms_val, "secondary")
+
+            _spy_str = f"SPY: ${_spy_val:.2f} ({_spy_chg:+.2%})" if np.isfinite(_spy_val) else ""
             vix_component = dbc.Alert(
                 [
-                    html.Span(f"Auto-refresh {_ts_now} | ", className="text-muted small"),
-                    html.Span(f"Regime: {_ms_val}", className="fw-bold small me-3"),
-                    html.Span(f"VIX: {_vix_val:.1f}" if _vix_val == _vix_val else "VIX: —",
-                              className="small me-2"),
-                    html.Span(f"(Pct: {_vix_pct:.0%})" if _vix_pct == _vix_pct else "",
-                              className="text-muted small"),
+                    html.Span(f"🔄 {_ts_now} | ", className="text-muted small"),
+                    dbc.Badge(_ms_val, color=_regime_color, className="me-2", style={"fontSize": "10px"}),
+                    html.Span(f"VIX: {_vix_val:.1f}" if np.isfinite(_vix_val) else "VIX: —",
+                              className="small fw-bold me-2"),
+                    html.Span(f"({_vix_pct:.0%}ile)" if np.isfinite(_vix_pct) else "",
+                              className="text-muted small me-3"),
+                    html.Span(_spy_str, className="small me-2"),
                 ],
                 color="dark",
                 className="py-1 px-3 mb-2",
