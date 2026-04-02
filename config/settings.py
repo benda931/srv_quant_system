@@ -96,6 +96,8 @@ class Settings(BaseSettings):
     vol_tickers: Dict[str, str] = Field(
         default_factory=lambda: {
             "VIX": "^VIX",
+            "VVIX": "^VVIX",
+            "SKEW": "^SKEW",
         }
     )
 

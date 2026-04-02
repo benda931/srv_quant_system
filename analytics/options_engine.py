@@ -164,6 +164,20 @@ class IVSurface:
     vix_20d_avg: float = 0.0
     term_slope: float = 0.0               # Positive = contango, negative = backwardation
 
+    # Vol-of-Vol (VVIX) — timing signal for short vol entry
+    vvix_current: float = 0.0             # ^VVIX level (or proxy: 20d rolling std of VIX changes)
+    vvix_percentile: float = 0.0          # Percentile vs 252d history (>80% = vol-of-vol elevated)
+    vvix_signal: str = ""                 # "SHORT_VOL_FAVORABLE" / "NEUTRAL" / "AVOID"
+
+    # CBOE Skew Index
+    skew_current: float = 100.0           # ^SKEW level (100=normal, >130=high tail risk)
+    skew_percentile: float = 0.0          # Percentile vs history
+    skew_signal: str = ""                 # "TAIL_RISK_LOW" / "NORMAL" / "TAIL_RISK_HIGH"
+
+    # Combined short-vol timing score (0-100)
+    short_vol_timing_score: float = 50.0  # Higher = better time to sell vol
+    short_vol_timing_label: str = ""      # "SELL VOL" / "NEUTRAL" / "BUY VOL"
+
 
 class OptionsEngine:
     """
@@ -313,6 +327,79 @@ class OptionsEngine:
         # ── Term structure slope ──
         term_slope = vix_20d - vix_current  # Positive = contango (normal)
 
+        # ── VVIX (vol-of-vol) ──
+        vvix_current = 0.0
+        vvix_percentile = 0.0
+        vvix_signal = "NEUTRAL"
+
+        vvix_col = next((c for c in prices.columns if "VVIX" in c.upper()), None)
+        if vvix_col and vvix_col in prices.columns:
+            vvix_series = prices[vvix_col].dropna()
+            if len(vvix_series) >= 20:
+                vvix_current = float(vvix_series.iloc[-1])
+                if len(vvix_series) >= 252:
+                    vvix_percentile = float((vvix_series.iloc[-252:] <= vvix_current).mean())
+                else:
+                    vvix_percentile = float((vvix_series <= vvix_current).mean())
+        else:
+            # Proxy VVIX: 20d rolling std of VIX daily changes × √252
+            if vix_col and len(prices[vix_col].dropna()) >= 30:
+                _vix_changes = prices[vix_col].diff().dropna()
+                vvix_current = float(_vix_changes.iloc[-20:].std() * np.sqrt(252))
+                if len(_vix_changes) >= 252:
+                    _rolling = _vix_changes.rolling(20).std() * np.sqrt(252)
+                    vvix_percentile = float((_rolling.dropna().iloc[-252:] <= vvix_current).mean())
+
+        if vvix_percentile > 0.80:
+            vvix_signal = "AVOID"  # VVIX too high — don't sell vol now
+        elif vvix_percentile < 0.30:
+            vvix_signal = "SHORT_VOL_FAVORABLE"  # Low VVIX = cheap to sell vol
+        else:
+            vvix_signal = "NEUTRAL"
+
+        # ── CBOE Skew Index ──
+        skew_current = 100.0
+        skew_percentile = 0.0
+        skew_signal = "NORMAL"
+
+        skew_col = next((c for c in prices.columns if c.upper() in ("^SKEW", "SKEW")), None)
+        if skew_col and skew_col in prices.columns:
+            skew_series = prices[skew_col].dropna()
+            if len(skew_series) >= 20:
+                skew_current = float(skew_series.iloc[-1])
+                if len(skew_series) >= 252:
+                    skew_percentile = float((skew_series.iloc[-252:] <= skew_current).mean())
+                else:
+                    skew_percentile = float((skew_series <= skew_current).mean())
+
+        if skew_current > 130 or skew_percentile > 0.90:
+            skew_signal = "TAIL_RISK_HIGH"
+        elif skew_current < 115 and skew_percentile < 0.30:
+            skew_signal = "TAIL_RISK_LOW"
+        else:
+            skew_signal = "NORMAL"
+
+        # ── Short-Vol Timing Score (0-100) ──
+        # Combines: VRP (30%), VVIX (25%), term structure (20%), implied corr (15%), skew (10%)
+        _score_vrp = min(100, max(0, vrp_index * 10000))        # VRP > 0 = favorable
+        _score_vvix = max(0, 100 - vvix_percentile * 100)        # Low VVIX = favorable
+        _score_term = min(100, max(0, term_slope * 100 * 20 + 50))  # Contango = favorable
+        _score_corr = min(100, max(0, (1 - implied_corr) * 100))    # Low impl corr = favorable for dispersion
+        _score_skew = max(0, 100 - (skew_current - 100) * 2)        # Low skew = favorable
+
+        short_vol_timing = (
+            0.30 * _score_vrp + 0.25 * _score_vvix + 0.20 * _score_term
+            + 0.15 * _score_corr + 0.10 * _score_skew
+        )
+        short_vol_timing = max(0, min(100, short_vol_timing))
+
+        if short_vol_timing >= 65:
+            sv_label = "SELL VOL"
+        elif short_vol_timing <= 35:
+            sv_label = "BUY VOL"
+        else:
+            sv_label = "NEUTRAL"
+
         as_of = str(prices.index[-1].date()) if hasattr(prices.index[-1], "date") else str(prices.index[-1])
 
         return IVSurface(
@@ -324,9 +411,17 @@ class OptionsEngine:
             dispersion_index=round(dispersion_index, 4),
             vrp_index=round(vrp_index, 6),
             vrp_sectors_avg=round(vrp_avg, 6),
-            vix_current=round(vix_current * 100, 2),  # Back to VIX points
+            vix_current=round(vix_current * 100, 2),
             vix_20d_avg=round(vix_20d * 100, 2),
             term_slope=round(term_slope * 100, 4),
+            vvix_current=round(vvix_current, 2),
+            vvix_percentile=round(vvix_percentile, 4),
+            vvix_signal=vvix_signal,
+            skew_current=round(skew_current, 2),
+            skew_percentile=round(skew_percentile, 4),
+            skew_signal=skew_signal,
+            short_vol_timing_score=round(short_vol_timing, 1),
+            short_vol_timing_label=sv_label,
         )
 
     def compute_iv_history(
@@ -433,4 +528,13 @@ def options_summary(surface: IVSurface) -> dict:
             s: {"iv": g.iv, "vrp": g.vrp, "iv_rank": g.iv_rank_252d, "theta": g.theta}
             for s, g in list(surface.sector_greeks.items())[:5]
         },
+        # VVIX + Skew + timing
+        "vvix": surface.vvix_current,
+        "vvix_pct": surface.vvix_percentile,
+        "vvix_signal": surface.vvix_signal,
+        "skew": surface.skew_current,
+        "skew_pct": surface.skew_percentile,
+        "skew_signal": surface.skew_signal,
+        "short_vol_timing": surface.short_vol_timing_score,
+        "short_vol_timing_label": surface.short_vol_timing_label,
     }

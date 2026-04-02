@@ -258,21 +258,52 @@ class DataLakeManager:
 
         if not hist:
             self.logger.warning("Empty stable history for %s. Trying legacy fallback.", ticker)
-            legacy_url = self._historical_price_url_legacy(ticker)
-            legacy_params: Dict[str, Any] = {"from": start_date.isoformat()}
-            if end_date is not None:
-                legacy_params["to"] = end_date.isoformat()
-            payload2 = self._request_json(legacy_url, params=legacy_params)
+            try:
+                legacy_url = self._historical_price_url_legacy(ticker)
+                legacy_params: Dict[str, Any] = {"from": start_date.isoformat()}
+                if end_date is not None:
+                    legacy_params["to"] = end_date.isoformat()
+                payload2 = self._request_json(legacy_url, params=legacy_params)
 
-            if isinstance(payload2, dict) and isinstance(payload2.get("historical"), list):
-                hist = payload2["historical"]
-            elif isinstance(payload2, list):
-                hist = payload2
-            else:
+                if isinstance(payload2, dict) and isinstance(payload2.get("historical"), list):
+                    hist = payload2["historical"]
+                elif isinstance(payload2, list):
+                    hist = payload2
+                else:
+                    hist = None
+            except (PermissionError, RuntimeError) as _leg_err:
+                self.logger.debug("Legacy fallback failed for %s: %s", ticker, _leg_err)
                 hist = None
 
+        # ── yfinance fallback (when FMP stable + legacy both fail) ─────
         if not hist:
-            raise ValueError(f"No historical data returned for {ticker}")
+            try:
+                import yfinance as yf
+                yf_ticker = ticker.replace("^", "")  # yfinance uses VIX not ^VIX
+                if ticker.startswith("^"):
+                    yf_ticker = f"^{yf_ticker}"  # Keep ^ for indices
+                yf_data = yf.download(
+                    yf_ticker, start=start_date.isoformat(),
+                    end=(end_date or date.today()).isoformat(),
+                    progress=False, auto_adjust=True,
+                )
+                if not yf_data.empty:
+                    close_col = "Close"
+                    if isinstance(yf_data.columns, pd.MultiIndex):
+                        yf_data.columns = yf_data.columns.get_level_values(0)
+                    if close_col in yf_data.columns:
+                        s = yf_data[close_col].dropna()
+                        s.name = ticker
+                        s.index = pd.to_datetime(s.index).tz_localize(None)
+                        self.logger.info("yfinance fallback OK for %s: %d rows", ticker, len(s))
+                        return s
+            except ImportError:
+                self.logger.debug("yfinance not installed — skipping fallback for %s", ticker)
+            except Exception as _yf_err:
+                self.logger.debug("yfinance fallback failed for %s: %s", ticker, _yf_err)
+
+        if not hist:
+            raise ValueError(f"No historical data returned for {ticker} (FMP + yfinance both failed)")
 
         df = pd.DataFrame(hist)
         if df.empty or "date" not in df.columns:

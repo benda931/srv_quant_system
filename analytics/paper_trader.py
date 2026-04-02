@@ -329,12 +329,19 @@ class PaperTrader:
                 if notional > self.portfolio.cash:
                     continue  # Not enough cash
 
+                # Slippage model: 3bps base + market impact √(notional/$1M) × 5bps
+                _slip_bps = 3.0 + 5.0 * (notional / 1_000_000) ** 0.5
+                _slip_pct = _slip_bps / 10_000
+                _slip_dir = 1 if ticket.direction == "LONG" else -1
+                fill_price = current_price * (1 + _slip_dir * _slip_pct)
+
                 pos = {
                     "trade_id": f"PT_{ticker}_{ticket.direction}_{today}",
                     "ticker": ticker,
                     "direction": ticket.direction,
                     "entry_date": today,
-                    "entry_price": current_price,
+                    "entry_price": fill_price,
+                    "slippage_bps": round(_slip_bps, 1),
                     "notional": notional,
                     "weight": ticket.final_weight,
                     "entry_z": ticket.entry_z,
