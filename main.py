@@ -794,717 +794,140 @@ def build_app() -> dash.Dash:
     except Exception as _e:
         logger.debug("Auto-pipeline trigger skipped: %s", _e)
 
-    logger.info("Building snapshot...")
-    orchestrator = DataOrchestrator(settings)
-    data_state   = orchestrator.run(force_refresh=False)
-    _health      = data_state.health
+    # ══════════════════════════════════════════════════════════════════════
+    # SERVICE LAYER: All analytics computation delegated to EngineService
+    # This replaces 800+ lines of inline engine initialization.
+    # ══════════════════════════════════════════════════════════════════════
+    from services.run_context import RunContext
+    from services.engine_service import EngineService
 
-    logger.info("Loading quant engine...")
-    engine = QuantEngine(settings)
-    engine.load()
-    master_df = engine.calculate_conviction_score()
+    ctx = RunContext.create(settings)
+    svc = EngineService(ctx)
+    _results = svc.compute_all()
+
+    # Unpack results into the variable names that callbacks depend on
+    engine = _results.engine
+    master_df = _results.master_df
+    _health = _results.data_health
 
     if master_df is None or master_df.empty:
         raise RuntimeError("master_df is empty; cannot build dashboard.")
 
-    # ── Persist analytics run to DB audit trail ───────────────────────────────
-    _startup_run_id: int = -1
+    # Map EngineResults → callback closure variables
+    _startup_run_id = _results.run_id
+    _stress_results = _results.stress_results
+    _mc_stress_result = _results.mc_stress_result
+    _risk_report = _results.risk_report
+    _corr_vol_analysis = _results.corr_vol_analysis
+    _dss_corr_snapshot = _results.corr_snapshot
+    _dss_signal_results = _results.signal_results
+    _dss_trade_tickets = _results.trade_tickets
+    _dss_regime_safety = _results.regime_safety
+    _dss_monitor_summary = _results.trade_monitor
+    _options_surface = _results.options_surface
+    _tail_risk_es = _results.tail_risk_es
+    _paper_portfolio = _results.paper_portfolio
+    _dispersion_result = _results.dispersion_result
+    _pnl_result_cached = _results.pnl_result
+    _decay_result_cached = _results.decay_result
+    _regime_result_cached = _results.regime_result
+    _backtest_cached = _results.backtest_result
+    _dss_trade_book_history = _results.trade_book_history
+    _methodology_ranking = _results.methodology_ranking
+    _ml_feature_importances = _results.ml_feature_importances
+    _ml_regime_forecast = _results.ml_regime_forecast
+    _engine_errors = _results.errors
+
+    logger.info(
+        "EngineService: %d/%d steps OK in %.1fs | run_id=%d | regime=%s",
+        len(ctx.steps_completed), len(ctx.steps_completed) + len(ctx.steps_failed),
+        ctx.duration_s, ctx.run_id, ctx.regime,
+    )
+
+    # ── Helpers + Agent outputs (needed by callbacks) ────────────────────────
+    _brief_txt = ""
     try:
-        from datetime import timezone as _tz
-        from db.writer import DatabaseWriter as _DBWriter
-        _dw = _DBWriter(settings.db_path)
-        _startup_run_id = _dw.write_run(
-            master_df,
-            started_at=data_state.cycle_completed_at.replace(tzinfo=_tz.utc)
-                       if data_state.cycle_completed_at.tzinfo is None
-                       else data_state.cycle_completed_at,
-            finished_at=__import__("datetime").datetime.now(_tz.utc),
-            data_health_label=_health.health_label,
-        )
-    except Exception as _e:
-        logger.warning("DB write_run failed (non-fatal): %s", _e)
-
-    cards_top, cards_bottom = build_overview_kpi_rows(master_df, settings, _health)
-    ui_outputs = build_engine_outputs(engine, master_df)
-
-    # Track engine failures to show banners in tabs
-    _engine_errors: Dict[str, str] = {}
-
-    # ── Stress Testing (fast — deterministic, no simulation) ────────────────
-    _stress_results: Optional[List] = None
-    _mc_stress_result = None
-    try:
-        from analytics.stress import StressEngine
-        _stress_results = StressEngine().run_all(master_df, settings)
-        logger.info("Stress tests complete: %d scenarios", len(_stress_results))
-    except Exception as _e:
-        logger.exception("Stress engine failed — tab will show error")
-        _engine_errors["stress"] = str(_e)
-
-    try:
-        from analytics.stress import MonteCarloStressEngine
-        _mc_prices = engine.prices
-        if _mc_prices is not None and len(_mc_prices) > 60:
-            _mc_stress_result = MonteCarloStressEngine(
-                n_simulations=10_000, horizon_days=21,
-            ).run(master_df, _mc_prices, settings)
-            logger.info("MC stress: VaR95=%.2f%% CVaR95=%.2f%%",
-                        _mc_stress_result.var_95 * 100, _mc_stress_result.cvar_95 * 100)
-    except Exception as _mce:
-        logger.warning("MC stress failed (non-fatal): %s", _mce)
-
-    # ── Portfolio Risk (fast — Ledoit-Wolf on existing prices) ───────────────
-    _risk_report = None
-    try:
-        from analytics.portfolio_risk import PortfolioRiskEngine
-        prices_df = engine.prices  # use already-loaded prices from QuantEngine
-        if prices_df is not None and "w_final" in master_df.columns:
-            weights = {
-                row["sector_ticker"]: float(row["w_final"])
-                for _, row in master_df.iterrows()
-                if row.get("direction") in ("LONG", "SHORT")
-            }
-            if weights:
-                _risk_report = PortfolioRiskEngine().full_risk_report(weights, prices_df, settings)
-                logger.info("Portfolio risk computed: vol=%.2f%%", (_risk_report.portfolio_vol_ann or 0) * 100)
-    except Exception as _e:
-        logger.exception("Portfolio risk engine failed — tab will show error")
-        _engine_errors["risk"] = str(_e)
-
-    # ── Correlation Volatility Analysis ──────────────────────────────────────
-    _corr_vol_analysis = None
-    try:
-        from analytics.correlation_engine import CorrVolEngine
-        _corr_vol_analysis = CorrVolEngine().run(engine, master_df, settings)
-        logger.info(
-            "Corr-Vol analysis complete: implied_corr=%.3f, short_vol_score=%.0f (%s)",
-            _corr_vol_analysis.implied_corr,
-            _corr_vol_analysis.short_vol_score,
-            _corr_vol_analysis.short_vol_label,
-        )
-    except Exception as _e:
-        logger.exception("Correlation-vol engine failed — tab will show error")
-        _engine_errors["corrvol"] = str(_e)
-
-    # ── DSS: Signal Stack + Trade Structure ──────────────────────────────────
-    _dss_signal_results = None
-    _dss_trade_tickets = None
-    _dss_regime_safety = None
-    _dss_corr_snapshot = None
-    _dss_monitor_summary = None
-    _tail_risk_es = None
-    _methodology_ranking = None
-    _paper_portfolio = None
-    _dss_trade_book_history = None
-    try:
-        import json as _json
-        from dataclasses import dataclass as _dc
-        from datetime import date as _date
-        from analytics.signal_stack import SignalStackEngine
-        from analytics.signal_regime_safety import compute_regime_safety_score
-        from analytics.trade_structure import TradeStructureEngine, PositionSizingEngine
-        from analytics.trade_monitor import TradeMonitorEngine
-
-        # ── P1-1 FIX: Build corr snapshot from CorrelationStructureEngine (real metrics) ──
-        @_dc
-        class _CorrSnap:
-            frob_distortion_z: float
-            market_mode_share: float
-            coc_instability_z: float
-            avg_corr_current: float
-
-        _dss_corr_snapshot = None
-        try:
-            from analytics.correlation_structure import (
-                CorrelationStructureEngine as _CSEngine,
-                build_sector_groups_from_settings as _build_sg,
-            )
-            _prices_cs = engine.prices
-            if _prices_cs is not None and not _prices_cs.empty:
-                _sectors_cs = settings.sector_list()
-                _avail_cs = [s for s in _sectors_cs if s in _prices_cs.columns]
-                if len(_avail_cs) >= 5:
-                    _log_rets_cs = np.log(_prices_cs[_avail_cs] / _prices_cs[_avail_cs].shift(1)).dropna()
-                    _sg = _build_sg(settings)
-                    _cs_snap = _CSEngine().compute_snapshot_with_zscore(
-                        returns=_log_rets_cs, sector_groups=_sg,
-                        W_s=settings.corr_window, W_b=settings.corr_baseline_window,
-                        distortion_z_lookback=settings.corr_distortion_z_lookback,
-                        coc_z_lookback=settings.coc_z_lookback,
-                        settings=settings,
-                    )
-                    _dss_corr_snapshot = _CorrSnap(
-                        frob_distortion_z=_cs_snap.frob_distortion_z,
-                        market_mode_share=_cs_snap.market_mode_share,
-                        coc_instability_z=_cs_snap.coc_instability_z,
-                        avg_corr_current=_cs_snap.avg_corr_short,
-                    )
-                    logger.info(
-                        "DSS corr snapshot: frob_z=%.2f, mode=%.3f, coc_z=%.2f, avg_ρ=%.3f",
-                        _dss_corr_snapshot.frob_distortion_z, _dss_corr_snapshot.market_mode_share,
-                        _dss_corr_snapshot.coc_instability_z, _dss_corr_snapshot.avg_corr_current,
-                    )
-        except Exception as _cs_err:
-            logger.warning("DSS: CorrelationStructureEngine failed, trying CorrVol fallback: %s", _cs_err)
-
-        # P2-1: Fallback to CorrVolAnalysis if structure engine failed
-        if _dss_corr_snapshot is None and _corr_vol_analysis is not None:
-            _dss_corr_snapshot = _CorrSnap(
-                frob_distortion_z=0.0,  # Not available from CorrVol — signal reduced but not zero
-                market_mode_share=getattr(_corr_vol_analysis, "market_mode_strength", 0.3) or 0.3,
-                coc_instability_z=0.0,  # Not available from CorrVol
-                avg_corr_current=getattr(_corr_vol_analysis, "avg_corr_current", 0.3) or 0.3,
-            )
-            logger.warning("DSS: Using CorrVol fallback — frob_distortion_z and coc_z unavailable (set to 0)")
-
-        # P2-1: Last-resort neutral defaults
-        if _dss_corr_snapshot is None:
-            _dss_corr_snapshot = _CorrSnap(
-                frob_distortion_z=0.0, market_mode_share=0.30,
-                coc_instability_z=0.0, avg_corr_current=0.30,
-            )
-            logger.warning("DSS: No correlation data — using neutral defaults")
-
-        # ── Options Analytics (IV, Greeks, Implied Corr, VRP) ──────
-        _options_surface = None
-        try:
-            from analytics.options_engine import OptionsEngine
-            _options_surface = OptionsEngine().compute_surface(engine.prices, settings)
-            logger.info(
-                "Options: VIX=%.1f, impl_corr=%.3f, DSPX=%.2f%%, VRP=%+.4f",
-                _options_surface.vix_current, _options_surface.implied_corr,
-                _options_surface.dispersion_index, _options_surface.vrp_index,
-            )
-        except Exception as _opt_err:
-            logger.debug("Options engine failed: %s", _opt_err)
-
-        # ── Tail Risk (Expected Shortfall) ────────────────────────
-        _tail_risk_es = None
-        try:
-            from analytics.tail_risk import compute_expected_shortfall
-            _log_rets_tr = np.log(engine.prices / engine.prices.shift(1)).dropna()
-            _sectors_tr = settings.sector_list()
-            _eq_w = {s: 1.0 / len(_sectors_tr) for s in _sectors_tr if s in _log_rets_tr.columns}
-            _tail_risk_es = compute_expected_shortfall(_log_rets_tr, _eq_w)
-        except Exception as _e:
-            logger.debug("Tail risk failed: %s", _e)
-
-        # ── Methodology Lab ranking ───────────────────────────────
-        _methodology_ranking = None
-        try:
-            import json as _json_ml
-            _ml_reports = sorted(
-                (settings.project_root / "agents" / "methodology" / "reports").glob("*_methodology_lab.json"),
-                reverse=True,
-            )
-            if _ml_reports:
-                _ml_data = _json_ml.loads(_ml_reports[0].read_text(encoding="utf-8"))
-                _methodology_ranking = sorted(
-                    [
-                        {"name": k, **{kk: vv for kk, vv in v.items()
-                         if kk in ("sharpe", "win_rate", "total_pnl", "total_trades", "max_drawdown")}}
-                        for k, v in _ml_data.items()
-                    ],
-                    key=lambda x: x.get("sharpe", -999),
-                    reverse=True,
-                )[:8]
-        except Exception as _e:
-            logger.debug("Methodology lab load failed: %s", _e)
-
-        # ── Methodology Lab full data (for Methodology tab) ──────
-        _methodology_ranking_full = None
-        try:
-            _ml_reports_dir = settings.project_root / "agents" / "methodology" / "reports"
-            _ml_reports_dir.mkdir(parents=True, exist_ok=True)
-            _ml_files_full = sorted(
-                _ml_reports_dir.glob("*_methodology_lab.json"),
-                reverse=True,
-            )
-            if _ml_files_full:
-                import json as _json_mlf
-                _methodology_ranking_full = _json_mlf.loads(_ml_files_full[0].read_text(encoding="utf-8"))
-            if _methodology_ranking_full is None and engine is not None:
-                # Auto-generate methodology comparison on first run
-                logger.info("Generating methodology lab report (first run)...")
-                from analytics.methodology_lab import MethodologyLab
-                _auto_lab = MethodologyLab(engine.prices, step=10)
-                _auto_results = _auto_lab.run_all()
-                if _auto_results:
-                    import json as _json_ml_save
-                    from datetime import datetime as _dt_ml
-                    _ml_out = {
-                        "generated": _dt_ml.now().isoformat(),
-                        "results": [
-                            {
-                                "name": r.name,
-                                "sharpe": round(r.sharpe, 4),
-                                "win_rate": round(r.win_rate, 4),
-                                "total_pnl": round(r.total_pnl, 6),
-                                "total_trades": r.total_trades,
-                                "max_drawdown": round(r.max_drawdown, 6),
-                                "avg_holding_days": round(r.avg_holding_days, 1),
-                                "params": r.params if hasattr(r, "params") else {},
-                            }
-                            for r in _auto_results.values()
-                        ],
-                    }
-                    _ml_save_path = _ml_reports_dir / f"{_dt_ml.now().strftime('%Y-%m-%d')}_methodology_lab.json"
-                    _ml_save_path.write_text(_json_ml_save.dumps(_ml_out, indent=2, default=str), encoding="utf-8")
-                    _methodology_ranking_full = _ml_out
-                    logger.info("Methodology lab: %d strategies saved to %s", len(_auto_results), _ml_save_path.name)
-                    # Also seed the ranking summary
-                    if _methodology_ranking is None:
-                        _methodology_ranking = sorted(
-                            [
-                                {"name": r.name, "sharpe": round(r.sharpe, 4),
-                                 "win_rate": round(r.win_rate, 4),
-                                 "total_pnl": round(r.total_pnl, 6),
-                                 "max_drawdown": round(r.max_drawdown, 6),
-                                 "total_trades": r.total_trades}
-                                for r in _auto_results.values()
-                            ],
-                            key=lambda x: x.get("sharpe", -999),
-                            reverse=True,
-                        )[:8]
-                    # Save ranking file for agents
-                    _ranking_path = _ml_reports_dir / "methodology_ranking.json"
-                    _ranking_path.write_text(
-                        _json_ml_save.dumps(
-                            [{"name": r.name, "sharpe": round(r.sharpe, 4),
-                              "win_rate": round(r.win_rate, 4),
-                              "total_pnl": round(r.total_pnl, 6),
-                              "max_drawdown": round(r.max_drawdown, 6),
-                              "total_trades": r.total_trades}
-                             for r in _auto_results.values()],
-                            indent=2,
-                        ),
-                        encoding="utf-8",
-                    )
-                    logger.info("Seeded methodology ranking: %d strategies", len(_auto_results))
-        except Exception as _ml_exc:
-            logger.warning("Methodology lab seed failed: %s", _ml_exc)
-
-        # ── Paper Portfolio ───────────────────────────────────────
-        _paper_portfolio = None
-        try:
-            _pp_path = settings.project_root / "data" / "paper_portfolio.json"
-            if _pp_path.exists():
-                import json as _json_pp
-                _paper_portfolio = _json_pp.loads(_pp_path.read_text(encoding="utf-8"))
-            if _paper_portfolio is None:
-                # Seed a fresh portfolio with positions from master_df signals
-                from analytics.paper_trader import PaperTrader
-                from datetime import date as _date_cls
-                import math as _math_seed
-                _seed_trader = PaperTrader()
-                try:
-                    if engine is not None and hasattr(engine, 'master_df') and engine.master_df is not None:
-                        _mdf = engine.master_df
-                        _px = engine.prices
-                        _offset = min(5, len(_px) - 1)
-                        _entry_dt = str(_px.index[-_offset - 1].date())
-                        # Create positions from top conviction sectors
-                        for _, _row in _mdf.iterrows():
-                            _t = str(_row.get("sector_ticker", ""))
-                            _dir = str(_row.get("direction", "NEUTRAL"))
-                            _conv = float(_row.get("conviction_score", 0))
-                            if _dir == "NEUTRAL" or not _t or _t not in _px.columns:
-                                continue
-                            if _conv < 0.1:
-                                continue
-                            _entry_px = float(_px[_t].dropna().iloc[-_offset - 1])
-                            _current_px = float(_px[_t].dropna().iloc[-1])
-                            _sign = 1.0 if _dir == "LONG" else -1.0
-                            _notional = 100000 * min(_conv * 2, 1.0)
-                            _pnl = _sign * (_current_px - _entry_px) / _entry_px * _notional
-                            _pnl_pct = _sign * (_current_px - _entry_px) / _entry_px
-                            _seed_trader.portfolio.positions.append({
-                                "trade_id": f"seed_{_t}_{_dir}",
-                                "ticker": _t,
-                                "direction": _dir,
-                                "entry_date": _entry_dt,
-                                "entry_price": _entry_px,
-                                "current_price": _current_px,
-                                "notional": _notional,
-                                "unrealized_pnl": _pnl,
-                                "unrealized_pnl_pct": _pnl_pct,
-                                "days_held": _offset,
-                                "conviction": _conv,
-                            })
-                            _seed_trader.portfolio.cash -= _notional
-                            if len(_seed_trader.portfolio.positions) >= 8:
-                                break
-                        _seed_trader.save()
-                        _total_seed_pnl = sum(p.get("unrealized_pnl", 0) for p in _seed_trader.portfolio.positions)
-                        logger.info("Paper trader seeded: %d positions, P&L=$%.0f",
-                                    len(_seed_trader.portfolio.positions), _total_seed_pnl)
-                    else:
-                        _seed_trader.save()
-                except Exception as _seed_exc:
-                    logger.warning("Paper trader seed failed: %s", _seed_exc)
-                    _seed_trader.save()
-                _pp_path2 = settings.project_root / "data" / "paper_portfolio.json"
-                if _pp_path2.exists():
-                    import json as _json_pp2
-                    _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
-                logger.info("Seeded paper portfolio with $%s",
-                            f"{_seed_trader.portfolio.capital:,.0f}")
-
-            # Fix P&L: backdate entry_prices to 5 days ago so P&L is realistic
-            _pp_path2 = settings.project_root / "data" / "paper_portfolio.json"
-            try:
-                _pt_prices = engine.prices if engine is not None and hasattr(engine, 'prices') else None
-                if _paper_portfolio is not None and _pt_prices is not None and not _pt_prices.empty:
-                    from analytics.paper_trader import PaperTrader as _PT_sim
-                    _pt = _PT_sim()
-                    _pt.load()
-                    # Backdate entries: set entry_price from 5 trading days ago
-                    _offset_days = min(5, len(_pt_prices) - 1)
-                    _old_date = str(_pt_prices.index[-_offset_days - 1].date()) if _offset_days > 0 else None
-                    for _pos in _pt.portfolio.positions:
-                        _t = _pos.get("ticker", "")
-                        if _t in _pt_prices.columns and _offset_days > 0:
-                            _entry_px = float(_pt_prices[_t].dropna().iloc[-_offset_days - 1])
-                            _pos["entry_price"] = _entry_px
-                            if _old_date:
-                                _pos["entry_date"] = _old_date
-                    # Now run daily_update with current prices — P&L will show real moves
-                    _pt.daily_update(_pt_prices)
-                    _pt.save()
-                    import json as _json_pp3
-                    _paper_portfolio = _json_pp3.loads(_pp_path2.read_text(encoding="utf-8"))
-                    _total_pnl = sum(p.get("unrealized_pnl", 0) for p in _pt.portfolio.positions)
-                    logger.info("Paper trader simulation: backdated %d positions by %d days, total P&L=$%.0f",
-                                len(_pt.portfolio.positions), _offset_days, _total_pnl)
-            except Exception as _pt_sim_err:
-                logger.warning("Paper trader simulation failed: %s", _pt_sim_err)
-        except Exception as _pp_exc:
-            logger.warning("Paper portfolio seed failed: %s", _pp_exc)
-
-        # ── Layer 4: Regime Safety ────────────────────────────────
-        _vix = float(master_df["vix_level"].iloc[0]) if "vix_level" in master_df.columns else float("nan")
-        _cz = float(master_df["credit_z"].iloc[0]) if "credit_z" in master_df.columns else float("nan")
-        _ms = str(master_df["market_state"].iloc[0]) if "market_state" in master_df.columns else "NORMAL"
-        _ts_score = float(master_df["regime_transition_score"].iloc[0]) if "regime_transition_score" in master_df.columns else float("nan")
-        _cp = float(master_df["crisis_probability"].iloc[0]) if "crisis_probability" in master_df.columns else float("nan")
-
-        _dss_regime_safety = compute_regime_safety_score(
-            market_state=_ms, vix_level=_vix, credit_z=_cz,
-            avg_corr=_dss_corr_snapshot.avg_corr_current,
-            corr_z=_dss_corr_snapshot.frob_distortion_z,
-            transition_score=_ts_score, crisis_probability=_cp,
-        )
-
-        # ── Signal Stack ──────────────────────────────────────────
-        ss_engine = SignalStackEngine(settings)
-        _dss_signal_results = ss_engine.score_from_master_df(
-            frob_distortion_z=_dss_corr_snapshot.frob_distortion_z,
-            market_mode_share=_dss_corr_snapshot.market_mode_share,
-            coc_instability_z=_dss_corr_snapshot.coc_instability_z,
-            master_df=master_df,
-            regime_safety_result=_dss_regime_safety,
-        )
-
-        # ── Trade Structure ───────────────────────────────────────
-        ts_engine = TradeStructureEngine(settings)
-        _dss_trade_tickets = ts_engine.construct_all_trades(
-            _dss_signal_results, master_df=master_df,
-        )
-        ps_engine = PositionSizingEngine(settings)
-        _dss_trade_tickets = ps_engine.size_portfolio(
-            _dss_trade_tickets,
-            _dss_regime_safety.regime_safety_score,
-            _dss_regime_safety.size_cap,
-        )
-
-        _n_pass = sum(1 for r in _dss_signal_results if r.passes_entry)
-        _n_active = sum(1 for t in _dss_trade_tickets if t.is_active)
-        logger.info(
-            "DSS ready: %d signals (%d passing), %d trades (%d active), safety=%s",
-            len(_dss_signal_results), _n_pass, len(_dss_trade_tickets), _n_active,
-            _dss_regime_safety.label,
-        )
-
-        # ── Persist trade book to DuckDB ──────────────────────────
-        if _startup_run_id > 0:
-            try:
-                from db.writer import DatabaseWriter as _TBWriter
-                _TBWriter(settings.db_path).write_trade_book(_dss_trade_tickets, _startup_run_id)
-            except Exception as _tbe:
-                logger.warning("DSS: write_trade_book failed (non-fatal): %s", _tbe)
-
-        # ── Read trade book history for DSS tab display ───────────
-        try:
-            from db.reader import DatabaseReader as _TBReader
-            _dss_trade_book_history = _TBReader(settings.db_path).read_trade_book_history(n_runs=10)
-        except Exception as _tbhe:
-            logger.warning("DSS: read_trade_book_history failed (non-fatal): %s", _tbhe)
-            _dss_trade_book_history = None
-
-        # ── P1-3 FIX: Trade state persistence for days_held ──────
-        _trade_state_path = settings.project_root / "data" / "dss_trade_state.json"
-        _days_held_map: dict = {}
-        _today_str = _date.today().isoformat()
-        try:
-            _existing_state: dict = {}
-            if _trade_state_path.exists():
-                _existing_state = _json.loads(_trade_state_path.read_text(encoding="utf-8"))
-
-            _active_ids = {t.trade_id for t in _dss_trade_tickets if t.is_active}
-            _new_state: dict = {}
-            for tid in _active_ids:
-                if tid in _existing_state:
-                    _new_state[tid] = _existing_state[tid]  # Keep original entry date
-                else:
-                    _new_state[tid] = _today_str  # New trade — today is entry date
-
-            # Compute days_held
-            for tid, entry_str in _new_state.items():
-                try:
-                    _entry_d = _date.fromisoformat(entry_str)
-                    _days_held_map[tid] = (_date.today() - _entry_d).days
-                except Exception:
-                    _days_held_map[tid] = 0
-
-            # Persist updated state
-            _trade_state_path.parent.mkdir(parents=True, exist_ok=True)
-            _trade_state_path.write_text(
-                _json.dumps(_new_state, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception as _ts_err:
-            logger.warning("DSS: Trade state persistence failed: %s", _ts_err)
-
-        # ── Trade Monitor ─────────────────────────────────────────
-        _monitor = TradeMonitorEngine(settings)
-        _current_zscores = {
-            str(row.get("sector_ticker", "")): float(row.get("pca_residual_z", 0))
-            for _, row in master_df.iterrows()
-        }
-        _dss_monitor_summary = _monitor.monitor_portfolio(
-            [t for t in _dss_trade_tickets if t.is_active],
-            _current_zscores,
-            _dss_regime_safety.regime_safety_score,
-            _dss_regime_safety.label,
-            days_held_map=_days_held_map,
-        )
-        logger.info("Trade monitor: %s", _dss_monitor_summary.pm_summary)
-
-    except Exception as _e:
-        logger.warning("DSS engine failed (non-fatal): %s", _e)
-        _engine_errors["dss"] = str(_e)
-
-    # ── Dispersion Backtest ──────────────────────────────────────────────────
-    _dispersion_result = None
-    try:
-        from analytics.dispersion_backtest import DispersionBacktester
-        _disp_bt = DispersionBacktester(
-            engine.prices,
-            hold_period=15, z_entry=0.6, z_exit=0.2,
-            max_positions=3, lookback=30,
-        )
-        _dispersion_result = _disp_bt.run()
-        logger.info("Dispersion backtest: Sharpe=%.2f, WR=%.1f%%, P&L=%.2f%%, N=%d",
-                     _dispersion_result.sharpe, _dispersion_result.win_rate * 100,
-                     _dispersion_result.total_pnl * 100, _dispersion_result.total_trades)
-    except Exception as _disp_exc:
-        logger.warning("Dispersion backtest failed (non-fatal): %s", _disp_exc)
-
-    # ── Pre-compute lazy tabs (P&L, Signal Decay, Regime) at startup ─────────
-    _pnl_result_cached = None
-    _decay_result_cached = None
-    _regime_result_cached = None
-    _prices_for_tabs = engine.prices  # Already loaded, no extra I/O
-
-    try:
-        from analytics.pnl_tracker import PnLTracker
-        if _prices_for_tabs is not None and not _prices_for_tabs.empty:
-            _pnl_result_cached = PnLTracker(settings).track(_prices_for_tabs)
-            logger.info("P&L tracker pre-computed at startup")
-    except Exception as _e:
-        logger.debug("P&L tracker pre-compute failed: %s", _e)
-
-    try:
-        from analytics.signal_decay import SignalDecayAnalyser
-        if _prices_for_tabs is not None and not _prices_for_tabs.empty:
-            _decay_result_cached = SignalDecayAnalyser(settings).analyse(_prices_for_tabs)
-            logger.info("Signal decay pre-computed at startup")
-    except Exception as _e:
-        logger.debug("Signal decay pre-compute failed: %s", _e)
-
-    try:
-        from analytics.regime_alerts import RegimeAlertEngine
-        if _prices_for_tabs is not None and not _prices_for_tabs.empty:
-            _regime_result_cached = RegimeAlertEngine(settings).analyse(_prices_for_tabs)
-            logger.info("Regime alerts pre-computed at startup")
-    except Exception as _e:
-        logger.debug("Regime alerts pre-compute failed: %s", _e)
-
-    # ── Backtest: load cached result from DuckDB ────────────────────────────
-    _backtest_cached = None
-    try:
-        # Try loading from DuckDB cache
-        _bt_loaded = False
-        try:
-            import duckdb as _duckdb_bt
-            _bt_conn = _duckdb_bt.connect(str(settings.db_path), read_only=True)
-            _bt_row = _bt_conn.execute(
-                "SELECT * FROM analytics.backtest_cache ORDER BY cache_date DESC LIMIT 1"
-            ).fetchone()
-            _bt_conn.close()
-            _bt_loaded = _bt_row is not None
-        except Exception:
-            _bt_row = None
-            _bt_loaded = False
-
-        # If no cache, run a quick backtest with alpha research results
-        if not _bt_loaded:
-            from types import SimpleNamespace
-            _backtest_cached = SimpleNamespace(
-                ic_mean=0.007,
-                ic_ir=0.06,
-                hit_rate=0.557,
-                sharpe=0.885,
-                max_drawdown=-0.063,
-                n_walks=387,
-                n_sectors=11,
-                walk_metrics=[],
-                regime_breakdown={"CALM": {"ic": 0.012, "wr": 58.0},
-                                  "NORMAL": {"ic": 0.005, "wr": 54.0},
-                                  "TENSION": {"ic": 0.008, "wr": 56.0}},
-                summary_df=pd.DataFrame(),
-                ic_series=pd.Series(dtype=float),
-                train_window=252,
-                test_window=21,
-                step=5,
-            )
-            logger.info("Backtest: using alpha research OOS results (Sharpe=0.885)")
-        elif _bt_row is not None:
-            from types import SimpleNamespace
-            _backtest_cached = SimpleNamespace(
-                ic_mean=_bt_row[1],
-                ic_ir=_bt_row[2],
-                hit_rate=_bt_row[3],
-                sharpe=_bt_row[4],
-                max_drawdown=_bt_row[5],
-                n_walks=_bt_row[6],
-                n_sectors=_bt_row[7],
-                walk_metrics=[],
-                regime_breakdown={},
-                summary_df=pd.DataFrame(),
-                ic_series=pd.Series(dtype=float),
-                train_window=252,
-                test_window=21,
-                step=5,
-                fwd_period=5,
-            )
-            logger.info("Loaded cached backtest: IC=%.4f, Sharpe=%.2f",
-                        _bt_row[1] or 0, _bt_row[4] or 0)
-    except Exception as _bt_cache_err:
-        logger.debug("Backtest cache load failed (non-fatal): %s", _bt_cache_err)
-
-    # ── Daily brief (load most recent if exists) ─────────────────────────────
-    _brief_txt: str = ""
-    try:
-        import glob as _glob
-        brief_files = sorted(_glob.glob(str(settings.project_root / "reports" / "output" / "*_brief.txt")))
-        if brief_files:
-            _brief_txt = open(brief_files[-1], encoding="utf-8").read()
+        _bd = settings.project_root / "reports" / "output"
+        if _bd.exists():
+            _bf = sorted(_bd.glob("*.txt"), reverse=True)
+            if _bf:
+                _brief_txt = _bf[0].read_text(encoding="utf-8")
     except Exception:
         pass
 
-    journal_db = settings.project_root / "data" / "pm_journal.db"
-    journal = open_journal(journal_db)
-    logger.info("PM Journal initialised at %s", journal_db)
-
-    # ── ML Models ────────────────────────────────────────────
-    _ml_feature_importances = None
-    _ml_regime_forecast = None
     _ml_signals_result = None
-    _ml_drift_status = {"is_drifting": False, "current_version": "v1"}
+    _ml_drift_status = None
+    _ensemble_results = None
 
-    try:
-        import pickle as _pickle
-        import time as _time
-        _ml_cache_dir = settings.project_root / "data" / "ml_models"
-        _ml_cache_dir.mkdir(parents=True, exist_ok=True)
-        _ml_stale_hours = 24
+    def _engine_error_banner(key, name):
+        err = _engine_errors.get(key)
+        return dbc.Alert(f"{name} failed: {err[:100]}", color="danger", className="mt-2") if err else None
 
-        # Feature importance from FeatureEngine
-        _fi_cache = _ml_cache_dir / "feature_importances.pkl"
-        if _fi_cache.exists() and (_time.time() - _fi_cache.stat().st_mtime) < _ml_stale_hours * 3600:
-            _ml_feature_importances = _pickle.loads(_fi_cache.read_bytes())
-        else:
-            from analytics.feature_engine import FeatureEngine as _FE
-            _fe = _FE(engine.prices, settings.sector_list())
-            _feat_df = _fe.compute_all_features()
-            if _feat_df is not None and len(_feat_df) > 100:
-                # Build a simple target: next-5d mean sector return
-                _sector_rets = np.log(engine.prices[_fe.sectors] / engine.prices[_fe.sectors].shift(1))
-                _fwd = _sector_rets.shift(-5).rolling(5).mean().mean(axis=1).reindex(_feat_df.index)
-                # Flatten multi-index columns for feature selection
-                if isinstance(_feat_df.columns, pd.MultiIndex):
-                    _feat_flat = _feat_df.copy()
-                    _feat_flat.columns = ["_".join(str(c) for c in col) for col in _feat_df.columns]
-                else:
-                    _feat_flat = _feat_df
-                _common_idx = _feat_flat.dropna().index.intersection(_fwd.dropna().index)
-                if len(_common_idx) > 100:
-                    _X = _feat_flat.loc[_common_idx]
-                    _y = _fwd.loc[_common_idx]
-                    _selected = _fe.select_features(_X, _y, method="permutation", top_k=15)
-                    # Re-derive importances via a quick tree fit
-                    try:
-                        from sklearn.ensemble import GradientBoostingRegressor as _GBR
-                        _mdl = _GBR(n_estimators=100, max_depth=3, random_state=42)
-                        _mdl.fit(_X[_selected].fillna(0), _y)
-                        _ml_feature_importances = dict(zip(_selected, _mdl.feature_importances_.tolist()))
-                    except ImportError:
-                        _ml_feature_importances = {f: 1.0 / (i + 1) for i, f in enumerate(_selected)}
-                    _fi_cache.write_bytes(_pickle.dumps(_ml_feature_importances))
+    import json as _json_agent
 
-        # Regime forecast
-        _rf_cache = _ml_cache_dir / "regime_forecast.pkl"
-        if _rf_cache.exists() and (_time.time() - _rf_cache.stat().st_mtime) < _ml_stale_hours * 3600:
-            _ml_regime_forecast = _pickle.loads(_rf_cache.read_bytes())
-        else:
-            from analytics.ml_regime_forecast import compute_regime_features as _crf
-            _rf_idx = len(engine.prices) - 1
-            if _rf_idx >= 60:
-                _rf_feats = _crf(engine.prices, _rf_idx, settings.sector_list(), settings)
-                if _rf_feats:
-                    # Map feature values to regime probabilities heuristically
-                    _vix_z = _rf_feats.get("vix_z", 0)
-                    _avg_c = _rf_feats.get("avg_corr", 0.3)
-                    _crisis_p = max(0, min(1, (_vix_z * 0.3 + _avg_c * 0.7)))
-                    _tension_p = max(0, min(1, 0.3 * abs(_vix_z)))
-                    _calm_p = max(0, 1 - _crisis_p - _tension_p - 0.3)
-                    _normal_p = max(0, 1 - _crisis_p - _tension_p - _calm_p)
-                    _ml_regime_forecast = {
-                        "probabilities": {
-                            "CALM": round(_calm_p, 3),
-                            "NORMAL": round(_normal_p, 3),
-                            "TENSION": round(_tension_p, 3),
-                            "CRISIS": round(_crisis_p, 3),
-                        },
-                        "features": _rf_feats,
-                    }
-                    _rf_cache.write_bytes(_pickle.dumps(_ml_regime_forecast))
+    def _load_json_safe(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return _json_agent.load(f)
+        except Exception:
+            return None
 
-        # Compute IC score and model accuracy from alpha research
-        if _ml_feature_importances:
-            _ml_drift_status["ic_score"] = 0.007
-            _ml_drift_status["model_accuracy"] = 55.7  # WR from OOS validation
-            _ml_drift_status["current_version"] = "v1"
-            _ml_drift_status["is_drifting"] = False
+    def _load_improvement_log():
+        return _load_json_safe(settings.project_root / "agents" / "auto_improve" / "improvement_log.json")
 
-        logger.info(
-            "ML models loaded: FI=%s (%d features), RF=%s",
-            "cached" if _ml_feature_importances else "none",
-            len(_ml_feature_importances) if _ml_feature_importances else 0,
-            "cached" if _ml_regime_forecast else "none",
-        )
-    except Exception as _ml_exc:
-        logger.warning("ML model loading failed (non-fatal): %s", _ml_exc)
+    def _load_methodology_results():
+        try:
+            _rd = settings.project_root / "agents" / "methodology" / "reports"
+            _lr = sorted(_rd.glob("*methodology_lab*"), reverse=True)
+            if _lr:
+                d = _load_json_safe(_lr[0])
+                if d and "results" in d:
+                    return d["results"]
+                if d and isinstance(d, dict) and any(isinstance(v, dict) and "sharpe" in v for v in d.values()):
+                    return d
+        except Exception:
+            pass
+        return None
+
+    def _compute_momentum_ranking():
+        try:
+            _p = engine.prices
+            _s = [s for s in settings.sector_list() if s in _p.columns]
+            if len(_s) < 5:
+                return None
+            _lr = np.log(_p[_s] / _p[_s].shift(1)).dropna()
+            _sp = settings.spy_ticker
+            _sr = np.log(_p[_sp] / _p[_sp].shift(1)).dropna() if _sp in _p.columns else pd.Series(0, index=_lr.index)
+            r = []
+            for s in _s:
+                m21 = float((_lr[s].iloc[-21:] - _sr.iloc[-21:]).sum()) if len(_lr) >= 21 else 0
+                m42 = float((_lr[s].iloc[-42:] - _sr.iloc[-42:]).sum()) if len(_lr) >= 42 else 0
+                v = float(_lr[s].iloc[-60:].std() * np.sqrt(252)) if len(_lr) >= 60 else 0.15
+                r.append({"ticker": s, "momentum_21d": m21, "momentum_42d": m42, "vol": v})
+            r.sort(key=lambda x: x["momentum_21d"], reverse=True)
+            return r
+        except Exception:
+            return None
+
+    _agent_registry_data = _load_json_safe(settings.project_root / "logs" / "agent_registry.json")
+    _decay_data = _load_json_safe(settings.project_root / "agents" / "alpha_decay" / "decay_status.json")
+    _regime_agent_data = _load_json_safe(settings.project_root / "agents" / "regime_forecaster" / "regime_forecast.json")
+    _risk_agent_data = _load_json_safe(settings.project_root / "agents" / "risk_guardian" / "risk_status.json")
+    _scout_data = _load_json_safe(settings.project_root / "agents" / "data_scout" / "scout_report.json")
+    _portfolio_alloc = _load_json_safe(settings.project_root / "agents" / "portfolio_construction" / "portfolio_weights.json")
+    _auto_improve_data = _load_json_safe(settings.project_root / "agents" / "auto_improve" / "machine_summary.json")
+    _optimizer_data = _load_json_safe(settings.project_root / "agents" / "optimizer" / "optimization_history.json")
+    _architect_data = _load_json_safe(settings.project_root / "agents" / "architect" / "improvement_history.json")
+    if _regime_agent_data and not _ml_regime_forecast:
+        _ml_regime_forecast = _regime_agent_data
+
+    logger.info("Agent outputs loaded: %d JSON files", sum(1 for x in [
+        _agent_registry_data, _decay_data, _regime_agent_data, _risk_agent_data,
+        _scout_data, _portfolio_alloc, _auto_improve_data] if x))
+
+    # ── Build UI components from results ────────────────────────────────────
+    cards_top, cards_bottom = build_overview_kpi_rows(master_df, settings, _health)
+    ui_outputs = build_engine_outputs(engine, master_df)
 
     # ==========================================================
     # Load Agent Outputs (JSON files produced by the agent system)
@@ -2824,13 +2247,15 @@ def build_app() -> dash.Dash:
             return html.Div(), html.Div()
         try:
             from analytics.backtest import WalkForwardBacktester
-            if data_state.artifacts is None:
-                return html.Div(), dbc.Alert("אין נתוני מחירים להרצת הבאקטסט.", color="danger")
             try:
-                prices_df = pd.read_parquet(data_state.artifacts.prices_path)
+                prices_df = engine.prices if engine is not None else None
+                if prices_df is None or prices_df.empty:
+                    prices_df = pd.read_parquet(settings.project_root / "data_lake" / "parquet" / "prices.parquet")
             except Exception:
                 from db.reader import DatabaseReader as _DBR
                 prices_df = _DBR(settings.db_path).read_prices()
+            if prices_df is None or prices_df.empty:
+                return html.Div(), dbc.Alert("אין נתוני מחירים להרצת הבאקטסט.", color="danger")
             if prices_df is None or prices_df.empty:
                 return html.Div(), dbc.Alert("אין נתוני מחירים להרצת הבאקטסט.", color="danger")
             bt = WalkForwardBacktester(settings)

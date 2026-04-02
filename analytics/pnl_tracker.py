@@ -150,7 +150,7 @@ class PnLResult:
     turnover_annual: float = 0.0
 
     # ── Summary table ────────────────────────────────────────────────────
-    summary_df: pd.DataFrame
+    summary_df: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # ── Main engine ──────────────────────────────────────────────────────────
