@@ -16,7 +16,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 # DDL executed in order — CREATE IF NOT EXISTS makes every statement idempotent
 _SCHEMAS = [
@@ -351,6 +351,32 @@ _INDEXES = [
         PRIMARY KEY (run_id, run_date)
     )""",
     "CREATE INDEX IF NOT EXISTS idx_run_ctx ON analytics.run_contexts(run_date DESC)",
+
+    # ── Data Quality Checks (audit trail for data quality per run) ──────
+    """CREATE TABLE IF NOT EXISTS analytics.data_quality (
+        run_id          INTEGER NOT NULL,
+        check_name      VARCHAR(100) NOT NULL,
+        table_name      VARCHAR(100),
+        status          VARCHAR(10),
+        message         VARCHAR(500),
+        value           DOUBLE,
+        threshold       DOUBLE,
+        checked_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, check_name)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_dq_run ON analytics.data_quality(run_id DESC)",
+
+    # ── Agent Snapshots (canonical DB storage for agent outputs) ─────────
+    """CREATE TABLE IF NOT EXISTS analytics.agent_snapshots (
+        run_id          INTEGER NOT NULL,
+        agent_name      VARCHAR(50) NOT NULL,
+        snapshot_date   DATE NOT NULL,
+        status          VARCHAR(20),
+        output_json     VARCHAR,
+        inserted_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (run_id, agent_name)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_agent_snap ON analytics.agent_snapshots(agent_name, run_id DESC)",
 ]
 
 _MIGRATIONS = [
@@ -361,6 +387,7 @@ _MIGRATIONS = [
     (5, "add_signal_decay_and_regime_tables"),
     (6, "add_trade_book_table"),
     (7, "add_run_context_table"),
+    (8, "add_data_quality_and_agent_snapshots"),
 ]
 
 

@@ -140,6 +140,10 @@ class EngineService:
         # Phase 8: Trade book
         self._step("trade_book", self._load_trade_book)
 
+        # Phase 9: Data quality + agent snapshots
+        self._step("data_quality", self._run_data_quality)
+        self._step("agent_snapshots", self._persist_agent_snapshots)
+
         # Finalize and persist run context
         self.ctx.finalize()
         self._persist_run_context()
@@ -463,6 +467,43 @@ class EngineService:
             self.results.trade_book_history = reader.read_trade_book_history(n_runs=10)
         except Exception:
             pass
+
+    def _run_data_quality(self):
+        """Run canonical data quality checks and persist results."""
+        from db.repository import Repository
+        repo = Repository(self.settings.db_path)
+        checks = repo.run_data_quality_checks()
+        if self.ctx.run_id > 0:
+            repo.write_data_quality(self.ctx.run_id, checks)
+        n_pass = sum(1 for c in checks if c.status == "PASS")
+        n_warn = sum(1 for c in checks if c.status == "WARN")
+        n_fail = sum(1 for c in checks if c.status == "FAIL")
+        log.info("Data quality: %d PASS, %d WARN, %d FAIL", n_pass, n_warn, n_fail)
+
+    def _persist_agent_snapshots(self):
+        """Persist key agent outputs to DuckDB (canonical store)."""
+        import json as _json
+        from db.repository import Repository
+        repo = Repository(self.settings.db_path)
+        run_id = self.ctx.run_id
+        if run_id <= 0:
+            return
+
+        from services.data_loader import DataLoader
+        loader = DataLoader(self.settings)
+        agent_data = loader.load_agent_outputs()
+        n_persisted = 0
+        for agent_name, data in agent_data.items():
+            if data is not None:
+                try:
+                    repo.write_agent_snapshot(
+                        run_id, agent_name, "ok",
+                        _json.dumps(data, default=str)[:50000],
+                    )
+                    n_persisted += 1
+                except Exception:
+                    pass
+        log.info("Agent snapshots persisted: %d/%d to DuckDB", n_persisted, len(agent_data))
 
     def _persist_run_context(self):
         """Save RunContext to DuckDB for lineage tracking."""
