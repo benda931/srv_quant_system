@@ -1151,6 +1151,7 @@ def build_app() -> dash.Dash:
                             f"{_seed_trader.portfolio.capital:,.0f}")
 
             # Fix P&L: backdate entry_prices to 5 days ago so P&L is realistic
+            _pp_path2 = settings.project_root / "data" / "paper_portfolio.json"
             try:
                 _pt_prices = engine.prices if engine is not None and hasattr(engine, 'prices') else None
                 if _paper_portfolio is not None and _pt_prices is not None and not _pt_prices.empty:
