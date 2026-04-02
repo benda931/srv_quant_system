@@ -2367,6 +2367,81 @@ def build_app() -> dash.Dash:
         except Exception:
             pass
 
+        # ── Monte Carlo + Momentum snapshot cards ─────────────────
+        mc_kpis: Any = html.Div()
+        if _mc_stress_result is not None:
+            _mc = _mc_stress_result
+            mc_kpis = dbc.Card(
+                dbc.CardBody(
+                    dbc.Row([
+                        dbc.Col(html.Div("🎲 Monte Carlo Risk (21d)", className="fw-bold"), width="auto"),
+                        dbc.Col([
+                            html.Span("VaR 95%: ", className="text-muted small"),
+                            html.Span(
+                                f"{_mc.var_95*100:.2f}%",
+                                className="small fw-bold me-3 text-warning",
+                            ),
+                            html.Span("CVaR 95%: ", className="text-muted small"),
+                            html.Span(
+                                f"{_mc.cvar_95*100:.2f}%",
+                                className="small fw-bold me-3 text-danger",
+                            ),
+                            html.Span("Skew: ", className="text-muted small"),
+                            html.Span(
+                                f"{_mc.skewness:+.2f}",
+                                className="small fw-bold me-3",
+                            ),
+                            html.Span("Kurt: ", className="text-muted small"),
+                            html.Span(
+                                f"{_mc.kurtosis:.1f}",
+                                className="small fw-bold",
+                            ),
+                        ]),
+                    ], align="center"),
+                ),
+                className="mb-3 border-info", style={"borderWidth": "1px"},
+            )
+
+        # Best strategy snapshot
+        momentum_kpis: Any = html.Div()
+        try:
+            _meth_results = _load_methodology_results()
+            if _meth_results:
+                _rm = _meth_results.get("RELATIVE_MOMENTUM", {})
+                if _rm and isinstance(_rm, dict) and _rm.get("sharpe", 0) > 0:
+                    momentum_kpis = dbc.Card(
+                        dbc.CardBody(
+                            dbc.Row([
+                                dbc.Col(html.Div("📈 Best Strategy: Relative Momentum", className="fw-bold"), width="auto"),
+                                dbc.Col([
+                                    html.Span("Sharpe: ", className="text-muted small"),
+                                    html.Span(
+                                        f"{_rm['sharpe']:.2f}",
+                                        className="small fw-bold me-3 text-success",
+                                    ),
+                                    html.Span("WR: ", className="text-muted small"),
+                                    html.Span(
+                                        f"{_rm.get('win_rate', 0):.0%}",
+                                        className="small fw-bold me-3",
+                                    ),
+                                    html.Span("PnL: ", className="text-muted small"),
+                                    html.Span(
+                                        f"{_rm.get('total_pnl', 0):.1%}",
+                                        className="small fw-bold me-3 text-success",
+                                    ),
+                                    html.Span("Trades: ", className="text-muted small"),
+                                    html.Span(
+                                        f"{_rm.get('total_trades', 0)}",
+                                        className="small fw-bold",
+                                    ),
+                                ]),
+                            ], align="center"),
+                        ),
+                        className="mb-3 border-success", style={"borderWidth": "1px"},
+                    )
+        except Exception:
+            pass
+
         return dbc.Container(
             fluid=True,
             children=[
@@ -2380,7 +2455,9 @@ def build_app() -> dash.Dash:
                 cards_top,
                 cards_bottom,
                 dss_kpis,
+                momentum_kpis,
                 dispersion_kpis,
+                mc_kpis,
                 paper_kpis,
                 agent_kpis,
                 stress_kpis,

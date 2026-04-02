@@ -399,3 +399,235 @@ def batch_mean_reversion_scores(
                 rationale=f"Computation failed: {e}",
             )
     return results
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Ornstein-Uhlenbeck MLE Estimator
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class OUEstimate:
+    """Ornstein-Uhlenbeck process parameter estimates via MLE.
+
+    dX_t = θ(μ - X_t)dt + σ dW_t
+
+    θ : speed of mean-reversion (higher = faster)
+    μ : long-run mean level
+    σ : diffusion volatility
+    half_life : ln(2)/θ
+    """
+    theta: float            # Mean-reversion speed
+    mu: float               # Long-run mean
+    sigma: float            # Diffusion coefficient
+    half_life: float        # ln(2)/θ in same units as dt
+    log_likelihood: float   # Maximized log-likelihood
+    n_obs: int
+
+
+def ou_mle(series: pd.Series, dt: float = 1.0) -> OUEstimate:
+    """
+    Maximum Likelihood Estimation of Ornstein-Uhlenbeck parameters.
+
+    Uses the exact discrete-time transition density:
+      X_{t+dt} | X_t ~ N(X_t·e^{-θdt} + μ(1-e^{-θdt}), σ²(1-e^{-2θdt})/(2θ))
+
+    Parameters
+    ----------
+    series : pd.Series — the time series to fit
+    dt : float — time step (1.0 = 1 day)
+
+    Returns
+    -------
+    OUEstimate with (θ, μ, σ, half_life, log_likelihood)
+    """
+    x = series.dropna().values.astype(float)
+    n = len(x)
+    if n < 30:
+        return OUEstimate(theta=0, mu=0, sigma=0, half_life=float("inf"),
+                          log_likelihood=float("-inf"), n_obs=n)
+
+    # Step 1: AR(1) regression to get initial estimates
+    # X_{t+1} = a + b·X_t + ε
+    x_lag = x[:-1]
+    x_lead = x[1:]
+
+    b = float(np.corrcoef(x_lag, x_lead)[0, 1] * x_lead.std() / (x_lag.std() + 1e-15))
+    a = float(x_lead.mean() - b * x_lag.mean())
+    residuals = x_lead - (a + b * x_lag)
+    sigma_eps = float(residuals.std())
+
+    # Step 2: Convert AR(1) → OU parameters
+    if b <= 0 or b >= 1:
+        # No mean-reversion
+        return OUEstimate(theta=0, mu=float(x.mean()), sigma=float(x.std()),
+                          half_life=float("inf"), log_likelihood=float("-inf"), n_obs=n)
+
+    theta = -np.log(b) / dt
+    mu = a / (1 - b)
+    sigma_ou = sigma_eps * np.sqrt(2 * theta / (1 - b ** 2 + 1e-15))
+    half_life = np.log(2) / theta if theta > 1e-10 else float("inf")
+
+    # Step 3: Exact log-likelihood
+    e_neg_theta_dt = np.exp(-theta * dt)
+    var_transition = sigma_ou ** 2 * (1 - e_neg_theta_dt ** 2) / (2 * theta + 1e-15)
+    if var_transition <= 0:
+        var_transition = sigma_eps ** 2
+
+    mu_transition = x_lag * e_neg_theta_dt + mu * (1 - e_neg_theta_dt)
+    ll = -0.5 * (n - 1) * np.log(2 * np.pi * var_transition) \
+         - 0.5 * np.sum((x_lead - mu_transition) ** 2) / var_transition
+
+    return OUEstimate(
+        theta=round(float(theta), 6),
+        mu=round(float(mu), 6),
+        sigma=round(float(sigma_ou), 6),
+        half_life=round(float(half_life), 2),
+        log_likelihood=round(float(ll), 2),
+        n_obs=n,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Variance Ratio Test (Lo & MacKinlay, 1988)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class VarianceRatioResult:
+    """Variance ratio test for random walk vs mean-reversion."""
+    vr: float                # VR(q) — ratio of long-horizon to short-horizon variance
+    z_stat: float            # Heteroskedasticity-adjusted z-statistic
+    p_value: float           # Two-sided p-value
+    is_mean_reverting: bool  # True if VR < 1 and significant (p < 0.05)
+    q: int                   # Horizon parameter
+    interpretation: str
+
+
+def variance_ratio_test(
+    series: pd.Series, q: int = 10,
+) -> VarianceRatioResult:
+    """
+    Lo & MacKinlay (1988) variance ratio test.
+
+    VR(q) = Var(r_t + ... + r_{t+q-1}) / (q · Var(r_t))
+
+    VR < 1 → mean-reversion
+    VR = 1 → random walk
+    VR > 1 → momentum / trending
+
+    Uses heteroskedasticity-robust z-statistic.
+    """
+    x = series.dropna().values.astype(float)
+    n = len(x)
+    if n < q * 3:
+        return VarianceRatioResult(vr=1.0, z_stat=0.0, p_value=1.0,
+                                   is_mean_reverting=False, q=q,
+                                   interpretation="Insufficient data")
+
+    # Returns
+    r = np.diff(x)
+    T = len(r)
+    mu = r.mean()
+
+    # Variances
+    sigma_1 = float(np.sum((r - mu) ** 2) / (T - 1))
+    r_q = np.array([r[i:i + q].sum() for i in range(T - q + 1)])
+    sigma_q = float(np.sum((r_q - q * mu) ** 2) / (T - q))
+
+    vr = sigma_q / (q * sigma_1) if sigma_1 > 1e-15 else 1.0
+
+    # Heteroskedasticity-adjusted z-stat (Lo-MacKinlay)
+    delta_hat = 0.0
+    for j in range(1, q):
+        numer = np.sum((r[j:] - mu) ** 2 * (r[:-j] - mu) ** 2)
+        denom = (np.sum((r - mu) ** 2)) ** 2
+        delta_j = T * numer / denom if denom > 0 else 0
+        weight = (2 * (q - j) / q) ** 2
+        delta_hat += weight * delta_j
+
+    z_star = (vr - 1) / np.sqrt(max(delta_hat, 1e-15)) if delta_hat > 0 else 0.0
+
+    # Two-sided p-value (normal approximation)
+    from scipy.stats import norm
+    p_value = float(2 * norm.sf(abs(z_star)))
+
+    is_mr = vr < 1 and p_value < 0.05
+
+    if vr < 0.85:
+        interp = f"Strong mean-reversion (VR={vr:.3f})"
+    elif vr < 1.0:
+        interp = f"Mild mean-reversion (VR={vr:.3f})"
+    elif vr > 1.15:
+        interp = f"Trending/momentum (VR={vr:.3f})"
+    else:
+        interp = f"Near random walk (VR={vr:.3f})"
+
+    return VarianceRatioResult(
+        vr=round(vr, 4),
+        z_stat=round(z_star, 3),
+        p_value=round(p_value, 4),
+        is_mean_reverting=is_mr,
+        q=q,
+        interpretation=interp,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Engle-Granger Cointegration Test
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CointegrationResult:
+    """Engle-Granger two-step cointegration test result."""
+    is_cointegrated: bool
+    adf_stat: float           # ADF on residuals of cointegrating regression
+    adf_pvalue: float
+    beta: float               # Hedge ratio (cointegrating coefficient)
+    half_life: float          # OU half-life of spread
+    spread_z: float           # Current z-score of the spread
+    spread_std: float         # Standard deviation of spread
+
+
+def engle_granger_coint(
+    y: pd.Series, x: pd.Series, significance: float = 0.05,
+) -> CointegrationResult:
+    """
+    Engle-Granger two-step cointegration test.
+
+    Step 1: OLS regression y = α + β·x + ε
+    Step 2: ADF test on residuals ε (must be stationary for cointegration)
+    """
+    aligned = pd.DataFrame({"y": y, "x": x}).dropna()
+    n = len(aligned)
+    if n < 60:
+        return CointegrationResult(
+            is_cointegrated=False, adf_stat=0, adf_pvalue=1,
+            beta=0, half_life=float("inf"), spread_z=0, spread_std=0,
+        )
+
+    # Step 1: OLS
+    y_vals = aligned["y"].values
+    x_vals = aligned["x"].values
+    x_with_const = np.column_stack([np.ones(n), x_vals])
+    coeffs, _, _, _ = np.linalg.lstsq(x_with_const, y_vals, rcond=None)
+    alpha, beta = coeffs
+
+    # Residuals (spread)
+    spread = y_vals - (alpha + beta * x_vals)
+    spread_std = float(spread.std())
+    spread_z = float(spread[-1] / spread_std) if spread_std > 1e-10 else 0.0
+
+    # Step 2: ADF on spread
+    adf_stat, adf_p = _adf_test(pd.Series(spread))
+
+    # Half-life of spread
+    hl = _estimate_half_life(pd.Series(spread))
+
+    return CointegrationResult(
+        is_cointegrated=adf_p < significance,
+        adf_stat=round(adf_stat, 4),
+        adf_pvalue=round(adf_p, 4),
+        beta=round(beta, 6),
+        half_life=round(hl, 1),
+        spread_z=round(spread_z, 3),
+        spread_std=round(spread_std, 6),
+    )
