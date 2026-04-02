@@ -1143,14 +1143,22 @@ def build_pnl_tracker_tab(pnl_result: Any = None) -> html.Div:
 
     # ── Secondary KPIs ───────────────────────────────────────────────────
     calmar_str = _ff(pnl_result.calmar) if _m.isfinite(pnl_result.calmar) else "—"
+    _sortino = getattr(pnl_result, "sortino", 0)
+    _ir = getattr(pnl_result, "information_ratio", 0)
+    _turnover = getattr(pnl_result, "turnover_annual", 0)
+
     kpi_row2 = dbc.Row([
         _kpi("Calmar", calmar_str, "info", small=True),
+        _kpi("Sortino", f"{_sortino:.2f}" if _m.isfinite(_sortino) else "—",
+             "success" if _sortino > 1 else "warning", small=True),
+        _kpi("Info Ratio", f"{_ir:.2f}" if _m.isfinite(_ir) else "—",
+             "success" if _ir > 0.5 else "secondary", small=True),
+        _kpi("Turnover/yr", f"{_turnover:.0f}%", "secondary", small=True),
         _kpi("P&L יומי ממוצע", f"{pnl_result.avg_daily_pnl*10000:.1f}bps", "info", small=True),
-        _kpi("תנודתיות P&L", f"{pnl_result.pnl_volatility*10000:.0f}bps", "warning", small=True),
-        _kpi("ימי רווח", f"{pnl_result.win_days}", "success", small=True),
-        _kpi("ימי הפסד", f"{pnl_result.loss_days}", "danger", small=True),
-        _kpi("יום הכי טוב", f"{pnl_result.best_day*10000:.0f}bps", "success", small=True),
-        _kpi("יום הכי גרוע", f"{pnl_result.worst_day*10000:.0f}bps", "danger", small=True),
+        _kpi("ימי רווח / הפסד", f"{pnl_result.win_days} / {pnl_result.loss_days}",
+             "success" if pnl_result.win_days > pnl_result.loss_days else "danger", small=True),
+        _kpi("Best / Worst Day", f"{pnl_result.best_day*10000:.0f} / {pnl_result.worst_day*10000:.0f}bps",
+             "secondary", small=True),
     ], className="mb-3 g-2")
 
     # ── Cumulative P&L chart ─────────────────────────────────────────────
@@ -1327,9 +1335,44 @@ def build_pnl_tracker_tab(pnl_result: Any = None) -> html.Div:
         yaxis=dict(autorange="reversed"),
     )
 
+    # ── Factor Attribution bar chart ────────────────────────────────────
+    factor_section = html.Div()
+    _factor_attr = getattr(pnl_result, "factor_attribution", None)
+    if _factor_attr and isinstance(_factor_attr, dict):
+        _factor_names_heb = {
+            "spy_beta": "SPY Beta",
+            "rates_tnx": "Rates (TNX)",
+            "dollar_dxy": "Dollar (DXY)",
+            "credit_hyg": "Credit (HYG)",
+            "idiosyncratic": "Alpha (Idio)",
+        }
+        _fn = list(_factor_attr.keys())
+        _fv = [_factor_attr[k] * 100 for k in _fn]
+        _fl = [_factor_names_heb.get(k, k) for k in _fn]
+        _fc = ["#2196f3" if v > 0 else "#f44336" for v in _fv]
+
+        fig_factor = go.Figure(go.Bar(
+            x=_fl, y=_fv,
+            marker_color=_fc,
+            text=[f"{v:+.2f}%" for v in _fv],
+            textposition="outside",
+        ))
+        fig_factor.add_hline(y=0, line_color="#555", line_width=1)
+        fig_factor.update_layout(
+            template="plotly_dark",
+            paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+            title=dict(text="Factor Attribution — מקור ה-P&L", font=dict(size=13)),
+            yaxis=dict(title="Cumulative P&L (%)"),
+            height=280, margin=dict(l=60, r=20, t=40, b=40),
+            showlegend=False,
+        )
+        factor_section = dbc.Card(dbc.CardBody(
+            dcc.Graph(figure=fig_factor, config={"displayModeBar": False}),
+        ), className="border-0 bg-transparent mb-3")
+
     # ── Assembly ─────────────────────────────────────────────────────────
     return html.Div([
-        html.H5("💰 Live P&L Tracker", className="mb-3"),
+        html.H5("💰 P&L Tracker — מעקב ביצועים + ייחוס גורמים", className="mb-3"),
         kpi_row,
         kpi_row2,
         dbc.Row([
@@ -1348,6 +1391,7 @@ def build_pnl_tracker_tab(pnl_result: Any = None) -> html.Div:
                 dcc.Graph(figure=fig_monthly, config={"displayModeBar": False}),
             ), className="border-0 bg-transparent"), width=6),
         ], className="mb-2"),
+        factor_section,
         dbc.Card(dbc.CardBody(
             dcc.Graph(figure=fig_sector, config={"displayModeBar": False}),
         ), className="border-0 bg-transparent mb-3"),
