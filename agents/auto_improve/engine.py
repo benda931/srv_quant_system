@@ -570,14 +570,25 @@ class AutoImprover:
                     },
                 })
 
-        # 3. Check for poor win rates
+        # 3. Check for poor win rates (skip for momentum strategies — they naturally have WR < 50%)
         best_wr = metrics.get("best_win_rate", 0)
-        if best_wr < 0.50:
+        best_name = metrics.get("best_name", "")
+        is_momentum = "MOMENTUM" in best_name.upper()
+        if best_wr < 0.50 and not is_momentum:
             weaknesses.append({
                 "type": "low_win_rate",
                 "description": f"Win rate below 50%: {best_wr:.1%}",
                 "severity": "medium",
                 "context": {"win_rate": best_wr},
+            })
+
+        # 3b. Momentum optimization opportunity
+        if is_momentum and best_sharpe > 0:
+            weaknesses.append({
+                "type": "momentum_tuning",
+                "description": f"Momentum strategy Sharpe={best_sharpe:.3f} — can optimize lookback, rebal, top_n",
+                "severity": "low",
+                "context": {"sharpe": best_sharpe, "strategy": best_name, "win_rate": best_wr},
             })
 
         # 4. Check for excessive drawdown
@@ -644,6 +655,9 @@ class AutoImprover:
 
             elif wtype == "all_negative":
                 suggestions.extend(self._suggest_for_all_negative(params))
+
+            elif wtype == "momentum_tuning":
+                suggestions.extend(self._suggest_for_momentum(ctx, params))
 
         # Deduplicate by param name (keep first)
         seen = set()
@@ -836,6 +850,65 @@ class AutoImprover:
 
         return suggestions[:MAX_SUGGESTIONS_PER_CYCLE]
 
+    def _suggest_for_momentum(self, ctx: Dict, params: Dict) -> List[Dict]:
+        """
+        Momentum-specific tuning suggestions.
+        Tests variations of lookback, top_n, rebal_days, max_weight.
+        """
+        suggestions = []
+        import random
+        rng = random.Random(42 + hash(str(ctx.get("sharpe", 0))))
+
+        # Momentum lookback: try different windows
+        current_lb = params.get("momentum_lookback", 21)
+        candidates_lb = [10, 15, 21, 42, 63]
+        alt_lb = rng.choice([c for c in candidates_lb if c != current_lb])
+        suggestions.append({
+            "param": "momentum_lookback",
+            "current": current_lb,
+            "proposed": alt_lb,
+            "reason": f"Test {alt_lb}d momentum lookback (current: {current_lb}d, Sharpe={ctx.get('sharpe', 0):.3f})",
+            "source": "rule_momentum",
+        })
+
+        # Top N sectors
+        current_top = params.get("momentum_top_n", 3)
+        alt_top = rng.choice([2, 3, 4])
+        if alt_top != current_top:
+            suggestions.append({
+                "param": "momentum_top_n",
+                "current": current_top,
+                "proposed": alt_top,
+                "reason": f"Test top/bottom {alt_top} sectors (current: {current_top})",
+                "source": "rule_momentum",
+            })
+
+        # Rebalance frequency
+        current_rebal = params.get("momentum_rebal_days", 21)
+        alt_rebal = rng.choice([10, 15, 21, 42])
+        if alt_rebal != current_rebal:
+            suggestions.append({
+                "param": "momentum_rebal_days",
+                "current": current_rebal,
+                "proposed": alt_rebal,
+                "reason": f"Test {alt_rebal}d rebalance frequency (current: {current_rebal}d)",
+                "source": "rule_momentum",
+            })
+
+        # Max weight
+        current_w = params.get("momentum_max_weight", 0.10)
+        alt_w = rng.choice([0.06, 0.08, 0.10, 0.12, 0.15])
+        if abs(alt_w - current_w) > 0.01:
+            suggestions.append({
+                "param": "momentum_max_weight",
+                "current": current_w,
+                "proposed": alt_w,
+                "reason": f"Test {alt_w:.0%} max weight (current: {current_w:.0%})",
+                "source": "rule_momentum",
+            })
+
+        return suggestions[:3]  # Max 3 momentum suggestions per cycle
+
     def ask_gpt_for_ideas(self, weaknesses: List[Dict], current_params: Dict) -> List[Dict]:
         """
         Query GPT for optimization ideas. Short focused prompts, max 3 calls.
@@ -972,10 +1045,11 @@ class AutoImprover:
             try:
                 from analytics.methodology_lab import RelativeMomentum
                 test_method = RelativeMomentum(
-                    lookback=int(getattr(test_settings, "signal_optimal_hold", 21)),
-                    top_n=3,
-                    rebal_days=int(getattr(test_settings, "signal_optimal_hold", 21)),
-                    max_weight=float(getattr(test_settings, "trade_max_weight_pct", 0.10)),
+                    lookback=int(getattr(test_settings, "momentum_lookback", 21)),
+                    top_n=int(getattr(test_settings, "momentum_top_n", 3)),
+                    rebal_days=int(getattr(test_settings, "momentum_rebal_days", 21)),
+                    max_weight=float(getattr(test_settings, "momentum_max_weight", 0.10)),
+                    vol_scale=bool(getattr(test_settings, "momentum_vol_scale", True)),
                 )
             except ImportError:
                 from analytics.methodology_lab import AlphaWhitelistMR
@@ -992,9 +1066,9 @@ class AutoImprover:
                 )
             result = lab.run_methodology(test_method)
 
-            # Compare vs AlphaWhitelistMR baseline using WR + Sharpe composite
-            baseline_wr = getattr(self, "_last_baseline_wr", 0.53)
-            baseline_sh = self._last_baseline_sharpe
+            # Compare vs baseline using WR + Sharpe composite
+            baseline_wr = getattr(self, "_last_baseline_wr", 0.50)
+            baseline_sh = getattr(self, "_last_baseline_sharpe", 0.0)
 
             # Composite: 60% WR improvement + 40% Sharpe improvement
             wr_delta = result.win_rate - baseline_wr

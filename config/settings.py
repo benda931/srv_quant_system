@@ -181,6 +181,18 @@ class Settings(BaseSettings):
     # Optimal hold period (days) — CALIBRATED: alpha research OOS Sharpe 0.885
     signal_optimal_hold: int = Field(default=20, ge=1, le=60)
 
+    # ── Momentum strategy parameters (tuned by auto_improve) ────────────
+    momentum_lookback: int = Field(default=21, ge=5, le=126,
+                                   description="Relative momentum lookback (trading days)")
+    momentum_top_n: int = Field(default=3, ge=1, le=5,
+                                description="Number of top/bottom sectors to trade")
+    momentum_rebal_days: int = Field(default=21, ge=5, le=63,
+                                     description="Rebalancing frequency (trading days)")
+    momentum_max_weight: float = Field(default=0.10, ge=0.02, le=0.20,
+                                        description="Max weight per momentum position")
+    momentum_vol_scale: bool = Field(default=True,
+                                      description="Scale position size inversely with vol")
+
     # Regime-adaptive sizing — CALIBRATED 2026-03-24
     # CALM: MR Sharpe=0.66 → full size + bonus
     # NORMAL: MR Sharpe=0.23 → full size
