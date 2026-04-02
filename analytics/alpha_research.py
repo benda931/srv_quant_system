@@ -1262,3 +1262,4 @@ def _persist_report(report: AlphaReport) -> None:
         AgentBus().publish("alpha_research", report_dict)
     except Exception:
         pass
+ 
