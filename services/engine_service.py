@@ -140,8 +140,9 @@ class EngineService:
         # Phase 8: Trade book
         self._step("trade_book", self._load_trade_book)
 
-        # Finalize
+        # Finalize and persist run context
         self.ctx.finalize()
+        self._persist_run_context()
         self._log_summary()
 
         return self.results
@@ -462,6 +463,15 @@ class EngineService:
             self.results.trade_book_history = reader.read_trade_book_history(n_runs=10)
         except Exception:
             pass
+
+    def _persist_run_context(self):
+        """Save RunContext to DuckDB for lineage tracking."""
+        try:
+            from db.writer import DatabaseWriter
+            dw = DatabaseWriter(self.settings.db_path)
+            dw.write_run_context(self.ctx)
+        except Exception as e:
+            log.debug("RunContext persistence failed: %s", e)
 
     def _log_summary(self):
         ok = len(self.ctx.steps_completed)

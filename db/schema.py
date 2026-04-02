@@ -16,7 +16,7 @@ import duckdb
 
 logger = logging.getLogger(__name__)
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 # DDL executed in order — CREATE IF NOT EXISTS makes every statement idempotent
 _SCHEMAS = [
@@ -329,6 +329,28 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_trade_book_tick ON analytics.trade_book(ticker, run_date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_regime_hist     ON analytics.regime_history(date DESC)",
     "CREATE INDEX IF NOT EXISTS idx_regime_trans    ON analytics.regime_transitions(transition_date DESC)",
+
+    # ── Run Context (lineage tracking) ──────────────────────────────────
+    """CREATE TABLE IF NOT EXISTS analytics.run_contexts (
+        run_id          INTEGER,
+        run_uuid        VARCHAR(8),
+        run_date        DATE,
+        started_at      TIMESTAMP,
+        finished_at     TIMESTAMP,
+        duration_s      DOUBLE,
+        regime          VARCHAR(16),
+        vix_level       DOUBLE,
+        safety_label    VARCHAR(16),
+        safety_score    DOUBLE,
+        data_health     VARCHAR(16),
+        prices_rows     INTEGER,
+        steps_ok        INTEGER,
+        steps_fail      INTEGER,
+        steps_failed    VARCHAR,
+        errors_json     VARCHAR,
+        PRIMARY KEY (run_id, run_date)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_run_ctx ON analytics.run_contexts(run_date DESC)",
 ]
 
 _MIGRATIONS = [
@@ -338,6 +360,7 @@ _MIGRATIONS = [
     (4, "add_backtest_ml_optimization_tables"),
     (5, "add_signal_decay_and_regime_tables"),
     (6, "add_trade_book_table"),
+    (7, "add_run_context_table"),
 ]
 
 

@@ -1121,6 +1121,7 @@ def build_app() -> dash.Dash:
             dcc.Store(id="master-store", data=master_df.to_dict("records")),
             dcc.Store(id="table-store", data=ui_outputs["table_df"].to_dict("records")),
             dcc.Store(id="backtest-store", data=None),
+            dcc.Store(id="run-context-store", data=ctx.summary if ctx else {}),
             dcc.Interval(id="auto-refresh-interval", interval=5 * 60 * 1000, n_intervals=0),
             # Daily brief modal
             dbc.Modal(

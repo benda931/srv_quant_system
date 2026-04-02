@@ -548,6 +548,43 @@ class DatabaseWriter:
         logger.info("write_trade_book: upserted %d tickets (%d active) for run_id=%d", n, active, run_id)
         return n
 
+    # ── Run Context persistence ─────────────────────────────────────────────
+
+    def write_run_context(self, ctx) -> None:
+        """
+        Persist a RunContext to analytics.run_contexts for full lineage tracking.
+        """
+        import json as _json_ctx
+        try:
+            self.conn.execute("""
+                INSERT OR REPLACE INTO analytics.run_contexts (
+                    run_id, run_uuid, run_date, started_at, finished_at, duration_s,
+                    regime, vix_level, safety_label, safety_score, data_health,
+                    prices_rows, steps_ok, steps_fail, steps_failed, errors_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                ctx.run_id,
+                ctx.run_uuid,
+                ctx.run_date,
+                ctx.started_at.isoformat() if ctx.started_at else None,
+                ctx.finished_at.isoformat() if ctx.finished_at else None,
+                ctx.duration_s,
+                ctx.regime,
+                ctx.vix_level,
+                ctx.safety_label,
+                ctx.safety_score,
+                ctx.data_health_label,
+                ctx.prices_rows,
+                len(ctx.steps_completed),
+                len(ctx.steps_failed),
+                ",".join(ctx.steps_failed) if ctx.steps_failed else "",
+                _json_ctx.dumps(ctx.errors) if ctx.errors else "{}",
+            ])
+            logger.info("write_run_context: run_id=%d, %d steps OK, regime=%s",
+                        ctx.run_id, len(ctx.steps_completed), ctx.regime)
+        except Exception as e:
+            logger.warning("write_run_context failed: %s", e)
+
     # ── Data pruning ──────────────────────────────────────────────────────────
 
     def prune_old_snapshots(self, snapshot_retain_days: int = 90, holdings_retain_days: int = 30) -> None:
