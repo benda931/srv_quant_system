@@ -1533,6 +1533,32 @@ def build_app() -> dash.Dash:
     def _load_improvement_log():
         return _load_json_safe(settings.project_root / "agents" / "auto_improve" / "improvement_log.json")
 
+    def _compute_momentum_ranking():
+        """Compute real-time sector momentum ranking for DSS tab."""
+        try:
+            if engine is None or not hasattr(engine, 'prices') or engine.prices is None:
+                return None
+            _prices = engine.prices
+            _sectors = [s for s in settings.sector_list() if s in _prices.columns]
+            if len(_sectors) < 5 or len(_prices) < 60:
+                return None
+
+            _spy = settings.spy_ticker
+            _log_rets = np.log(_prices[_sectors] / _prices[_sectors].shift(1)).dropna()
+            _spy_ret = np.log(_prices[_spy] / _prices[_spy].shift(1)).dropna() if _spy in _prices.columns else pd.Series(0, index=_log_rets.index)
+
+            _ranking = []
+            for s in _sectors:
+                _mom_21 = float((_log_rets[s].iloc[-21:] - _spy_ret.iloc[-21:]).sum()) if len(_log_rets) >= 21 else 0
+                _mom_42 = float((_log_rets[s].iloc[-42:] - _spy_ret.iloc[-42:]).sum()) if len(_log_rets) >= 42 else 0
+                _vol = float(_log_rets[s].iloc[-60:].std() * np.sqrt(252)) if len(_log_rets) >= 60 else 0.15
+                _ranking.append({"ticker": s, "momentum_21d": _mom_21, "momentum_42d": _mom_42, "vol": _vol})
+
+            _ranking.sort(key=lambda x: x["momentum_21d"], reverse=True)
+            return _ranking
+        except Exception:
+            return None
+
     def _load_methodology_results():
         """Load latest methodology lab results for strategy ranking display."""
         try:
@@ -1792,7 +1818,8 @@ def build_app() -> dash.Dash:
                                       _dss_monitor_summary, _options_surface,
                                       _tail_risk_es, _methodology_ranking,
                                       _paper_portfolio, _dispersion_result,
-                                      _dss_trade_book_history),
+                                      _dss_trade_book_history,
+                                      momentum_ranking=_compute_momentum_ranking()),
                     ],
                 )],
                 type="circle", color="#00bc8c", style={"minHeight": "200px"},

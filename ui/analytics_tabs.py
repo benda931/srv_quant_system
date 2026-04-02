@@ -1769,6 +1769,7 @@ def build_dss_tab(
     paper_portfolio: Optional[Dict] = None,
     dispersion_result: Any = None,
     trade_book_history: Optional[pd.DataFrame] = None,
+    momentum_ranking: Optional[List[Dict]] = None,
 ) -> html.Div:
     """
     Build the Decision Support System tab:
@@ -1933,6 +1934,63 @@ def build_dss_tab(
             ]),
         ], className="border-primary mb-3", style={"borderTop": "3px solid var(--bs-primary)"})
         sections.append(signal_table)
+
+        # ── Momentum Ranking Table ────────────────────────────────────────
+        if momentum_ranking:
+            mom_rows = []
+            for i, item in enumerate(momentum_ranking):
+                ticker = item.get("ticker", "")
+                mom_21d = item.get("momentum_21d", 0)
+                mom_42d = item.get("momentum_42d", 0)
+                vol = item.get("vol", 0)
+                rank = i + 1
+
+                if rank <= 3:
+                    direction = "LONG"
+                    dir_color = "success"
+                    dir_icon = "▲"
+                elif rank >= len(momentum_ranking) - 2:
+                    direction = "SHORT"
+                    dir_color = "danger"
+                    dir_icon = "▼"
+                else:
+                    direction = "—"
+                    dir_color = "secondary"
+                    dir_icon = "—"
+
+                mom_color = "#20c997" if mom_21d > 0 else "#dc3545"
+
+                mom_rows.append(html.Tr([
+                    html.Td(f"#{rank}", style={"fontSize": "11px", "fontWeight": "bold"}),
+                    html.Td(ticker, style={"fontSize": "12px", "fontWeight": "bold"}),
+                    html.Td(dbc.Badge(f"{dir_icon} {direction}", color=dir_color, style={"fontSize": "9px"})),
+                    html.Td(f"{mom_21d:+.2%}", style={"fontSize": "11px", "color": mom_color, "fontFamily": "monospace"}),
+                    html.Td(f"{mom_42d:+.2%}", style={"fontSize": "11px", "fontFamily": "monospace"}),
+                    html.Td(f"{vol:.1%}", style={"fontSize": "11px"}),
+                ]))
+
+            mom_section = dbc.Card([
+                dbc.CardHeader(html.H6("📈 Momentum Ranking — Sector Relative Strength (21d vs SPY)",
+                                       className="mb-0 text-center")),
+                dbc.CardBody(
+                    html.Div(
+                        dbc.Table([
+                            html.Thead(html.Tr([
+                                html.Th("#", style={"fontSize": "10px"}),
+                                html.Th("Sector", style={"fontSize": "10px"}),
+                                html.Th("Signal", style={"fontSize": "10px"}),
+                                html.Th("Mom 21d", style={"fontSize": "10px"}),
+                                html.Th("Mom 42d", style={"fontSize": "10px"}),
+                                html.Th("Vol (ann)", style={"fontSize": "10px"}),
+                            ])),
+                            html.Tbody(mom_rows),
+                        ], bordered=True, hover=True, responsive=True, size="sm",
+                           className="mb-0", style={"fontSize": "11px"}),
+                        style={"maxHeight": "300px", "overflowY": "auto"},
+                    ),
+                ),
+            ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"})
+            sections.append(mom_section)
 
         # ── Signal Z-Score Horizontal Bar Chart ──────────────────────────
         try:
@@ -2224,9 +2282,28 @@ def build_dss_tab(
             style={"maxHeight": "300px", "overflowY": "auto"},
         ) if opt_rows else html.Div()
 
+        # VVIX / Skew / Short-Vol Timing row
+        _vvix = getattr(os_, "vvix_current", 0)
+        _vvix_pct = getattr(os_, "vvix_percentile", 0)
+        _vvix_sig = getattr(os_, "vvix_signal", "")
+        _skew = getattr(os_, "skew_current", 100)
+        _skew_sig = getattr(os_, "skew_signal", "")
+        _sv_timing = getattr(os_, "short_vol_timing_score", 50)
+        _sv_label = getattr(os_, "short_vol_timing_label", "")
+
+        _sv_color = "success" if _sv_timing >= 65 else "danger" if _sv_timing <= 35 else "warning"
+        _vvix_color = "danger" if _vvix_sig == "AVOID" else "success" if _vvix_sig == "SHORT_VOL_FAVORABLE" else "secondary"
+        _skew_color = "danger" if _skew_sig == "TAIL_RISK_HIGH" else "success" if _skew_sig == "TAIL_RISK_LOW" else "secondary"
+
+        vol_timing_row = dbc.Row([
+            _kpi("VVIX", f"{_vvix:.1f} ({_vvix_pct:.0%}ile)", _vvix_color, small=True),
+            _kpi("Skew", f"{_skew:.0f}", _skew_color, small=True),
+            _kpi("Short-Vol Timing", f"{_sv_timing:.0f}/100 ({_sv_label})", _sv_color, small=True),
+        ], className="g-2 mb-2")
+
         options_section = dbc.Card([
-            dbc.CardHeader(html.H6("📈 Options Analytics — IV / Greeks / VRP", className="mb-0 text-center")),
-            dbc.CardBody([opt_kpis, opt_table]),
+            dbc.CardHeader(html.H6("📈 Options Analytics — IV / Greeks / VRP / Short-Vol Timing", className="mb-0 text-center")),
+            dbc.CardBody([opt_kpis, vol_timing_row, opt_table]),
         ], className="border-info mb-3", style={"borderTop": "3px solid var(--bs-info)"})
         sections.append(options_section)
 
