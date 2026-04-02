@@ -844,161 +844,51 @@ def build_app() -> dash.Dash:
         ctx.duration_s, ctx.run_id, ctx.regime,
     )
 
-    # ── Helpers + Agent outputs (needed by callbacks) ────────────────────────
-    _brief_txt = ""
-    try:
-        _bd = settings.project_root / "reports" / "output"
-        if _bd.exists():
-            _bf = sorted(_bd.glob("*.txt"), reverse=True)
-            if _bf:
-                _brief_txt = _bf[0].read_text(encoding="utf-8")
-    except Exception:
-        pass
+    # ── Data loading via service layer ───────────────────────────────────────
+    from services.data_loader import DataLoader
+    _loader = DataLoader(settings)
 
+    _brief_txt = _loader.load_daily_brief()
     _ml_signals_result = None
     _ml_drift_status = None
-    _ensemble_results = None
 
-    def _engine_error_banner(key, name):
-        err = _engine_errors.get(key)
-        return dbc.Alert(f"{name} failed: {err[:100]}", color="danger", className="mt-2") if err else None
+    # _engine_error_banner defined below (near callbacks)
 
-    import json as _json_agent
-
+    # Delegate closures to DataLoader methods
     def _load_json_safe(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return _json_agent.load(f)
-        except Exception:
-            return None
+        return _loader.load_json(path)
 
     def _load_improvement_log():
-        return _load_json_safe(settings.project_root / "agents" / "auto_improve" / "improvement_log.json")
+        return _loader.load_improvement_log()
 
     def _load_methodology_results():
-        try:
-            _rd = settings.project_root / "agents" / "methodology" / "reports"
-            _lr = sorted(_rd.glob("*methodology_lab*"), reverse=True)
-            if _lr:
-                d = _load_json_safe(_lr[0])
-                if d and "results" in d:
-                    return d["results"]
-                if d and isinstance(d, dict) and any(isinstance(v, dict) and "sharpe" in v for v in d.values()):
-                    return d
-        except Exception:
-            pass
-        return None
+        return _loader.load_methodology_results()
 
     def _compute_momentum_ranking():
-        try:
-            _p = engine.prices
-            _s = [s for s in settings.sector_list() if s in _p.columns]
-            if len(_s) < 5:
-                return None
-            _lr = np.log(_p[_s] / _p[_s].shift(1)).dropna()
-            _sp = settings.spy_ticker
-            _sr = np.log(_p[_sp] / _p[_sp].shift(1)).dropna() if _sp in _p.columns else pd.Series(0, index=_lr.index)
-            r = []
-            for s in _s:
-                m21 = float((_lr[s].iloc[-21:] - _sr.iloc[-21:]).sum()) if len(_lr) >= 21 else 0
-                m42 = float((_lr[s].iloc[-42:] - _sr.iloc[-42:]).sum()) if len(_lr) >= 42 else 0
-                v = float(_lr[s].iloc[-60:].std() * np.sqrt(252)) if len(_lr) >= 60 else 0.15
-                r.append({"ticker": s, "momentum_21d": m21, "momentum_42d": m42, "vol": v})
-            r.sort(key=lambda x: x["momentum_21d"], reverse=True)
-            return r
-        except Exception:
-            return None
+        return _loader.compute_momentum_ranking(engine.prices) if engine else None
 
-    _agent_registry_data = _load_json_safe(settings.project_root / "logs" / "agent_registry.json")
-    _decay_data = _load_json_safe(settings.project_root / "agents" / "alpha_decay" / "decay_status.json")
-    _regime_agent_data = _load_json_safe(settings.project_root / "agents" / "regime_forecaster" / "regime_forecast.json")
-    _risk_agent_data = _load_json_safe(settings.project_root / "agents" / "risk_guardian" / "risk_status.json")
-    _scout_data = _load_json_safe(settings.project_root / "agents" / "data_scout" / "scout_report.json")
-    _portfolio_alloc = _load_json_safe(settings.project_root / "agents" / "portfolio_construction" / "portfolio_weights.json")
-    _auto_improve_data = _load_json_safe(settings.project_root / "agents" / "auto_improve" / "machine_summary.json")
-    _optimizer_data = _load_json_safe(settings.project_root / "agents" / "optimizer" / "optimization_history.json")
-    _architect_data = _load_json_safe(settings.project_root / "agents" / "architect" / "improvement_history.json")
+    # Load all agent outputs in one call
+    _agent_data = _loader.load_agent_outputs()
+    _agent_registry_data = _agent_data["registry"]
+    _decay_data = _agent_data["decay"]
+    _regime_agent_data = _agent_data["regime"]
+    _risk_agent_data = _agent_data["risk"]
+    _scout_data = _agent_data["scout"]
+    _portfolio_alloc = _agent_data["portfolio"]
+    _auto_improve_data = _agent_data["auto_improve"]
+    _optimizer_data = _agent_data["optimizer"]
+    _architect_data = _agent_data["architect"]
+    _ensemble_results = _agent_data["ensemble"]
+
     if _regime_agent_data and not _ml_regime_forecast:
         _ml_regime_forecast = _regime_agent_data
 
-    logger.info("Agent outputs loaded: %d JSON files", sum(1 for x in [
-        _agent_registry_data, _decay_data, _regime_agent_data, _risk_agent_data,
-        _scout_data, _portfolio_alloc, _auto_improve_data] if x))
+    _n_loaded = sum(1 for v in _agent_data.values() if v is not None)
+    logger.info("Agent outputs loaded: %d/%d JSON files via DataLoader", _n_loaded, len(_agent_data))
 
     # ── Build UI components from results ────────────────────────────────────
     cards_top, cards_bottom = build_overview_kpi_rows(master_df, settings, _health)
     ui_outputs = build_engine_outputs(engine, master_df)
-
-    # ==========================================================
-    # Load Agent Outputs (JSON files produced by the agent system)
-    # ==========================================================
-    import json as _json_agent
-
-    def _load_json_safe(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return _json_agent.load(f)
-        except Exception:
-            return None
-
-    _agent_registry_data = _load_json_safe(settings.project_root / "logs" / "agent_registry.json")
-    _decay_data = _load_json_safe(settings.project_root / "agents" / "alpha_decay" / "decay_status.json")
-    _regime_agent_data = _load_json_safe(settings.project_root / "agents" / "regime_forecaster" / "regime_forecast.json")
-    _risk_agent_data = _load_json_safe(settings.project_root / "agents" / "risk_guardian" / "risk_status.json")
-    _scout_data = _load_json_safe(settings.project_root / "agents" / "data_scout" / "scout_report.json")
-    _portfolio_alloc = _load_json_safe(settings.project_root / "agents" / "portfolio_construction" / "portfolio_weights.json")
-
-    # Additional agent outputs for enhanced tabs
-    _auto_improve_data = _load_json_safe(settings.project_root / "agents" / "auto_improve" / "machine_summary.json")
-    _optimizer_data = _load_json_safe(settings.project_root / "agents" / "optimizer" / "optimization_history.json")
-    _architect_data = _load_json_safe(settings.project_root / "agents" / "architect" / "improvement_history.json")
-
-    def _load_improvement_log():
-        return _load_json_safe(settings.project_root / "agents" / "auto_improve" / "improvement_log.json")
-
-    def _compute_momentum_ranking():
-        """Compute real-time sector momentum ranking for DSS tab."""
-        try:
-            if engine is None or not hasattr(engine, 'prices') or engine.prices is None:
-                return None
-            _prices = engine.prices
-            _sectors = [s for s in settings.sector_list() if s in _prices.columns]
-            if len(_sectors) < 5 or len(_prices) < 60:
-                return None
-
-            _spy = settings.spy_ticker
-            _log_rets = np.log(_prices[_sectors] / _prices[_sectors].shift(1)).dropna()
-            _spy_ret = np.log(_prices[_spy] / _prices[_spy].shift(1)).dropna() if _spy in _prices.columns else pd.Series(0, index=_log_rets.index)
-
-            _ranking = []
-            for s in _sectors:
-                _mom_21 = float((_log_rets[s].iloc[-21:] - _spy_ret.iloc[-21:]).sum()) if len(_log_rets) >= 21 else 0
-                _mom_42 = float((_log_rets[s].iloc[-42:] - _spy_ret.iloc[-42:]).sum()) if len(_log_rets) >= 42 else 0
-                _vol = float(_log_rets[s].iloc[-60:].std() * np.sqrt(252)) if len(_log_rets) >= 60 else 0.15
-                _ranking.append({"ticker": s, "momentum_21d": _mom_21, "momentum_42d": _mom_42, "vol": _vol})
-
-            _ranking.sort(key=lambda x: x["momentum_21d"], reverse=True)
-            return _ranking
-        except Exception:
-            return None
-
-    def _load_methodology_results():
-        """Load latest methodology lab results for strategy ranking display."""
-        try:
-            reports_dir = settings.project_root / "agents" / "methodology" / "reports"
-            lab_reports = sorted(reports_dir.glob("*methodology_lab*"), reverse=True)
-            if lab_reports:
-                data = _load_json_safe(lab_reports[0])
-                if data and "results" in data:
-                    return data["results"]
-                elif data and isinstance(data, dict):
-                    # Try flat format: {strategy_name: {sharpe, win_rate, ...}}
-                    if any(isinstance(v, dict) and "sharpe" in v for v in data.values()):
-                        return data
-        except Exception:
-            pass
-        return None
-    _ensemble_results = _load_json_safe(settings.project_root / "data" / "ensemble_results.json")
 
     # Load latest alpha research report
     _alpha_research_data = None
