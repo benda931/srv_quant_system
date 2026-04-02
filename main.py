@@ -1170,7 +1170,8 @@ def build_app() -> dash.Dash:
                     # Now run daily_update with current prices — P&L will show real moves
                     _pt.daily_update(_pt_prices)
                     _pt.save()
-                    _paper_portfolio = _json_pp2.loads(_pp_path2.read_text(encoding="utf-8"))
+                    import json as _json_pp3
+                    _paper_portfolio = _json_pp3.loads(_pp_path2.read_text(encoding="utf-8"))
                     _total_pnl = sum(p.get("unrealized_pnl", 0) for p in _pt.portfolio.positions)
                     logger.info("Paper trader simulation: backdated %d positions by %d days, total P&L=$%.0f",
                                 len(_pt.portfolio.positions), _offset_days, _total_pnl)
