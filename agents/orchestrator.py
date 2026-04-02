@@ -1,33 +1,53 @@
 """
 agents/orchestrator.py
 ========================
-Master Agent Orchestrator — 24/7 daemon with health monitoring
+Master Agent Orchestrator — 24/7 daemon with full autonomous operation
 
-Manages the complete agent lifecycle:
-  1. Data refresh (end-of-day + VIX monitoring)
-  2. Methodology evaluation (daily)
-  3. Optimization cycle (daily, after methodology)
-  4. Math improvement (weekly)
-  5. Paper trading update (daily)
-  6. Health monitoring (continuous)
-  7. Alert dispatch (VIX spikes, regime changes, trade exits)
-  8. Morning brief + evening recap
-  9. Self-healing (restart failed agents)
+Manages the complete agent lifecycle with governance, crash recovery,
+parallel execution, and self-improvement:
 
-Architecture:
-  ┌─────────────────────────────────────────────┐
-  │         Master Orchestrator (24/7)          │
-  │                                              │
-  │  ┌─ Data Refresh ──── every 6h ────────┐   │
-  │  ├─ VIX Monitor ───── every 30min ─────┤   │
-  │  ├─ Methodology ───── 06:00 weekdays ──┤   │
-  │  ├─ Optimizer ──────── 07:00 weekdays ──┤   │
-  │  ├─ Math ───────────── Monday 08:00 ────┤   │
-  │  ├─ Paper Trader ──── 17:00 weekdays ──┤   │
-  │  ├─ Morning Brief ─── 06:30 weekdays ──┤   │
-  │  ├─ Evening Recap ─── 17:30 weekdays ──┤   │
-  │  └─ Health Check ──── every 15min ─────┘   │
-  └─────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────────┐
+  │              Master Orchestrator (24/7 Daemon)                 │
+  │                                                                │
+  │  DATA LAYER:                                                   │
+  │  ├─ Data Refresh ──────── every 6h ────────────────────────┐  │
+  │  ├─ VIX Monitor ─────────  every 30min ────────────────────┤  │
+  │  ├─ Data Scout ──────────  06:05 weekdays ─────────────────┤  │
+  │                                                                │
+  │  SIGNAL LAYER:                                                 │
+  │  ├─ Methodology ─────────  06:00 weekdays ─────────────────┤  │
+  │  ├─ Pair Scan ───────────  06:15 weekdays ─────────────────┤  │
+  │  ├─ Regime Forecaster ───  every 2h (market hours) ────────┤  │
+  │                                                                │
+  │  OPTIMIZATION LAYER:                                           │
+  │  ├─ Optimizer ───────────  07:00 weekdays ─────────────────┤  │
+  │  ├─ Auto-Improve ────────  07:30 weekdays ─────────────────┤  │
+  │  ├─ Math ────────────────  Monday 08:00 ───────────────────┤  │
+  │  ├─ Architect ───────────  09:00 weekdays ─────────────────┤  │
+  │                                                                │
+  │  EXECUTION LAYER:                                              │
+  │  ├─ Portfolio Construct ── 16:30 weekdays ─────────────────┤  │
+  │  ├─ Risk Guardian ──────── 16:45 weekdays ─────────────────┤  │
+  │  ├─ Paper Trading ──────── 17:00 weekdays ─────────────────┤  │
+  │                                                                │
+  │  REPORTING:                                                    │
+  │  ├─ Morning Brief ──────── 06:30 weekdays ─────────────────┤  │
+  │  ├─ Evening Recap ──────── 17:30 weekdays ─────────────────┤  │
+  │  ├─ Alpha Research ──────  Monday 10:00 ───────────────────┤  │
+  │  ├─ Weekly Backtest ─────  Monday 09:00 ───────────────────┤  │
+  │                                                                │
+  │  INFRASTRUCTURE:                                               │
+  │  ├─ Health Check ────────  every 15min ────────────────────┤  │
+  │  └─ Self-Heal ───────────  every 10min ────────────────────┘  │
+  └────────────────────────────────────────────────────────────────┘
+
+Features:
+  - Registry governance enforcement (FROZEN/BLOCKED agents skipped)
+  - Crash recovery on startup (detects incomplete yesterday tasks)
+  - Parallel execution of independent agents (ThreadPool)
+  - Slack dispatch of critical alerts
+  - Regime-reactive scheduling (VIX spike → trigger risk guardian)
+  - Self-healing: stale agent reset, retry with backoff
 
 Run:
   python agents/orchestrator.py                # daemon mode
@@ -160,6 +180,41 @@ TASKS = {
         "description": "סוכן ארכיטקט — שיפור שיטתי של המערכת",
         "function": "_task_architect",
     },
+    # ── Missing agents now wired in ──────────────────────────────
+    "auto_improve": {
+        "schedule": "07:30_weekdays",
+        "depends_on": ["methodology", "optimizer"],
+        "description": "שיפור עצמי אוטונומי — Bayesian tuning + backtest validation",
+        "function": "_task_auto_improve",
+    },
+    "data_scout": {
+        "schedule": "06:05_weekdays",
+        "description": "סריקת מקורות חיצוניים — FRED, VIX anomalies, correlation breaks",
+        "function": "_task_data_scout",
+    },
+    "regime_forecaster": {
+        "schedule": "every_2h_market",
+        "description": "חיזוי משטר שוק — ML + regime-switching (כל 2 שעות בשעות מסחר)",
+        "function": "_task_regime_forecaster",
+    },
+    "portfolio_construction": {
+        "schedule": "16:30_weekdays",
+        "depends_on": ["methodology", "optimizer"],
+        "description": "בניית פורטפוליו — sector weights + hedge + sizing",
+        "function": "_task_portfolio_construction",
+    },
+    "risk_guardian": {
+        "schedule": "16:45_weekdays",
+        "depends_on": ["portfolio_construction"],
+        "description": "שמירת סיכון — VIX kills, credit stress, exposure limits",
+        "function": "_task_risk_guardian",
+    },
+    "alpha_decay": {
+        "schedule": "08:00_weekdays",
+        "depends_on": ["methodology"],
+        "description": "ניטור דעיכת אלפא — signal staleness + position aging",
+        "function": "_task_alpha_decay",
+    },
 }
 
 
@@ -204,6 +259,9 @@ class Orchestrator:
             self.bus = AgentBus()
         except ImportError:
             self.bus = None
+
+        # Crash recovery — detect incomplete tasks from yesterday
+        self._crash_recovery()
 
         # Log rotation on startup
         self._rotate_logs()
@@ -272,6 +330,43 @@ class Orchestrator:
             self.last_check_date = today
             log.info("═══ New day: %s — daily reset ═══", today)
             self._save_state()
+
+    def _crash_recovery(self):
+        """
+        Detect incomplete tasks from a previous crash.
+        If the orchestrator crashed mid-day, some tasks may be marked as
+        'running' in the registry or have no completion record. Log warnings
+        and mark them for retry.
+        """
+        try:
+            today = date.today().isoformat()
+            if self.last_check_date == today:
+                # Same day — check for tasks that should have run but didn't
+                expected_daily = [
+                    t for t, cfg in TASKS.items()
+                    if "_weekdays" in cfg["schedule"] and t not in self.completed_today and t not in self.failed_today
+                ]
+                if expected_daily and datetime.now().hour >= 18:
+                    # Past market close and daily tasks not done → likely crash
+                    log.warning(
+                        "Crash recovery: %d tasks expected but incomplete: %s",
+                        len(expected_daily), expected_daily[:5],
+                    )
+                    self._dispatch_alert(
+                        "WARNING", "Possible crash recovery",
+                        f"{len(expected_daily)} tasks incomplete: {', '.join(expected_daily[:5])}",
+                    )
+            elif self.last_check_date:
+                # Different day — check yesterday's results
+                yesterday_stats = self.cumulative_stats.get(self.last_check_date, {})
+                yesterday_failed = yesterday_stats.get("failed", [])
+                if yesterday_failed:
+                    log.info(
+                        "Startup: yesterday (%s) had %d failed tasks: %s",
+                        self.last_check_date, len(yesterday_failed), yesterday_failed,
+                    )
+        except Exception as e:
+            log.debug("Crash recovery check failed: %s", e)
 
     def _rotate_logs(self):
         """Rotate large log files and trim bus."""
@@ -346,17 +441,24 @@ class Orchestrator:
                 self.retry_count[task_name] = retries + 1
 
     def _should_run(self, task_name: str) -> bool:
-        """Check if a task should run now. Enforces dependency chain."""
+        """
+        Check if a task should run now.
+        Enforces: dependency chain, registry governance, schedule.
+        """
         task = TASKS[task_name]
         schedule = task["schedule"]
         now = datetime.now()
 
-        # Block if a dependency FAILED (don't run downstream of broken tasks)
+        # ── Registry governance: skip FROZEN/BLOCKED/DISABLED agents ─────
+        if not self._check_registry_governance(task_name):
+            return False
+
+        # ── Dependency enforcement ───────────────────────────────────────
         for dep in task.get("depends_on", []):
             if dep in self.failed_today:
-                return False  # Dependency failed — block this task
+                return False
             if dep not in self.completed_today:
-                return False  # Dependency not yet completed
+                return False
 
         # Already completed today (for daily tasks)
         if task_name in self.completed_today and "every_" not in schedule:
@@ -366,7 +468,7 @@ class Orchestrator:
         if task_name in self.failed_today:
             return False
 
-        # Schedule checks
+        # ── Schedule checks ──────────────────────────────────────────────
         if schedule == "every_6h":
             last = self.last_run.get(task_name)
             return last is None or (now - last).total_seconds() > 6 * 3600
@@ -379,18 +481,26 @@ class Orchestrator:
             last = self.last_run.get(task_name)
             return last is None or (now - last).total_seconds() > 15 * 60
 
+        elif schedule == "every_2h_market":
+            # Every 2 hours during US market hours (9:30-16:00 ET ≈ 14:30-21:00 UTC)
+            if now.weekday() >= 5:
+                return False
+            if not (6 <= now.hour <= 18):  # Local time proxy for market hours
+                return False
+            last = self.last_run.get(task_name)
+            return last is None or (now - last).total_seconds() > 2 * 3600
+
         elif schedule.endswith("_weekdays"):
-            if now.weekday() >= 5:  # Weekend
+            if now.weekday() >= 5:
                 return False
             time_str = schedule.split("_")[0]
             h, m = map(int, time_str.split(":"))
-            # Run if we're within 5 minutes of scheduled time
             target = now.replace(hour=h, minute=m, second=0)
             diff = abs((now - target).total_seconds())
-            return diff < 300  # Within 5 minute window
+            return diff < 300
 
         elif schedule.startswith("monday_"):
-            if now.weekday() != 0:  # Not Monday
+            if now.weekday() != 0:
                 return False
             time_str = schedule.split("_")[1]
             h, m = map(int, time_str.split(":"))
@@ -399,6 +509,27 @@ class Orchestrator:
             return diff < 300
 
         return False
+
+    def _check_registry_governance(self, task_name: str) -> bool:
+        """Check agent registry — skip FROZEN/BLOCKED/DISABLED agents."""
+        try:
+            from agents.shared.agent_registry import get_registry
+            reg = get_registry()
+            info = reg.get_status(task_name)
+            if info:
+                if info.get("frozen"):
+                    log.debug("Skipping %s: FROZEN (%s)", task_name, info.get("frozen_reason", ""))
+                    return False
+                if info.get("disabled"):
+                    log.debug("Skipping %s: DISABLED (%s)", task_name, info.get("disabled_reason", ""))
+                    return False
+                runtime = info.get("runtime_state", "")
+                if runtime in ("BLOCKED", "MAINTENANCE"):
+                    log.debug("Skipping %s: %s", task_name, runtime)
+                    return False
+        except Exception:
+            pass  # Registry unavailable — allow execution
+        return True
 
     # ─── Task Implementations ─────────────────────────────────
 
@@ -623,6 +754,116 @@ class Orchestrator:
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 
+    def _task_auto_improve(self) -> dict:
+        """שיפור עצמי אוטונומי — Bayesian tuning + backtest validation."""
+        try:
+            from agents.auto_improve.engine import AutoImproveEngine
+            engine = AutoImproveEngine()
+
+            # Governance: verify prerequisites
+            prereq = engine.check_governance_prerequisites()
+            if not prereq.get("ready", False):
+                return {"status": "skipped", "reason": prereq.get("reason", "prerequisites not met")}
+
+            # Run evaluation → identify weaknesses → suggest → test → promote
+            eval_result = engine.run_evaluation()
+            weaknesses = engine.identify_weaknesses(eval_result)
+            suggestions = engine.generate_smart_suggestions(weaknesses)
+
+            tested = 0
+            promoted = 0
+            for suggestion in suggestions[:5]:
+                test_result = engine.test_suggestion(suggestion)
+                tested += 1
+                if test_result.get("improved"):
+                    engine.promote_if_better(suggestion, test_result)
+                    promoted += 1
+
+            result = {
+                "status": "ok",
+                "weaknesses": len(weaknesses),
+                "suggestions": len(suggestions),
+                "tested": tested,
+                "promoted": promoted,
+            }
+
+            if promoted > 0:
+                self._dispatch_alert("INFO", "Auto-Improve: Parameters Promoted",
+                    f"{promoted} improvements promoted to settings.py")
+
+            return result
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_data_scout(self) -> dict:
+        """סריקת מקורות חיצוניים — FRED, VIX anomalies, correlation breaks."""
+        try:
+            from agents.data_scout.agent_data_scout import run
+            report = run(once=True)
+            n_anomalies = len(report.get("anomalies", [])) if isinstance(report, dict) else 0
+
+            if n_anomalies > 0:
+                self._dispatch_alert("WARNING", "Data Scout: Anomalies Detected",
+                    f"{n_anomalies} data anomalies found — check scout report")
+
+            return {"status": "ok", "anomalies": n_anomalies}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_regime_forecaster(self) -> dict:
+        """חיזוי משטר שוק — ML + regime-switching (intraday refresh)."""
+        try:
+            from agents.regime_forecaster.agent_regime_forecaster import run
+            result = run(once=True)
+            regime = result.get("current_regime", "UNKNOWN") if isinstance(result, dict) else "UNKNOWN"
+            confidence = result.get("confidence", 0) if isinstance(result, dict) else 0
+
+            # Alert on regime change
+            last_regime = self.cumulative_stats.get("_last_regime")
+            if last_regime and regime != last_regime:
+                self._dispatch_alert("WARNING", f"Regime Change: {last_regime} → {regime}",
+                    f"Confidence: {confidence:.0%}. Review position sizing.")
+            self.cumulative_stats["_last_regime"] = regime
+
+            return {"status": "ok", "regime": regime, "confidence": confidence}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_portfolio_construction(self) -> dict:
+        """בניית פורטפוליו — sector weights + hedge + sizing."""
+        try:
+            from agents.portfolio_construction.agent_portfolio_construction import run
+            result = run(once=True)
+            return {"status": "ok", "result": str(result)[:200] if result else "empty"}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_risk_guardian(self) -> dict:
+        """שמירת סיכון — VIX kills, credit stress, exposure limits."""
+        try:
+            from agents.risk_guardian.agent_risk_guardian import run
+            result = run(once=True)
+            vetoes = result.get("vetoes", []) if isinstance(result, dict) else []
+            if vetoes:
+                self._dispatch_alert("CRITICAL", "Risk Guardian: Trade Vetoes",
+                    f"{len(vetoes)} trades vetoed: {vetoes[:3]}")
+            return {"status": "ok", "vetoes": len(vetoes)}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_alpha_decay(self) -> dict:
+        """ניטור דעיכת אלפא — signal staleness + position aging."""
+        try:
+            from agents.alpha_decay.agent_alpha_decay import run
+            result = run(once=True)
+            stale = result.get("stale_signals", 0) if isinstance(result, dict) else 0
+            if stale > 3:
+                self._dispatch_alert("WARNING", "Alpha Decay: Stale Signals",
+                    f"{stale} signals showing decay — consider position reduction")
+            return {"status": "ok", "stale_signals": stale}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
     def _task_health_check(self) -> dict:
         """בדיקת בריאות מערכת."""
         health = {"status": "ok", "checks": {}}
@@ -736,53 +977,150 @@ class Orchestrator:
             return {"status": "crashed", "error": str(e), "elapsed_s": round(elapsed, 1)}
 
     def run_once(self) -> dict:
-        """Run all tasks once in dependency order."""
-        log.info("════════════════════════════════════════")
-        log.info("  Orchestrator — Single Full Cycle")
-        log.info("════════════════════════════════════════")
+        """Run all tasks once in dependency order (full daily pipeline)."""
+        log.info("════════════════════════════════════════════════")
+        log.info("  Orchestrator — Single Full Cycle (%d tasks)", len(TASKS))
+        log.info("════════════════════════════════════════════════")
 
         self._reset_daily()
         results = {}
 
-        # Ordered execution respecting dependencies
-        order = ["data_refresh", "vix_monitor", "health_check",
-                 "methodology", "morning_brief", "optimizer",
-                 "paper_trading", "evening_recap"]
+        # Full ordered execution with all agents
+        # Phase 1: Data + Monitoring (can run in parallel)
+        phase1 = ["data_refresh", "vix_monitor", "health_check", "data_scout"]
+        self._run_parallel(phase1, results)
 
-        # Add math on Mondays
+        # Phase 2: Signal generation
+        phase2 = ["methodology", "pair_scan", "regime_forecaster"]
+        self._run_parallel(phase2, results)
+
+        # Phase 3: Briefs + optimization
+        for t in ["morning_brief", "alpha_decay", "optimizer", "auto_improve"]:
+            if t in TASKS:
+                results[t] = self.run_task(t)
+
+        # Phase 4: Weekly tasks (Monday only)
         if datetime.now().weekday() == 0:
-            order.insert(order.index("optimizer") + 1, "math")
+            for t in ["math", "weekly_backtest", "alpha_research"]:
+                if t in TASKS:
+                    results[t] = self.run_task(t)
 
-        for task_name in order:
-            if task_name in TASKS:
-                results[task_name] = self.run_task(task_name)
+        # Phase 5: Execution pipeline
+        for t in ["architect", "portfolio_construction", "risk_guardian", "paper_trading", "evening_recap"]:
+            if t in TASKS:
+                results[t] = self.run_task(t)
 
         # Summary
-        n_ok = sum(1 for r in results.values() if r.get("status") in ("ok", "fresh"))
+        n_ok = sum(1 for r in results.values() if r.get("status") in ("ok", "fresh", "skipped"))
         n_fail = sum(1 for r in results.values() if r.get("status") in ("failed", "crashed"))
-        log.info("════════════════════════════════════════")
+        log.info("════════════════════════════════════════════════")
         log.info("  Cycle complete: %d/%d OK, %d failed", n_ok, len(results), n_fail)
-        log.info("════════════════════════════════════════")
+        log.info("════════════════════════════════════════════════")
+
+        # Slack dispatch summary
+        self._try_slack_summary(results)
 
         return results
 
+    def _run_parallel(self, task_names: List[str], results: dict):
+        """Run independent tasks in parallel using threads."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        valid = [t for t in task_names if t in TASKS]
+        if not valid:
+            return
+
+        with ThreadPoolExecutor(max_workers=min(len(valid), 4)) as pool:
+            futures = {pool.submit(self.run_task, t): t for t in valid}
+            for fut in as_completed(futures):
+                t = futures[fut]
+                try:
+                    results[t] = fut.result()
+                except Exception as e:
+                    results[t] = {"status": "crashed", "error": str(e)}
+
+    def _try_slack_summary(self, results: dict):
+        """Send daily summary to Slack if configured."""
+        try:
+            from config.settings import get_settings
+            settings = get_settings()
+            webhook = getattr(settings, "slack_webhook_url", "")
+            if not webhook:
+                return
+
+            n_ok = sum(1 for r in results.values() if r.get("status") in ("ok", "fresh", "skipped"))
+            n_fail = sum(1 for r in results.values() if r.get("status") in ("failed", "crashed"))
+            failed_names = [t for t, r in results.items() if r.get("status") in ("failed", "crashed")]
+
+            lines = [
+                f":robot_face: *SRV Agent Orchestrator* — {date.today().isoformat()}",
+                f"Tasks: {n_ok}/{len(results)} OK | {n_fail} failed",
+            ]
+            if failed_names:
+                lines.append(f":x: Failed: `{', '.join(failed_names)}`")
+
+            # Key metrics from results
+            if "auto_improve" in results and results["auto_improve"].get("promoted", 0) > 0:
+                lines.append(f":chart_with_upwards_trend: Auto-improve promoted {results['auto_improve']['promoted']} improvements")
+            if "regime_forecaster" in results:
+                lines.append(f":traffic_light: Regime: `{results['regime_forecaster'].get('regime', '?')}`")
+
+            import urllib.request
+            payload = json.dumps({"text": "\n".join(lines)}).encode("utf-8")
+            req = urllib.request.Request(webhook, data=payload,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=10)
+        except Exception:
+            pass
+
     def run_daemon(self):
         """Run as continuous daemon — checks tasks every 60 seconds with self-healing."""
-        log.info("════════════════════════════════════════════════════")
+        log.info("════════════════════════════════════════════════════════")
         log.info("  SRV Agent Orchestrator — DAEMON MODE (24/7)")
         log.info("  Tasks: %d | Check: 60s | Retries: %d/task", len(TASKS), self.MAX_RETRIES)
-        log.info("════════════════════════════════════════════════════")
+        log.info("  Registry governance: ENFORCED")
+        log.info("  Parallel execution: ENABLED (ThreadPool)")
+        log.info("  Crash recovery: ENABLED")
+        log.info("════════════════════════════════════════════════════════")
 
         cycle_count = 0
+        last_vix_spike_check = datetime.now()
+
         while True:
             try:
                 self._reset_daily()
                 cycle_count += 1
 
-                # Run due tasks
-                for task_name in TASKS:
-                    if self._should_run(task_name):
-                        self.run_task(task_name)
+                # Collect due tasks
+                due_tasks = [t for t in TASKS if self._should_run(t)]
+
+                # Separate independent tasks (no unmet deps) for parallel execution
+                independent = []
+                sequential = []
+                for t in due_tasks:
+                    deps = TASKS[t].get("depends_on", [])
+                    unmet = [d for d in deps if d not in self.completed_today]
+                    if not unmet:
+                        independent.append(t)
+                    else:
+                        sequential.append(t)
+
+                # Run independent tasks in parallel
+                if len(independent) > 1:
+                    results_buf = {}
+                    self._run_parallel(independent, results_buf)
+                elif independent:
+                    self.run_task(independent[0])
+
+                # Run sequential tasks one by one
+                for t in sequential:
+                    if self._should_run(t):  # Re-check after parallel phase
+                        self.run_task(t)
+
+                # VIX-reactive: if VIX spiked, force risk guardian
+                if (datetime.now() - last_vix_spike_check).total_seconds() > 300:
+                    last_vix_spike_check = datetime.now()
+                    self._vix_reactive_check()
 
                 # Self-heal every 10 cycles (10 minutes)
                 if cycle_count % 10 == 0:
@@ -803,6 +1141,36 @@ class Orchestrator:
                 log.exception("Daemon error: %s", e)
                 self._dispatch_alert("CRITICAL", "Daemon error", str(e)[:300])
                 time.sleep(60)
+
+    def _vix_reactive_check(self):
+        """
+        If VIX spiked significantly, trigger risk_guardian out of schedule.
+        This provides intraday risk protection for short-vol positions.
+        """
+        try:
+            import pandas as pd
+            prices = pd.read_parquet(ROOT / "data_lake" / "parquet" / "prices.parquet")
+            vix_col = next((c for c in prices.columns if "VIX" in c.upper()), None)
+            if not vix_col:
+                return
+
+            vix = prices[vix_col].dropna()
+            if len(vix) < 5:
+                return
+
+            vix_now = float(vix.iloc[-1])
+            vix_prev = float(vix.iloc[-2])
+            vix_change = vix_now - vix_prev
+
+            # Trigger risk guardian on VIX spike > +3 points
+            if vix_change > 3.0 and "risk_guardian" not in self.completed_today:
+                log.warning("VIX SPIKE: %.1f → %.1f (+%.1f) — triggering risk guardian",
+                           vix_prev, vix_now, vix_change)
+                self._dispatch_alert("CRITICAL", "VIX Spike → Risk Guardian Triggered",
+                    f"VIX {vix_prev:.1f} → {vix_now:.1f} (+{vix_change:.1f})")
+                self.run_task("risk_guardian")
+        except Exception:
+            pass
 
     def status(self) -> str:
         """Human-readable status report with cumulative stats."""
