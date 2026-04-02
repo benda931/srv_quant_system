@@ -964,23 +964,32 @@ class AutoImprover:
             from config.settings import Settings
             test_settings = Settings()
 
-            # Run AlphaWhitelistMR with settings-mapped parameters
-            from analytics.methodology_lab import MethodologyLab, AlphaWhitelistMR
+            # Run best available strategy with settings-mapped parameters
+            from analytics.methodology_lab import MethodologyLab
             lab = MethodologyLab(self.prices, test_settings)
 
-            # Map settings params to AlphaWhitelistMR constructor
-            alpha_kwargs = {
-                "z_entry": getattr(test_settings, "regime_z_calm", 0.7),
-                "max_hold": getattr(test_settings, "trade_max_holding_days", 25),
-                "vix_kill": getattr(test_settings, "signal_vix_hard", 32),
-                "regime_sizing": {
-                    "CALM": getattr(test_settings, "regime_size_calm", 1.3),
-                    "NORMAL": getattr(test_settings, "regime_size_normal", 1.0),
-                    "TENSION": getattr(test_settings, "regime_size_tension", 0.6),
-                    "CRISIS": 0.0,
-                },
-            }
-            test_method = AlphaWhitelistMR(**alpha_kwargs)
+            # Try RelativeMomentum (best strategy), fall back to AlphaWhitelistMR
+            try:
+                from analytics.methodology_lab import RelativeMomentum
+                test_method = RelativeMomentum(
+                    lookback=int(getattr(test_settings, "signal_optimal_hold", 21)),
+                    top_n=3,
+                    rebal_days=int(getattr(test_settings, "signal_optimal_hold", 21)),
+                    max_weight=float(getattr(test_settings, "trade_max_weight_pct", 0.10)),
+                )
+            except ImportError:
+                from analytics.methodology_lab import AlphaWhitelistMR
+                test_method = AlphaWhitelistMR(
+                    z_entry=getattr(test_settings, "regime_z_calm", 0.7),
+                    max_hold=getattr(test_settings, "trade_max_holding_days", 25),
+                    vix_kill=getattr(test_settings, "signal_vix_hard", 32),
+                    regime_sizing={
+                        "CALM": getattr(test_settings, "regime_size_calm", 1.3),
+                        "NORMAL": getattr(test_settings, "regime_size_normal", 1.0),
+                        "TENSION": getattr(test_settings, "regime_size_tension", 0.6),
+                        "CRISIS": 0.0,
+                    },
+                )
             result = lab.run_methodology(test_method)
 
             # Compare vs AlphaWhitelistMR baseline using WR + Sharpe composite
@@ -2162,10 +2171,13 @@ class AutoImprover:
 
             # Cache baseline using AlphaWhitelistMR specifically (not "best" which may be 0-trade)
             all_r = metrics.get("all_results", {})
-            alpha_r = all_r.get("ALPHA_WHITELIST_MR", all_r.get("ALPHA_WHITELIST_MR_LOOSE", {}))
-            if alpha_r:
-                self._last_baseline_sharpe = alpha_r.get("sharpe", 0)
-                self._last_baseline_wr = alpha_r.get("win_rate", 0.50)
+            # Use best available strategy as baseline (RelativeMomentum > AlphaWhitelistMR)
+            best_baseline = all_r.get("RELATIVE_MOMENTUM",
+                            all_r.get("ALPHA_WHITELIST_MR",
+                            all_r.get("ALPHA_WHITELIST_MR_LOOSE", {})))
+            if best_baseline:
+                self._last_baseline_sharpe = best_baseline.get("sharpe", 0)
+                self._last_baseline_wr = best_baseline.get("win_rate", 0.50)
             else:
                 self._last_baseline_sharpe = metrics.get("best_sharpe", 0)
                 self._last_baseline_wr = metrics.get("best_win_rate", 0.50)
