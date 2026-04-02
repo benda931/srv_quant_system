@@ -3918,6 +3918,8 @@ def build_agent_monitor_tab(
     optimizer_data: Optional[Dict] = None,
     architect_data: Optional[Dict] = None,
     project_root: Optional[str] = None,
+    improvement_log: Optional[Dict] = None,
+    methodology_results: Optional[Dict] = None,
 ) -> html.Div:
     """
     Agent Monitor tab -- full agent system dashboard showing ALL 11 agents.
@@ -4476,11 +4478,144 @@ def build_agent_monitor_tab(
     ], style={"border": "1px solid #2a2a4a"})
     sections.append(audit_card)
 
+    # ══════════════════════════════════════════════════════════════════════
+    # IMPROVEMENT ACTIVITY FEED — shows what agents actually changed
+    # ══════════════════════════════════════════════════════════════════════
+    feed_items = []
+
+    # Auto-improve cycles from improvement_log
+    if improvement_log and isinstance(improvement_log, dict):
+        cycles = improvement_log.get("cycles", [])
+        for cycle in cycles[-10:]:  # Last 10 cycles
+            ts = cycle.get("timestamp", "")[:16].replace("T", " ")
+            n_promoted = cycle.get("promoted", cycle.get("suggestions_promoted", 0))
+            n_tested = cycle.get("suggestions_tested", 0)
+            ms = cycle.get("machine_summary", {})
+            health = ms.get("system_health_score", 0)
+            bottleneck = ms.get("diagnosed_bottleneck", "")
+
+            for detail in cycle.get("details", []):
+                param = detail.get("param", "?")
+                current = detail.get("current", "?")
+                proposed = detail.get("proposed", "?")
+                promoted = detail.get("promoted", False)
+                delta = detail.get("sharpe_delta", 0)
+                reason = detail.get("reason", "")
+
+                icon = "✅" if promoted else "❌"
+                color = "success" if promoted else "secondary"
+                feed_items.append({
+                    "time": ts,
+                    "agent": "auto_improve",
+                    "action": f"{icon} {param}: {current} → {proposed}",
+                    "detail": f"Sharpe Δ={delta:+.3f} | {reason[:50]}",
+                    "color": color,
+                    "promoted": promoted,
+                })
+
+    # Methodology strategy rankings
+    if methodology_results and isinstance(methodology_results, dict):
+        ranked = sorted(methodology_results.items(),
+                       key=lambda x: x[1].get("sharpe", 0) if isinstance(x[1], dict) else 0,
+                       reverse=True)
+        for i, (name, data) in enumerate(ranked[:5]):
+            if isinstance(data, dict):
+                sharpe = data.get("sharpe", 0)
+                wr = data.get("win_rate", 0)
+                pnl = data.get("total_pnl", 0)
+                color = "success" if sharpe > 0.5 else "warning" if sharpe > 0 else "danger"
+                feed_items.append({
+                    "time": "",
+                    "agent": "methodology",
+                    "action": f"#{i+1} {name}",
+                    "detail": f"Sharpe={sharpe:.3f} | WR={wr:.1%} | PnL={pnl:.1%}",
+                    "color": color,
+                    "promoted": False,
+                })
+
+    feed_section = html.Div()
+    if feed_items:
+        feed_rows = []
+        for item in feed_items:
+            badge_color = item["color"]
+            feed_rows.append(html.Tr([
+                html.Td(
+                    dbc.Badge(item["agent"], color="info", style={"fontSize": "0.7rem"}),
+                    style={"width": "100px"},
+                ),
+                html.Td(item.get("time", ""), style={"fontSize": "0.75rem", "color": "#888", "width": "120px"}),
+                html.Td(
+                    html.Span(item["action"], style={"fontSize": "0.8rem", "fontWeight": "bold" if item.get("promoted") else "normal"}),
+                ),
+                html.Td(
+                    html.Span(item["detail"], style={"fontSize": "0.7rem", "color": "#aaa"}),
+                ),
+            ], style={"backgroundColor": "rgba(32,201,151,0.08)" if item.get("promoted") else "transparent"}))
+
+        feed_section = dbc.Card([
+            dbc.CardHeader(html.Div([
+                html.Strong("🔄 Agent Activity Feed — Recent Improvements & Strategy Rankings"),
+                dbc.Badge(f"{sum(1 for f in feed_items if f.get('promoted'))} promoted",
+                         color="success", className="ms-2"),
+            ]), style={"backgroundColor": "#16213e"}),
+            dbc.CardBody(
+                html.Div(
+                    dbc.Table(
+                        [html.Tbody(feed_rows)],
+                        bordered=True, dark=True, hover=True, size="sm",
+                        style={"fontSize": "0.8rem"},
+                    ),
+                    style={"maxHeight": "350px", "overflowY": "auto"},
+                ),
+                style={"backgroundColor": "#1a1a2e", "padding": "0"},
+            ),
+        ], style={"border": "1px solid #2a2a4a"}, className="mb-3")
+        sections.append(feed_section)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # STRATEGY PERFORMANCE CHART — Sharpe comparison bar chart
+    # ══════════════════════════════════════════════════════════════════════
+    if methodology_results and isinstance(methodology_results, dict):
+        ranked_all = sorted(methodology_results.items(),
+                           key=lambda x: x[1].get("sharpe", 0) if isinstance(x[1], dict) else 0,
+                           reverse=True)
+        chart_names = []
+        chart_sharpes = []
+        chart_colors = []
+        for name, data in ranked_all:
+            if isinstance(data, dict):
+                s = data.get("sharpe", 0)
+                chart_names.append(name)
+                chart_sharpes.append(s)
+                chart_colors.append("#20c997" if s > 0.5 else "#ffc107" if s > 0 else "#dc3545")
+
+        if chart_names:
+            strategy_fig = go.Figure(go.Bar(
+                x=chart_names, y=chart_sharpes,
+                marker_color=chart_colors,
+                text=[f"{s:.2f}" for s in chart_sharpes],
+                textposition="outside",
+            ))
+            strategy_fig.add_hline(y=0, line_color="#555", line_width=1)
+            strategy_fig.update_layout(
+                template="plotly_dark",
+                height=300,
+                title="Strategy Sharpe Comparison (all methodologies)",
+                xaxis_tickangle=-35,
+                yaxis_title="Sharpe Ratio",
+                margin=dict(l=10, r=10, t=50, b=100),
+                showlegend=False,
+            )
+            sections.append(dbc.Card(
+                dbc.CardBody(dcc.Graph(figure=strategy_fig, config={"displayModeBar": False})),
+                className="mb-3",
+            ))
+
     return html.Div(
         [
-            html.H4("Agent Monitor \u2014 11 Agents", className="text-info mb-1"),
+            html.H4("Agent Monitor \u2014 19 Agents", className="text-info mb-1"),
             html.P(
-                "Full agent system dashboard: health, risk, regime, alpha decay, scout, portfolio",
+                "Full agent system dashboard: health, risk, regime, alpha decay, scout, portfolio, auto-improve activity",
                 className="text-muted mb-3",
             ),
         ] + sections,

@@ -1528,6 +1528,26 @@ def build_app() -> dash.Dash:
     _auto_improve_data = _load_json_safe(settings.project_root / "agents" / "auto_improve" / "machine_summary.json")
     _optimizer_data = _load_json_safe(settings.project_root / "agents" / "optimizer" / "optimization_history.json")
     _architect_data = _load_json_safe(settings.project_root / "agents" / "architect" / "improvement_history.json")
+
+    def _load_improvement_log():
+        return _load_json_safe(settings.project_root / "agents" / "auto_improve" / "improvement_log.json")
+
+    def _load_methodology_results():
+        """Load latest methodology lab results for strategy ranking display."""
+        try:
+            reports_dir = settings.project_root / "agents" / "methodology" / "reports"
+            lab_reports = sorted(reports_dir.glob("*methodology_lab*"), reverse=True)
+            if lab_reports:
+                data = _load_json_safe(lab_reports[0])
+                if data and "results" in data:
+                    return data["results"]
+                elif data and isinstance(data, dict):
+                    # Try flat format: {strategy_name: {sharpe, win_rate, ...}}
+                    if any(isinstance(v, dict) and "sharpe" in v for v in data.values()):
+                        return data
+        except Exception:
+            pass
+        return None
     _ensemble_results = _load_json_safe(settings.project_root / "data" / "ensemble_results.json")
 
     # Load latest alpha research report
@@ -2029,6 +2049,8 @@ def build_app() -> dash.Dash:
                             optimizer_data=_optimizer_data,
                             architect_data=_architect_data,
                             project_root=str(settings.project_root),
+                            improvement_log=_load_improvement_log(),
+                            methodology_results=_load_methodology_results(),
                         ),
                     ],
                 )],
