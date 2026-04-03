@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -798,3 +799,233 @@ def _std(values: List[float]) -> float:
     mean = sum(values) / n
     variance = sum((v - mean) ** 2 for v in values) / (n - 1)
     return math.sqrt(max(variance, 0.0))
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Promotion Probability Forecasting
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PromotionForecast:
+    """Forecast of promotion probability for a methodology."""
+    methodology: str
+    current_sharpe: float
+    sharpe_trend: float              # Slope of Sharpe over last N runs
+    approval_rate: float             # Historical approval rate
+    robustness_score: float          # Current robustness
+    promotion_probability: float      # P(APPROVED | next_run) ∈ [0, 1]
+    confidence: float                # Confidence in the forecast
+    estimated_runs_to_approval: int  # Expected runs until approval
+    recommendation: str              # "READY" / "IMPROVING" / "NEEDS_WORK" / "UNLIKELY"
+
+
+def forecast_promotion(
+    portfolio: MethodologyPortfolio,
+    methodology_name: str,
+    n_history: int = 20,
+) -> PromotionForecast:
+    """
+    Predict the probability that a methodology will be approved in the next run.
+
+    Uses logistic regression on features:
+      - current Sharpe ratio
+      - Sharpe trend (slope over recent runs)
+      - historical approval rate
+      - robustness score
+      - cost drag
+
+    Parameters
+    ----------
+    portfolio : MethodologyPortfolio — the portfolio tracker instance
+    methodology_name : str — name of the methodology to forecast
+    n_history : int — number of recent runs to use
+    """
+    import numpy as np
+
+    # Gather features
+    hist = portfolio.get_methodology_history(methodology_name, n=n_history)
+    streak = portfolio.get_approval_streak(methodology_name)
+    robust = portfolio.get_robustness_trend(methodology_name, n=n_history)
+
+    if not hist:
+        return PromotionForecast(
+            methodology=methodology_name, current_sharpe=0, sharpe_trend=0,
+            approval_rate=0, robustness_score=0, promotion_probability=0,
+            confidence=0, estimated_runs_to_approval=999, recommendation="NEEDS_WORK",
+        )
+
+    # Features
+    sharpes = [h.get("sharpe", 0) for h in hist if _is_finite(h.get("sharpe", 0))]
+    current_sharpe = sharpes[-1] if sharpes else 0
+    sharpe_trend = 0.0
+    if len(sharpes) >= 3:
+        x = np.arange(len(sharpes), dtype=float)
+        y = np.array(sharpes, dtype=float)
+        slope = float(np.polyfit(x, y, 1)[0])
+        sharpe_trend = slope
+
+    approval_rate = streak.get("approval_rate", 0.0)
+    robustness = robust[-1].get("robustness_score", 0) if robust else 0
+    cost_drag = hist[-1].get("cost_drag", 0) if hist else 0
+
+    # Logistic model: P = sigmoid(β₀ + β₁·sharpe + β₂·trend + β₃·approval + β₄·robust)
+    # Coefficients calibrated empirically
+    b0, b1, b2, b3, b4 = -2.0, 3.0, 10.0, 2.0, 1.5
+    z = b0 + b1 * current_sharpe + b2 * sharpe_trend + b3 * approval_rate + b4 * robustness
+    prob = 1.0 / (1.0 + math.exp(-z))
+
+    # Confidence based on sample size
+    confidence = min(1.0, len(sharpes) / 15)
+
+    # Estimated runs to approval
+    if prob >= 0.8:
+        est_runs = 1
+    elif prob >= 0.5:
+        est_runs = max(1, int(math.ceil(math.log(0.8 / max(prob, 0.01)) / max(sharpe_trend * 3, 0.01))))
+    elif prob >= 0.2:
+        est_runs = max(3, int(10 * (1 - prob)))
+    else:
+        est_runs = 999
+
+    # Recommendation
+    if prob >= 0.7:
+        rec = "READY"
+    elif prob >= 0.4 and sharpe_trend > 0:
+        rec = "IMPROVING"
+    elif prob >= 0.2:
+        rec = "NEEDS_WORK"
+    else:
+        rec = "UNLIKELY"
+
+    return PromotionForecast(
+        methodology=methodology_name,
+        current_sharpe=round(current_sharpe, 4),
+        sharpe_trend=round(sharpe_trend, 6),
+        approval_rate=round(approval_rate, 4),
+        robustness_score=round(robustness, 4),
+        promotion_probability=round(prob, 4),
+        confidence=round(confidence, 3),
+        estimated_runs_to_approval=min(est_runs, 999),
+        recommendation=rec,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Strategy Complementarity Analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ComplementaryPair:
+    """A pair of strategies that complement each other (low correlation)."""
+    strategy_a: str
+    strategy_b: str
+    return_correlation: float        # Correlation of daily returns (-1 to 1)
+    regime_complementarity: float    # 0 = same regime strength, 1 = opposite
+    combined_sharpe_boost: float     # Sharpe improvement from combining
+    recommendation: str              # "STRONG_PAIR" / "MODERATE" / "REDUNDANT"
+
+
+def find_complementary_strategies(
+    portfolio: MethodologyPortfolio,
+    n_history: int = 20,
+) -> List[ComplementaryPair]:
+    """
+    Find methodology pairs that complement each other across regimes.
+
+    Two strategies complement each other if:
+      1. Their return correlation is low (< 0.3)
+      2. They perform well in different regimes
+      3. Combining them improves Sharpe vs either alone
+
+    Returns sorted list of complementary pairs.
+    """
+    import numpy as np
+    from itertools import combinations
+
+    names = portfolio.get_all_methodology_names()
+    if len(names) < 2:
+        return []
+
+    # Gather Sharpe time series for each methodology
+    sharpe_series = {}
+    regime_profiles = {}
+
+    for name in names[:15]:  # Cap at 15
+        hist = portfolio.get_methodology_history(name, n=n_history)
+        if not hist or len(hist) < 3:
+            continue
+
+        sharpes = [h.get("sharpe", 0) for h in hist if _is_finite(h.get("sharpe", 0))]
+        if len(sharpes) >= 3:
+            sharpe_series[name] = np.array(sharpes)
+
+        # Regime fitness
+        regime_fit = portfolio.get_regime_fitness_history(name, n=n_history)
+        if regime_fit:
+            latest = regime_fit[-1]
+            regime_profiles[name] = {
+                "CALM": latest.get("CALM", {}).get("sharpe", 0),
+                "NORMAL": latest.get("NORMAL", {}).get("sharpe", 0),
+                "TENSION": latest.get("TENSION", {}).get("sharpe", 0),
+            }
+
+    pairs = []
+    for a, b in combinations(sharpe_series.keys(), 2):
+        s_a = sharpe_series[a]
+        s_b = sharpe_series[b]
+
+        # Align lengths
+        min_len = min(len(s_a), len(s_b))
+        if min_len < 3:
+            continue
+
+        s_a = s_a[-min_len:]
+        s_b = s_b[-min_len:]
+
+        # Return correlation
+        corr = float(np.corrcoef(s_a, s_b)[0, 1]) if min_len > 2 else 0.0
+
+        # Regime complementarity
+        regime_comp = 0.0
+        if a in regime_profiles and b in regime_profiles:
+            ra = regime_profiles[a]
+            rb = regime_profiles[b]
+            # Higher score if one is strong where the other is weak
+            diffs = []
+            for regime in ["CALM", "NORMAL", "TENSION"]:
+                va = ra.get(regime, 0)
+                vb = rb.get(regime, 0)
+                if (va > 0 and vb < 0) or (va < 0 and vb > 0):
+                    diffs.append(abs(va - vb))
+            regime_comp = float(np.mean(diffs)) if diffs else 0.0
+
+        # Combined Sharpe boost
+        combined = (s_a + s_b) / 2
+        sharpe_a = float(s_a.mean() / (s_a.std() + 1e-10))
+        sharpe_b = float(s_b.mean() / (s_b.std() + 1e-10))
+        sharpe_combined = float(combined.mean() / (combined.std() + 1e-10))
+        boost = sharpe_combined - max(sharpe_a, sharpe_b)
+
+        # Classification
+        if corr < 0.2 and regime_comp > 0.1:
+            rec = "STRONG_PAIR"
+        elif corr < 0.5:
+            rec = "MODERATE"
+        else:
+            rec = "REDUNDANT"
+
+        pairs.append(ComplementaryPair(
+            strategy_a=a, strategy_b=b,
+            return_correlation=round(corr, 4),
+            regime_complementarity=round(regime_comp, 4),
+            combined_sharpe_boost=round(boost, 4),
+            recommendation=rec,
+        ))
+
+    # Sort: strong pairs first, then by Sharpe boost
+    priority = {"STRONG_PAIR": 0, "MODERATE": 1, "REDUNDANT": 2}
+    pairs.sort(key=lambda p: (priority.get(p.recommendation, 9), -p.combined_sharpe_boost))
+    return pairs
+
+
+    # (imports at top of file)

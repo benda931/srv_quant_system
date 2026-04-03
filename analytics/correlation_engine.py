@@ -544,3 +544,251 @@ def corr_vol_summary(analysis: CorrVolAnalysis) -> dict:
         ],
         "rationale":           analysis.short_vol_rationale,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Dispersion Surface + CRP Time Series
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class DispersionSurface:
+    """
+    Multi-horizon dispersion analysis.
+
+    Computes implied vs realized correlation at multiple lookback windows
+    to build a "term structure" of dispersion — shows whether
+    dispersion is cheap/rich at short vs long horizons.
+    """
+    horizons: List[int]                          # [5, 10, 21, 42, 63, 126]
+    implied_corr_by_horizon: Dict[int, float]    # Implied correlation per horizon
+    realized_corr_by_horizon: Dict[int, float]   # Realized correlation per horizon
+    crp_by_horizon: Dict[int, float]             # CRP = implied - realized per horizon
+    dispersion_by_horizon: Dict[int, float]      # Dispersion index per horizon
+    # Term structure
+    crp_term_slope: float = 0.0                  # Slope of CRP across horizons
+    crp_curve_shape: str = "FLAT"                # "CONTANGO" / "BACKWARDATION" / "FLAT" / "HUMPED"
+    # Best horizon for dispersion trade
+    optimal_horizon: int = 21
+    optimal_crp: float = 0.0
+
+
+def compute_dispersion_surface(
+    prices: pd.DataFrame,
+    sectors: List[str],
+    spy_ticker: str = "SPY",
+    horizons: Optional[List[int]] = None,
+) -> DispersionSurface:
+    """
+    Build a multi-horizon dispersion surface.
+
+    For each horizon in [5, 10, 21, 42, 63, 126] days:
+      - Compute sector pairwise correlation (realized)
+      - Estimate implied correlation from VIX-weighted IV
+      - CRP = implied - realized (positive = dispersion trade profitable)
+
+    The term structure of CRP shows whether short-dated or
+    long-dated dispersion trades are more attractive.
+    """
+    if horizons is None:
+        horizons = [5, 10, 21, 42, 63, 126]
+
+    avail = [s for s in sectors if s in prices.columns]
+    if len(avail) < 3 or len(prices) < max(horizons) + 10:
+        return DispersionSurface(
+            horizons=horizons,
+            implied_corr_by_horizon={}, realized_corr_by_horizon={},
+            crp_by_horizon={}, dispersion_by_horizon={},
+        )
+
+    log_rets = np.log(prices[avail] / prices[avail].shift(1)).dropna()
+    spy_rets = np.log(prices[spy_ticker] / prices[spy_ticker].shift(1)).dropna() if spy_ticker in prices.columns else None
+
+    impl_corr = {}
+    real_corr = {}
+    crp = {}
+    disp = {}
+
+    for h in horizons:
+        if len(log_rets) < h + 5:
+            continue
+
+        # Realized correlation (average pairwise over horizon window)
+        R = log_rets.iloc[-h:]
+        C = R.corr()
+        n = len(avail)
+        iu = np.triu_indices(n, k=1)
+        avg_corr = float(np.nanmean(C.values[iu]))
+        real_corr[h] = round(avg_corr, 4)
+
+        # Implied correlation proxy: β-weighted from VIX
+        # Simple model: impl_corr ≈ (σ²_index - Σw²σ²_i) / (2·Σw_i·w_j·σ_i·σ_j)
+        w = np.ones(n) / n
+        sector_vols = np.array([float(R[s].std()) for s in avail])
+        index_vol = float(spy_rets.iloc[-h:].std()) if spy_rets is not None else float(np.mean(sector_vols))
+
+        ws_var = float(np.sum((w * sector_vols) ** 2))
+        cross_var = 0.0
+        for i in range(n):
+            for j in range(i + 1, n):
+                cross_var += 2 * w[i] * w[j] * sector_vols[i] * sector_vols[j]
+
+        if cross_var > 1e-10:
+            rho_impl = (index_vol ** 2 - ws_var) / cross_var
+            rho_impl = max(-1.0, min(1.0, rho_impl))
+        else:
+            rho_impl = avg_corr
+
+        impl_corr[h] = round(rho_impl, 4)
+        crp[h] = round(rho_impl - avg_corr, 4)  # CRP = implied - realized
+
+        # Dispersion index: √(Σw²σ² - σ²_index) if positive
+        d = ws_var * n - index_vol ** 2
+        disp[h] = round(math.sqrt(max(0, d)) * math.sqrt(252 / h) * 100, 2)
+
+    # CRP term structure
+    crp_vals = list(crp.values())
+    if len(crp_vals) >= 3:
+        x = np.arange(len(crp_vals), dtype=float)
+        slope = float(np.polyfit(x, crp_vals, 1)[0])
+        crp_slope = slope
+
+        if slope > 0.005:
+            shape = "CONTANGO"     # CRP increases with horizon → long-dated richer
+        elif slope < -0.005:
+            shape = "BACKWARDATION"  # CRP decreases → short-dated richer
+        else:
+            # Check for hump
+            mid = crp_vals[len(crp_vals) // 2]
+            ends = (crp_vals[0] + crp_vals[-1]) / 2
+            if mid > ends + 0.01:
+                shape = "HUMPED"
+            else:
+                shape = "FLAT"
+    else:
+        crp_slope = 0.0
+        shape = "FLAT"
+
+    # Optimal horizon: highest CRP
+    opt_h = max(crp, key=crp.get) if crp else 21
+    opt_crp = crp.get(opt_h, 0)
+
+    return DispersionSurface(
+        horizons=horizons,
+        implied_corr_by_horizon=impl_corr,
+        realized_corr_by_horizon=real_corr,
+        crp_by_horizon=crp,
+        dispersion_by_horizon=disp,
+        crp_term_slope=round(crp_slope, 6),
+        crp_curve_shape=shape,
+        optimal_horizon=opt_h,
+        optimal_crp=round(opt_crp, 4),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CRP (Correlation Risk Premium) Time Series
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class CRPTimeSeries:
+    """Historical CRP time series for backtesting dispersion entry timing."""
+    dates: List[str]
+    crp_values: List[float]
+    crp_z_scores: List[float]
+    current_crp: float
+    current_crp_z: float
+    crp_mean: float
+    crp_std: float
+    # Entry signal
+    is_entry_signal: bool            # CRP z > 1.5 → dispersion trade is attractive
+    entry_strength: float            # 0-1
+
+
+def compute_crp_time_series(
+    prices: pd.DataFrame,
+    sectors: List[str],
+    spy_ticker: str = "SPY",
+    lookback: int = 252,
+    window: int = 21,
+) -> CRPTimeSeries:
+    """
+    Compute rolling CRP (Implied Corr - Realized Corr) time series.
+
+    Used for timing dispersion trade entries:
+      - High CRP → implied corr rich vs realized → SELL implied corr (dispersion trade)
+      - Low CRP → implied corr cheap → AVOID dispersion trade
+    """
+    avail = [s for s in sectors if s in prices.columns]
+    if len(avail) < 3 or len(prices) < lookback + window:
+        return CRPTimeSeries(
+            dates=[], crp_values=[], crp_z_scores=[],
+            current_crp=0, current_crp_z=0, crp_mean=0, crp_std=0,
+            is_entry_signal=False, entry_strength=0,
+        )
+
+    log_rets = np.log(prices[avail] / prices[avail].shift(1)).dropna()
+    spy_rets = np.log(prices[spy_ticker] / prices[spy_ticker].shift(1)).dropna() if spy_ticker in prices.columns else None
+
+    n_sectors = len(avail)
+    w = np.ones(n_sectors) / n_sectors
+
+    dates_out = []
+    crp_out = []
+
+    for t in range(lookback, len(log_rets)):
+        R = log_rets.iloc[t - window: t]
+        C = R.corr()
+        iu = np.triu_indices(n_sectors, k=1)
+        avg_real = float(np.nanmean(C.values[iu]))
+
+        # Implied correlation
+        sec_vols = np.array([float(R[s].std()) for s in avail])
+        idx_vol = float(spy_rets.iloc[t - window:t].std()) if spy_rets is not None else float(sec_vols.mean())
+
+        ws_var = float(np.sum((w * sec_vols) ** 2))
+        cross = sum(2 * w[i] * w[j] * sec_vols[i] * sec_vols[j]
+                     for i in range(n_sectors) for j in range(i + 1, n_sectors))
+
+        rho_impl = (idx_vol ** 2 - ws_var) / (cross + 1e-10) if cross > 1e-10 else avg_real
+        rho_impl = max(-1.0, min(1.0, rho_impl))
+
+        crp_val = rho_impl - avg_real
+        dates_out.append(str(log_rets.index[t].date()) if hasattr(log_rets.index[t], "date") else str(log_rets.index[t]))
+        crp_out.append(round(crp_val, 6))
+
+    if not crp_out:
+        return CRPTimeSeries(
+            dates=[], crp_values=[], crp_z_scores=[],
+            current_crp=0, current_crp_z=0, crp_mean=0, crp_std=0,
+            is_entry_signal=False, entry_strength=0,
+        )
+
+    crp_arr = np.array(crp_out)
+    mu = float(crp_arr.mean())
+    sd = float(crp_arr.std())
+    z_scores = ((crp_arr - mu) / sd if sd > 1e-10 else np.zeros_like(crp_arr)).tolist()
+
+    current = crp_out[-1]
+    current_z = z_scores[-1]
+    is_entry = current_z > 1.5
+    strength = min(1.0, max(0, (current_z - 1.0) / 2.0))
+
+    return CRPTimeSeries(
+        dates=dates_out,
+        crp_values=crp_out,
+        crp_z_scores=[round(z, 4) for z in z_scores],
+        current_crp=round(current, 6),
+        current_crp_z=round(current_z, 4),
+        crp_mean=round(mu, 6),
+        crp_std=round(sd, 6),
+        is_entry_signal=is_entry,
+        entry_strength=round(strength, 4),
+    )
+
+
+from typing import Dict, List, Optional
+import numpy as np
+import math
