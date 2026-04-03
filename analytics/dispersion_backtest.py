@@ -519,3 +519,152 @@ def optimize_dispersion_params(
                                 best_params = results[-1].copy()
 
     return {"best": best_params, "all_results": results}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Enhanced Greeks Estimation for Dispersion Trades
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+import math
+
+
+@dataclass
+class DispersionGreeks:
+    """Full Greeks profile for a dispersion trade at a point in time."""
+    # Portfolio-level
+    net_delta: float = 0.0           # Should be ~0 (delta-neutral by construction)
+    net_gamma: float = 0.0           # Long gamma (from sector straddles)
+    net_vega: float = 0.0            # Should be ~0 if properly hedged
+    net_theta: float = 0.0           # Net time decay (negative = paying)
+    # Correlation Greeks
+    rho_correlation: float = 0.0     # dP&L/d(correlation) — negative for dispersion
+    rho_dispersion: float = 0.0      # dP&L/d(dispersion) — positive
+    # Per-component
+    index_vega: float = 0.0          # Short index vega (collecting premium)
+    sector_vega_total: float = 0.0   # Long sector vega (paying premium)
+    vega_mismatch: float = 0.0       # |index_vega| - |sector_vega_total|
+
+
+def estimate_dispersion_greeks(
+    index_price: float,
+    sector_prices: Dict[str, float],
+    index_iv: float,
+    sector_ivs: Dict[str, float],
+    sector_weights: Dict[str, float],
+    dte: int = 21,
+    notional: float = 100_000,
+) -> DispersionGreeks:
+    """
+    Estimate Greeks for a dispersion trade (short index vol + long sector vol).
+
+    Parameters
+    ----------
+    index_price, sector_prices — current prices
+    index_iv, sector_ivs — annualized implied volatilities
+    sector_weights — weight of each sector in the dispersion basket
+    dte — days to expiration
+    notional — dollar notional of the trade
+    """
+    T = dte / 252
+    sqrt_T = math.sqrt(T)
+
+    # Index straddle Greeks (SHORT)
+    idx_vega = -notional * index_iv * sqrt_T * 0.01  # Per 1% vol move
+    idx_gamma = -notional * 0.4 / (index_price * index_iv * sqrt_T + 0.01)
+    idx_theta = notional * index_iv / (2 * sqrt_T * 252 + 0.01) * 0.01
+
+    # Sector straddle Greeks (LONG)
+    sec_vega_total = 0.0
+    sec_gamma_total = 0.0
+    sec_theta_total = 0.0
+
+    for sec, w in sector_weights.items():
+        if sec not in sector_ivs or sec not in sector_prices:
+            continue
+        sec_notional = notional * w
+        sec_iv = sector_ivs[sec]
+        sec_price = sector_prices[sec]
+
+        sec_vega = sec_notional * sec_iv * sqrt_T * 0.01
+        sec_gamma = sec_notional * 0.4 / (sec_price * sec_iv * sqrt_T + 0.01)
+        sec_theta = -sec_notional * sec_iv / (2 * sqrt_T * 252 + 0.01) * 0.01
+
+        sec_vega_total += sec_vega
+        sec_gamma_total += sec_gamma
+        sec_theta_total += sec_theta
+
+    # Correlation sensitivity: dP&L/d(ρ) ≈ -notional × σ_avg × √T
+    avg_iv = float(np.mean(list(sector_ivs.values()))) if sector_ivs else 0.15
+    rho_corr = -notional * avg_iv * sqrt_T * 0.01
+
+    return DispersionGreeks(
+        net_delta=0.0,  # Delta-neutral by construction
+        net_gamma=round(sec_gamma_total + idx_gamma, 4),
+        net_vega=round(sec_vega_total + idx_vega, 4),
+        net_theta=round(sec_theta_total + idx_theta, 4),
+        rho_correlation=round(rho_corr, 4),
+        rho_dispersion=round(-rho_corr, 4),
+        index_vega=round(idx_vega, 4),
+        sector_vega_total=round(sec_vega_total, 4),
+        vega_mismatch=round(abs(idx_vega) - abs(sec_vega_total), 4),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Skew Impact Model
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SkewImpact:
+    """Impact of volatility skew on dispersion trade P&L."""
+    skew_cost_bps: float              # Cost from negative skew (buying OTM puts)
+    skew_benefit_bps: float           # Benefit from selling OTM index puts
+    net_skew_impact_bps: float        # Net P&L impact from skew
+    skew_regime: str                  # "FAVORABLE" / "NEUTRAL" / "ADVERSE"
+
+
+def estimate_skew_impact(
+    index_iv: float,
+    sector_ivs: Dict[str, float],
+    skew_index: float = 100.0,       # CBOE Skew index
+    direction: str = "SHORT_INDEX",   # Standard dispersion
+) -> SkewImpact:
+    """
+    Estimate the impact of volatility skew on dispersion trade P&L.
+
+    In a standard dispersion trade (short index vol):
+    - Index skew is typically steeper → we BENEFIT from selling rich index puts
+    - Sector skew is flatter → lower cost on sector straddles
+
+    When CBOE Skew > 130: index put skew is extremely rich → MORE favorable
+    When CBOE Skew < 110: skew is flat → LESS favorable (no premium)
+    """
+    avg_sector_iv = float(np.mean(list(sector_ivs.values()))) if sector_ivs else 0.15
+
+    # Skew premium estimation
+    # Index: richer skew → we collect more premium (BENEFIT)
+    skew_premium = max(0, (skew_index - 100) * 0.5)  # bps per point of skew above 100
+
+    # Sector: flatter skew → lower cost
+    sector_skew_cost = avg_sector_iv * 2  # Simplified: 2bps per 1% IV
+
+    # Net impact
+    net = skew_premium - sector_skew_cost
+
+    if net > 5:
+        regime = "FAVORABLE"
+    elif net < -5:
+        regime = "ADVERSE"
+    else:
+        regime = "NEUTRAL"
+
+    return SkewImpact(
+        skew_cost_bps=round(sector_skew_cost, 1),
+        skew_benefit_bps=round(skew_premium, 1),
+        net_skew_impact_bps=round(net, 1),
+        skew_regime=regime,
+    )
+
+
+from typing import Dict

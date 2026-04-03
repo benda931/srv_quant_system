@@ -1,8 +1,37 @@
+"""
+analytics/attribution.py
+==========================
+Multi-layer attribution engine for the SRV Quantamental DSS.
+
+Two attribution frameworks:
+  1. DSS Signal Attribution — per-sector conviction scoring (SDS, FJS, MSS, STF, MC)
+  2. Brinson Performance Attribution — sector allocation + selection effects
+  3. Multi-Factor Return Decomposition — SPY/rates/dollar/credit/alpha breakdown
+  4. Risk Attribution — marginal risk contribution per factor
+
+DSS Attribution:
+  SDS = Statistical Dislocation Score (PCA residual z-score quality)
+  FJS = Fundamental Justification Score (PE, earnings alignment)
+  MSS = Macro Shift Score (beta instability, VIX, credit)
+  STF = Structural Trend Filter (trend alignment with direction)
+  MC  = Mispricing Confidence (composite of all four)
+
+Brinson Attribution (Brinson, Hood, Beebower 1986):
+  Total excess return = Allocation Effect + Selection Effect + Interaction
+  Allocation: over/underweight sectors that outperformed/underperformed
+  Selection: picking better/worse assets within each sector
+
+Ref: Brinson, Hood, Beebower (1986) — Determinants of Portfolio Performance
+Ref: Grinold & Kahn (2000) — Active Portfolio Management
+"""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 
 
 def clip01(x: float) -> float:
@@ -486,4 +515,303 @@ def compute_attribution_row(
         risk_label=risk_label,
         interpretation=interpretation,
         explanation_tags=explanation_tags,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Brinson Performance Attribution
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class BrinsonAttribution:
+    """
+    Brinson-style performance attribution for sector portfolios.
+
+    Decomposes excess return vs benchmark (SPY) into:
+      Allocation: returns from sector weight decisions
+      Selection: returns from within-sector stock/ETF selection
+      Interaction: cross-effect of allocation × selection
+    """
+    # Portfolio metrics
+    portfolio_return: float
+    benchmark_return: float
+    excess_return: float
+
+    # Attribution components
+    allocation_effect: float          # ΔR from sector weighting decisions
+    selection_effect: float           # ΔR from within-sector performance
+    interaction_effect: float         # Cross-term
+
+    # Per-sector breakdown
+    sector_allocation: Dict[str, float]    # {sector: allocation_contribution}
+    sector_selection: Dict[str, float]     # {sector: selection_contribution}
+
+    # Top contributors
+    top_allocators: List[Tuple[str, float]]     # Best allocation decisions
+    top_selectors: List[Tuple[str, float]]       # Best selection decisions
+    worst_allocators: List[Tuple[str, float]]
+    worst_selectors: List[Tuple[str, float]]
+
+
+def brinson_attribution(
+    portfolio_weights: Dict[str, float],
+    benchmark_weights: Dict[str, float],
+    sector_returns: Dict[str, float],
+    benchmark_return: float,
+) -> BrinsonAttribution:
+    """
+    Compute Brinson-Fachler attribution.
+
+    Parameters
+    ----------
+    portfolio_weights : {sector: weight} — portfolio weights (sum ~1)
+    benchmark_weights : {sector: weight} — benchmark (SPY) sector weights
+    sector_returns : {sector: return} — sector returns for the period
+    benchmark_return : float — total benchmark return
+
+    Returns
+    -------
+    BrinsonAttribution with allocation, selection, interaction effects
+    """
+    all_sectors = sorted(set(list(portfolio_weights.keys()) + list(benchmark_weights.keys())))
+
+    port_return = sum(portfolio_weights.get(s, 0) * sector_returns.get(s, 0) for s in all_sectors)
+    excess = port_return - benchmark_return
+
+    alloc_by_sector: Dict[str, float] = {}
+    select_by_sector: Dict[str, float] = {}
+
+    total_alloc = 0.0
+    total_select = 0.0
+    total_interact = 0.0
+
+    for s in all_sectors:
+        wp = portfolio_weights.get(s, 0)
+        wb = benchmark_weights.get(s, 0)
+        rs = sector_returns.get(s, 0)
+        rb = benchmark_return
+
+        # Brinson-Fachler decomposition
+        alloc = (wp - wb) * (rs - rb)
+        select = wb * (rs - rb)
+        interact = (wp - wb) * (rs - rb)
+
+        alloc_by_sector[s] = round(alloc, 8)
+        select_by_sector[s] = round(select, 8)
+
+        total_alloc += alloc
+        total_select += select
+
+    total_interact = excess - total_alloc - total_select
+
+    # Top/worst contributors
+    alloc_sorted = sorted(alloc_by_sector.items(), key=lambda x: x[1], reverse=True)
+    select_sorted = sorted(select_by_sector.items(), key=lambda x: x[1], reverse=True)
+
+    return BrinsonAttribution(
+        portfolio_return=round(port_return, 8),
+        benchmark_return=round(benchmark_return, 8),
+        excess_return=round(excess, 8),
+        allocation_effect=round(total_alloc, 8),
+        selection_effect=round(total_select, 8),
+        interaction_effect=round(total_interact, 8),
+        sector_allocation=alloc_by_sector,
+        sector_selection=select_by_sector,
+        top_allocators=alloc_sorted[:3],
+        top_selectors=select_sorted[:3],
+        worst_allocators=alloc_sorted[-3:],
+        worst_selectors=select_sorted[-3:],
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Multi-Factor Return Decomposition
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class FactorDecomposition:
+    """
+    Multi-factor return decomposition.
+
+    Decomposes portfolio returns into factor exposures:
+      Market (SPY beta), Rates (TNX), Dollar (DXY), Credit (HYG), Alpha (residual)
+    """
+    # Factor contributions (daily or period)
+    factor_returns: Dict[str, float]    # {factor: return_contribution}
+    factor_betas: Dict[str, float]      # {factor: beta/exposure}
+
+    # Summary
+    systematic_return: float             # Sum of factor returns
+    alpha_return: float                  # Unexplained (residual)
+    total_return: float
+
+    # R² and quality
+    r_squared: float                     # Explained variance
+    tracking_error: float                # Residual volatility (annualized)
+    information_ratio: float             # Alpha / tracking_error
+
+    # Per-factor detail
+    factor_t_stats: Dict[str, float]     # Statistical significance per factor
+
+
+def decompose_returns(
+    portfolio_returns: pd.Series,
+    factor_returns: pd.DataFrame,
+    factor_names: Optional[List[str]] = None,
+) -> FactorDecomposition:
+    """
+    OLS regression of portfolio returns on factor returns.
+
+    Parameters
+    ----------
+    portfolio_returns : pd.Series — daily portfolio returns
+    factor_returns : pd.DataFrame — daily factor returns (SPY, ^TNX, DXY, HYG, etc.)
+    factor_names : optional — column names to use as factors
+    """
+    if factor_names:
+        factors = factor_returns[factor_names].copy()
+    else:
+        factors = factor_returns.copy()
+
+    # Align
+    aligned = pd.DataFrame({"port": portfolio_returns}).join(factors, how="inner").dropna()
+    if len(aligned) < 30:
+        return FactorDecomposition(
+            factor_returns={}, factor_betas={},
+            systematic_return=0, alpha_return=0, total_return=0,
+            r_squared=0, tracking_error=0, information_ratio=0,
+            factor_t_stats={},
+        )
+
+    y = aligned["port"].values
+    X = aligned.drop(columns=["port"]).values
+    fnames = [c for c in aligned.columns if c != "port"]
+    n, k = X.shape
+
+    # OLS with intercept
+    X_with_const = np.column_stack([np.ones(n), X])
+    try:
+        betas, residuals, rank, sv = np.linalg.lstsq(X_with_const, y, rcond=None)
+    except np.linalg.LinAlgError:
+        return FactorDecomposition(
+            factor_returns={}, factor_betas={},
+            systematic_return=0, alpha_return=0, total_return=0,
+            r_squared=0, tracking_error=0, information_ratio=0,
+            factor_t_stats={},
+        )
+
+    alpha_daily = betas[0]
+    factor_betas_arr = betas[1:]
+    y_pred = X_with_const @ betas
+    resid = y - y_pred
+
+    # R²
+    ss_res = np.sum(resid ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    r2 = 1 - ss_res / (ss_tot + 1e-15)
+
+    # Factor contributions (cumulative)
+    factor_contribs = {}
+    for i, fname in enumerate(fnames):
+        factor_contribs[fname] = round(float(factor_betas_arr[i] * X[:, i].sum()), 8)
+
+    factor_beta_dict = {fnames[i]: round(float(factor_betas_arr[i]), 6) for i in range(k)}
+
+    systematic = sum(factor_contribs.values())
+    alpha_total = float(y.sum()) - systematic
+    total = float(y.sum())
+
+    # Tracking error
+    te = float(resid.std() * np.sqrt(252))
+
+    # Information ratio
+    ir = float(alpha_daily * 252 / te) if te > 1e-10 else 0.0
+
+    # t-statistics
+    se = np.sqrt(np.diag(ss_res / (n - k - 1) * np.linalg.pinv(X_with_const.T @ X_with_const)))
+    t_stats = {}
+    for i, fname in enumerate(fnames):
+        t_stats[fname] = round(float(betas[i + 1] / (se[i + 1] + 1e-10)), 3)
+
+    return FactorDecomposition(
+        factor_returns=factor_contribs,
+        factor_betas=factor_beta_dict,
+        systematic_return=round(systematic, 8),
+        alpha_return=round(alpha_total, 8),
+        total_return=round(total, 8),
+        r_squared=round(r2, 4),
+        tracking_error=round(te, 6),
+        information_ratio=round(ir, 4),
+        factor_t_stats=t_stats,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Risk Attribution (Marginal Risk Contribution by Factor)
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class RiskAttribution:
+    """Per-factor risk contribution."""
+    factor_risk_contribution: Dict[str, float]   # {factor: % of portfolio vol}
+    systematic_risk_pct: float                    # % from factor exposure
+    idiosyncratic_risk_pct: float                 # % from residual
+    diversification_benefit: float                # 1 - (undiv_vol / div_vol)
+
+
+def attribute_risk(
+    portfolio_returns: pd.Series,
+    factor_returns: pd.DataFrame,
+) -> RiskAttribution:
+    """
+    Decompose portfolio risk into factor and idiosyncratic components.
+
+    Uses variance decomposition: Var(r_p) = β'Σ_F β + σ²_ε
+    """
+    aligned = pd.DataFrame({"port": portfolio_returns}).join(factor_returns, how="inner").dropna()
+    if len(aligned) < 30:
+        return RiskAttribution(
+            factor_risk_contribution={}, systematic_risk_pct=0,
+            idiosyncratic_risk_pct=1, diversification_benefit=0,
+        )
+
+    y = aligned["port"].values
+    X = aligned.drop(columns=["port"]).values
+    fnames = [c for c in aligned.columns if c != "port"]
+
+    # OLS
+    X_c = np.column_stack([np.ones(len(X)), X])
+    betas = np.linalg.lstsq(X_c, y, rcond=None)[0]
+    factor_betas = betas[1:]
+    resid = y - X_c @ betas
+
+    # Factor covariance
+    Sigma_F = np.cov(X.T) if X.shape[1] > 1 else np.atleast_2d(X.var())
+
+    # Portfolio variance decomposition
+    total_var = float(y.var())
+    systematic_var = float(factor_betas @ Sigma_F @ factor_betas)
+    idio_var = float(resid.var())
+
+    sys_pct = systematic_var / (total_var + 1e-15)
+    idio_pct = 1 - sys_pct
+
+    # Per-factor contribution
+    factor_contrib = {}
+    for i, fname in enumerate(fnames):
+        # Marginal contribution: β_i² × σ²_i / total_var
+        fc = factor_betas[i] ** 2 * float(Sigma_F[i, i] if Sigma_F.ndim > 1 else Sigma_F) / (total_var + 1e-15)
+        factor_contrib[fname] = round(fc, 6)
+
+    # Diversification benefit
+    undiv_vol = sum(abs(factor_betas[i]) * float(np.sqrt(Sigma_F[i, i] if Sigma_F.ndim > 1 else Sigma_F))
+                     for i in range(len(fnames)))
+    div_vol = np.sqrt(systematic_var)
+    div_benefit = 1 - div_vol / (undiv_vol + 1e-10) if undiv_vol > 0 else 0
+
+    return RiskAttribution(
+        factor_risk_contribution=factor_contrib,
+        systematic_risk_pct=round(sys_pct, 4),
+        idiosyncratic_risk_pct=round(idio_pct, 4),
+        diversification_benefit=round(div_benefit, 4),
     )
