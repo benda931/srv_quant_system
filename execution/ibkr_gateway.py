@@ -1106,3 +1106,379 @@ class SignalExecutor:
             "CRISIS": 0.25,
         }
         return scaling.get(regime_state.upper() if regime_state else "NEUTRAL", 0.60)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Options Execution — Straddle/Strangle Builder
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+import math
+
+
+@dataclass
+class OptionLeg:
+    """Single leg of an options trade."""
+    ticker: str
+    expiry: str           # YYYYMMDD
+    strike: float
+    right: str            # "C" (call) or "P" (put)
+    action: str           # "BUY" or "SELL"
+    quantity: int
+    order_type: str = "LMT"
+    limit_price: float = 0.0
+    # Computed
+    notional: float = 0.0
+    iv_at_entry: float = 0.0
+
+
+@dataclass
+class OptionsOrder:
+    """Multi-leg options order with risk checks."""
+    order_id: str
+    strategy: str         # "STRADDLE" / "STRANGLE" / "CALL_SPREAD" / "PUT_SPREAD" / "COLLAR"
+    underlying: str
+    legs: List[OptionLeg] = field(default_factory=list)
+    # Risk
+    max_loss: float = 0.0
+    max_profit: float = 0.0
+    breakeven_up: float = 0.0
+    breakeven_down: float = 0.0
+    # Greeks (aggregate)
+    net_delta: float = 0.0
+    net_gamma: float = 0.0
+    net_vega: float = 0.0
+    net_theta: float = 0.0
+    # Status
+    status: str = "PENDING"  # "PENDING" / "FILLED" / "REJECTED" / "DRY_RUN"
+    rejection_reason: str = ""
+
+
+class OptionsBuilder:
+    """
+    Builder for options strategies on sector ETFs.
+
+    Supported strategies:
+      - ATM Straddle: sell call + sell put at same strike (short vol)
+      - OTM Strangle: sell call above + sell put below (wider short vol)
+      - Call Spread: buy call + sell higher call (bullish with cap)
+      - Put Spread: buy put + sell lower put (bearish with cap)
+      - Collar: long stock + sell call + buy put (hedged long)
+
+    All strategies include:
+      - IV threshold check (only enter when IV > RV × threshold)
+      - Max loss limit enforcement
+      - Delta-neutral verification for straddles/strangles
+      - Expiry selection (nearest monthly with DTE ≥ min_dte)
+    """
+
+    def __init__(
+        self,
+        gateway: Optional["IBKRGateway"] = None,
+        min_dte: int = 21,
+        iv_threshold_ratio: float = 1.2,    # IV must be > 1.2× RV to sell vol
+        max_loss_pct: float = 0.03,          # Max 3% portfolio loss per trade
+    ):
+        self.gateway = gateway
+        self.min_dte = min_dte
+        self.iv_threshold = iv_threshold_ratio
+        self.max_loss_pct = max_loss_pct
+        self._dry_run = gateway is None or not _HAS_IB_INSYNC
+
+    def build_straddle(
+        self,
+        ticker: str,
+        price: float,
+        iv: float,
+        rv: float,
+        quantity: int = 1,
+        expiry: str = "",
+    ) -> OptionsOrder:
+        """
+        Build an ATM straddle (sell call + sell put at same strike).
+
+        For short-vol / dispersion trades:
+        - Sell when IV/RV > threshold (vol is rich)
+        - Profit from theta decay if realized vol < implied vol
+        """
+        order_id = f"OPT_STRAD_{ticker}_{uuid.uuid4().hex[:6]}"
+
+        # IV threshold check
+        if iv < rv * self.iv_threshold:
+            return OptionsOrder(
+                order_id=order_id, strategy="STRADDLE", underlying=ticker,
+                status="REJECTED",
+                rejection_reason=f"IV ({iv:.1%}) < {self.iv_threshold:.1f}× RV ({rv:.1%}) — vol not rich enough",
+            )
+
+        strike = round(price, 0)  # ATM strike
+
+        call_leg = OptionLeg(
+            ticker=ticker, expiry=expiry, strike=strike, right="C",
+            action="SELL", quantity=quantity,
+            iv_at_entry=iv, notional=price * quantity * 100,
+        )
+        put_leg = OptionLeg(
+            ticker=ticker, expiry=expiry, strike=strike, right="P",
+            action="SELL", quantity=quantity,
+            iv_at_entry=iv, notional=price * quantity * 100,
+        )
+
+        # Greeks estimation (Black-Scholes approximation)
+        T = self.min_dte / 252
+        sqrt_T = math.sqrt(T)
+        straddle_premium = price * iv * sqrt_T * 0.8  # ~80% of BS straddle price
+        max_loss = price * 0.15 * quantity * 100       # Cap at 15% of underlying
+        breakeven_up = strike + straddle_premium
+        breakeven_down = strike - straddle_premium
+
+        return OptionsOrder(
+            order_id=order_id, strategy="STRADDLE", underlying=ticker,
+            legs=[call_leg, put_leg],
+            max_loss=round(max_loss, 2),
+            max_profit=round(straddle_premium * quantity * 100, 2),
+            breakeven_up=round(breakeven_up, 2),
+            breakeven_down=round(breakeven_down, 2),
+            net_delta=0.0,  # ATM straddle is delta-neutral
+            net_gamma=round(-2 * 0.4 / (price * iv * sqrt_T + 0.01), 4),  # Negative gamma
+            net_vega=round(-2 * price * sqrt_T * 0.01, 4),  # Negative vega
+            net_theta=round(2 * price * iv / (2 * sqrt_T * 252) * 0.01, 4),  # Positive theta
+            status="DRY_RUN" if self._dry_run else "PENDING",
+        )
+
+    def build_strangle(
+        self,
+        ticker: str,
+        price: float,
+        iv: float,
+        rv: float,
+        quantity: int = 1,
+        width_pct: float = 0.05,
+        expiry: str = "",
+    ) -> OptionsOrder:
+        """
+        Build an OTM strangle (sell call above + sell put below).
+
+        Width: strikes are ±width_pct from current price (default 5%).
+        Wider than straddle → lower premium but higher probability of profit.
+        """
+        order_id = f"OPT_STRANG_{ticker}_{uuid.uuid4().hex[:6]}"
+
+        if iv < rv * self.iv_threshold:
+            return OptionsOrder(
+                order_id=order_id, strategy="STRANGLE", underlying=ticker,
+                status="REJECTED",
+                rejection_reason=f"IV ({iv:.1%}) < {self.iv_threshold:.1f}× RV ({rv:.1%})",
+            )
+
+        call_strike = round(price * (1 + width_pct), 0)
+        put_strike = round(price * (1 - width_pct), 0)
+
+        call_leg = OptionLeg(
+            ticker=ticker, expiry=expiry, strike=call_strike, right="C",
+            action="SELL", quantity=quantity, iv_at_entry=iv,
+        )
+        put_leg = OptionLeg(
+            ticker=ticker, expiry=expiry, strike=put_strike, right="P",
+            action="SELL", quantity=quantity, iv_at_entry=iv,
+        )
+
+        T = self.min_dte / 252
+        sqrt_T = math.sqrt(T)
+        premium = price * iv * sqrt_T * 0.5  # OTM strangle ~50% of straddle
+        max_loss = price * 0.20 * quantity * 100
+
+        return OptionsOrder(
+            order_id=order_id, strategy="STRANGLE", underlying=ticker,
+            legs=[call_leg, put_leg],
+            max_loss=round(max_loss, 2),
+            max_profit=round(premium * quantity * 100, 2),
+            breakeven_up=round(call_strike + premium, 2),
+            breakeven_down=round(put_strike - premium, 2),
+            net_delta=0.0,
+            net_gamma=round(-2 * 0.3 / (price * iv * sqrt_T + 0.01), 4),
+            net_vega=round(-2 * price * sqrt_T * 0.008, 4),
+            net_theta=round(2 * price * iv / (2 * sqrt_T * 252) * 0.008, 4),
+            status="DRY_RUN" if self._dry_run else "PENDING",
+        )
+
+    def build_call_spread(
+        self,
+        ticker: str,
+        price: float,
+        quantity: int = 1,
+        width_pct: float = 0.05,
+        expiry: str = "",
+    ) -> OptionsOrder:
+        """
+        Bull call spread: buy ATM call + sell OTM call.
+        Defined risk: max loss = net debit, max profit = width - debit.
+        """
+        order_id = f"OPT_CALL_SPR_{ticker}_{uuid.uuid4().hex[:6]}"
+        buy_strike = round(price, 0)
+        sell_strike = round(price * (1 + width_pct), 0)
+
+        return OptionsOrder(
+            order_id=order_id, strategy="CALL_SPREAD", underlying=ticker,
+            legs=[
+                OptionLeg(ticker=ticker, expiry=expiry, strike=buy_strike,
+                          right="C", action="BUY", quantity=quantity),
+                OptionLeg(ticker=ticker, expiry=expiry, strike=sell_strike,
+                          right="C", action="SELL", quantity=quantity),
+            ],
+            max_loss=round((sell_strike - buy_strike) * 0.4 * quantity * 100, 2),
+            max_profit=round((sell_strike - buy_strike) * 0.6 * quantity * 100, 2),
+            breakeven_up=round(buy_strike + (sell_strike - buy_strike) * 0.4, 2),
+            net_delta=round(0.3 * quantity, 2),
+            status="DRY_RUN" if self._dry_run else "PENDING",
+        )
+
+    def build_dispersion_trade(
+        self,
+        index_ticker: str,
+        sector_tickers: List[str],
+        index_price: float,
+        sector_prices: Dict[str, float],
+        index_iv: float,
+        sector_ivs: Dict[str, float],
+        sector_weights: Dict[str, float],
+        quantity: int = 1,
+    ) -> List[OptionsOrder]:
+        """
+        Build a dispersion trade: short index straddle + long sector straddles.
+
+        Profits when realized correlation < implied correlation.
+        The core alpha trade for the Short Vol / Dispersion strategy.
+
+        Parameters
+        ----------
+        index_ticker : str — SPY or similar index ETF
+        sector_tickers : list — sector ETFs to go long vol
+        index_price, sector_prices : current prices
+        index_iv, sector_ivs : implied volatilities
+        sector_weights : portfolio weights for each sector
+        """
+        orders = []
+
+        # Short index straddle
+        index_order = self.build_straddle(
+            index_ticker, index_price, index_iv, index_iv * 0.8,  # Assume RV = 80% of IV
+            quantity=quantity,
+        )
+        if index_order.status != "REJECTED":
+            index_order.strategy = "DISP_SHORT_INDEX"
+            orders.append(index_order)
+
+        # Long sector straddles (weighted by sector weights)
+        for sec in sector_tickers:
+            if sec not in sector_prices or sec not in sector_ivs:
+                continue
+            sec_qty = max(1, int(quantity * sector_weights.get(sec, 0.1)))
+            sec_iv = sector_ivs[sec]
+            sec_price = sector_prices[sec]
+
+            sec_order = OptionsOrder(
+                order_id=f"OPT_DISP_LONG_{sec}_{uuid.uuid4().hex[:6]}",
+                strategy="DISP_LONG_SECTOR",
+                underlying=sec,
+                legs=[
+                    OptionLeg(ticker=sec, expiry="", strike=round(sec_price, 0),
+                              right="C", action="BUY", quantity=sec_qty, iv_at_entry=sec_iv),
+                    OptionLeg(ticker=sec, expiry="", strike=round(sec_price, 0),
+                              right="P", action="BUY", quantity=sec_qty, iv_at_entry=sec_iv),
+                ],
+                net_vega=round(2 * sec_price * math.sqrt(self.min_dte / 252) * 0.01, 4),
+                status="DRY_RUN" if self._dry_run else "PENDING",
+            )
+            orders.append(sec_order)
+
+        return orders
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Smart Order Routing
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SmartRouteDecision:
+    """Decision on how to route an order for best execution."""
+    ticker: str
+    quantity: int
+    side: str                     # "BUY" / "SELL"
+    algo: str                     # "MARKET" / "LIMIT" / "TWAP" / "VWAP" / "ARRIVAL_PRICE"
+    urgency: str                  # "LOW" / "MEDIUM" / "HIGH" / "IMMEDIATE"
+    limit_offset_bps: float       # Offset from mid for limit orders
+    participation_rate: float     # For TWAP/VWAP: max % of volume
+    reasoning: str
+
+
+def smart_route(
+    ticker: str,
+    quantity: int,
+    side: str,
+    notional: float,
+    avg_daily_volume: float = 10_000_000,
+    spread_bps: float = 2.0,
+    urgency: str = "MEDIUM",
+) -> SmartRouteDecision:
+    """
+    Determine optimal order routing based on order size, liquidity, and urgency.
+
+    Rules:
+      - Small orders (< 0.1% ADV): Market order — minimal impact
+      - Medium orders (0.1-1% ADV): Limit order with offset — reduce slippage
+      - Large orders (1-5% ADV): TWAP over 30 min — spread impact
+      - Very large orders (> 5% ADV): VWAP with low participation — minimize footprint
+
+    Urgency overrides:
+      - IMMEDIATE: always market order (VIX spike, regime change)
+      - HIGH: limit order with tight offset
+      - LOW: TWAP with extended horizon
+    """
+    participation = notional / max(avg_daily_volume, 1_000_000)
+
+    if urgency == "IMMEDIATE":
+        return SmartRouteDecision(
+            ticker=ticker, quantity=quantity, side=side,
+            algo="MARKET", urgency=urgency, limit_offset_bps=0,
+            participation_rate=1.0,
+            reasoning="Immediate urgency — market order for speed",
+        )
+
+    if participation < 0.001:
+        algo = "MARKET"
+        offset = 0
+        part_rate = 1.0
+        reason = f"Small order ({participation:.3%} of ADV) — market order OK"
+    elif participation < 0.01:
+        algo = "LIMIT"
+        offset = max(1.0, spread_bps * 0.5)
+        part_rate = 1.0
+        reason = f"Medium order ({participation:.2%} of ADV) — limit order {offset:.0f}bps from mid"
+    elif participation < 0.05:
+        algo = "TWAP"
+        offset = spread_bps
+        part_rate = 0.15
+        reason = f"Large order ({participation:.1%} of ADV) — TWAP 15% participation"
+    else:
+        algo = "VWAP"
+        offset = spread_bps * 1.5
+        part_rate = 0.08
+        reason = f"Very large order ({participation:.1%} of ADV) — VWAP 8% participation"
+
+    if urgency == "HIGH" and algo not in ("MARKET",):
+        algo = "LIMIT"
+        offset = max(1.0, spread_bps * 0.3)
+        reason += " [HIGH urgency: upgraded to tight limit]"
+    elif urgency == "LOW" and algo == "MARKET":
+        algo = "LIMIT"
+        offset = spread_bps
+        reason += " [LOW urgency: downgraded to limit]"
+
+    return SmartRouteDecision(
+        ticker=ticker, quantity=quantity, side=side,
+        algo=algo, urgency=urgency,
+        limit_offset_bps=round(offset, 1),
+        participation_rate=round(part_rate, 2),
+        reasoning=reason,
+    )

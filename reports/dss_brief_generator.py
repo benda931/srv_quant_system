@@ -461,6 +461,55 @@ class DSSBriefGenerator:
         else:
             L.append("[6] ACTION ITEMS: none — all clear")
 
+        # ── [7] P&L ATTRIBUTION (if available) ─────────────────────────
+        if kwargs.get("pnl_attribution"):
+            attr = kwargs["pnl_attribution"]
+            L.append("")
+            L.append("[7] P&L ATTRIBUTION")
+            L.append(f"    {'Factor':<25} {'Contribution':>12}")
+            L.append(f"    {'-'*40}")
+            for factor, value in attr.items():
+                sign = "+" if value >= 0 else ""
+                L.append(f"    {factor:<25} {sign}{value*100:.2f}%")
+
+        # ── [8] HEDGE RECOMMENDATIONS ────────────────────────────────────
+        if kwargs.get("hedge_recommendations"):
+            hedges = kwargs["hedge_recommendations"]
+            L.append("")
+            L.append("[8] HEDGE RECOMMENDATIONS")
+            for h in hedges[:5]:
+                L.append(f"    • {h}")
+
+        # ── [9] MOMENTUM RANKING ─────────────────────────────────────────
+        if kwargs.get("momentum_ranking"):
+            ranking = kwargs["momentum_ranking"]
+            L.append("")
+            L.append("[9] MOMENTUM RANKING (21d vs SPY)")
+            L.append(f"    {'Rank':<6} {'Sector':<8} {'Mom 21d':>10} {'Signal':>10}")
+            L.append(f"    {'-'*40}")
+            for i, item in enumerate(ranking[:11]):
+                signal = "LONG" if i < 3 else ("SHORT" if i >= len(ranking) - 3 else "—")
+                L.append(f"    #{i+1:<4} {item['ticker']:<8} {item['momentum_21d']:>+9.2%}  {signal:>8}")
+
+        # ── [10] SHORT-VOL TIMING ────────────────────────────────────────
+        if kwargs.get("options_surface"):
+            os_ = kwargs["options_surface"]
+            sv_score = getattr(os_, "short_vol_timing_score", 0)
+            sv_label = getattr(os_, "short_vol_timing_label", "")
+            vvix = getattr(os_, "vvix_current", 0)
+            skew = getattr(os_, "skew_current", 100)
+            if sv_score > 0:
+                L.append("")
+                L.append("[10] SHORT-VOL TIMING")
+                L.append(f"    Score:  {sv_score:.0f}/100 → {sv_label}")
+                L.append(f"    VVIX:   {vvix:.1f} ({getattr(os_, 'vvix_signal', '')})")
+                L.append(f"    Skew:   {skew:.0f} ({getattr(os_, 'skew_signal', '')})")
+                L.append(f"    VRP:    {getattr(os_, 'vrp_index', 0):+.4f}")
+                if sv_score >= 65:
+                    L.append(f"    ✅ FAVORABLE for short vol entry")
+                elif sv_score <= 35:
+                    L.append(f"    ⚠️ AVOID short vol — conditions unfavorable")
+
         L.append("")
         L.append(f"{'='*70}")
         L.append(f"  End of DSS Brief — {ds}")

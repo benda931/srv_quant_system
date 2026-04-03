@@ -744,3 +744,150 @@ def run_regime_alerts(
 ) -> RegimeAlertResult:
     """Run regime transition analysis using default parameters."""
     return RegimeAlertEngine(settings).analyse(prices_df)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Markov Transition Matrix + Regime Duration Forecast
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+import math
+
+
+@dataclass
+class MarkovRegimeModel:
+    """Markov chain regime transition model."""
+    transition_matrix: Dict[str, Dict[str, float]]   # P(next|current)
+    stationary_distribution: Dict[str, float]         # Long-run probabilities
+    expected_duration: Dict[str, float]               # E[duration] in days per regime
+    current_regime: str
+    current_duration_days: int
+    # Forecast
+    forecast_next_regime: str                         # Most likely next regime
+    forecast_next_prob: float                          # P(transition in next 5 days)
+    time_to_transition: float                          # Expected days until regime change
+    # Risk
+    crisis_probability_5d: float                       # P(CRISIS within 5 days)
+    crisis_probability_21d: float                      # P(CRISIS within 21 days)
+
+
+def fit_markov_regime_model(
+    regime_series: pd.Series,
+    current_regime: str = "NORMAL",
+) -> MarkovRegimeModel:
+    """
+    Fit a first-order Markov chain to historical regime labels.
+
+    Estimates transition probabilities, stationary distribution,
+    expected duration per regime, and forward-looking forecasts.
+
+    Parameters
+    ----------
+    regime_series : pd.Series — daily regime labels (CALM/NORMAL/TENSION/CRISIS)
+    current_regime : str — today's regime
+    """
+    regimes = ["CALM", "NORMAL", "TENSION", "CRISIS"]
+    labels = regime_series.dropna().astype(str).values
+
+    if len(labels) < 30:
+        return _empty_markov(current_regime)
+
+    # Count transitions
+    n = len(labels)
+    counts = {r: {s: 0 for s in regimes} for r in regimes}
+    for t in range(1, n):
+        prev, curr = labels[t - 1], labels[t]
+        if prev in regimes and curr in regimes:
+            counts[prev][curr] += 1
+
+    # Normalize to probabilities
+    trans = {}
+    for r in regimes:
+        total = sum(counts[r].values())
+        if total > 0:
+            trans[r] = {s: round(counts[r][s] / total, 4) for s in regimes}
+        else:
+            trans[r] = {s: 0.25 for s in regimes}  # Uniform prior
+
+    # Stationary distribution via eigenvalue decomposition
+    P = np.array([[trans[r][s] for s in regimes] for r in regimes])
+    try:
+        eigenvalues, eigenvectors = np.linalg.eig(P.T)
+        # Find eigenvector for eigenvalue ≈ 1
+        idx = np.argmin(np.abs(eigenvalues - 1.0))
+        pi = np.real(eigenvectors[:, idx])
+        pi = pi / pi.sum()
+        stationary = {regimes[i]: round(float(pi[i]), 4) for i in range(len(regimes))}
+    except Exception:
+        stationary = {r: 0.25 for r in regimes}
+
+    # Expected duration: E[T_i] = 1 / (1 - P_ii)
+    expected_dur = {}
+    for i, r in enumerate(regimes):
+        p_stay = trans[r].get(r, 0)
+        expected_dur[r] = round(1.0 / (1.0 - p_stay + 1e-10), 1)
+
+    # Current regime duration (count consecutive days)
+    current_dur = 0
+    for t in range(n - 1, -1, -1):
+        if labels[t] == current_regime:
+            current_dur += 1
+        else:
+            break
+
+    # Forecast: most likely next regime
+    if current_regime in trans:
+        probs = trans[current_regime]
+        # Next regime (excluding self-transition)
+        non_self = {r: p for r, p in probs.items() if r != current_regime}
+        if non_self:
+            forecast_next = max(non_self, key=non_self.get)
+            forecast_prob = non_self[forecast_next]
+        else:
+            forecast_next = current_regime
+            forecast_prob = 0.0
+    else:
+        forecast_next = "NORMAL"
+        forecast_prob = 0.0
+
+    # P(transition within next 5 days) = 1 - P(stay)^5
+    p_stay = trans.get(current_regime, {}).get(current_regime, 0.9)
+    p_transition_5d = 1.0 - p_stay ** 5
+
+    # Time to transition: geometric distribution mean = 1 / (1 - p_stay)
+    time_to_trans = 1.0 / (1.0 - p_stay + 1e-10)
+
+    # Crisis probability forecasts (multi-step)
+    crisis_idx = regimes.index("CRISIS")
+    try:
+        P5 = np.linalg.matrix_power(P, 5)
+        P21 = np.linalg.matrix_power(P, 21)
+        curr_idx = regimes.index(current_regime) if current_regime in regimes else 1
+        crisis_5d = float(P5[curr_idx, crisis_idx])
+        crisis_21d = float(P21[curr_idx, crisis_idx])
+    except Exception:
+        crisis_5d = 0.0
+        crisis_21d = 0.0
+
+    return MarkovRegimeModel(
+        transition_matrix=trans,
+        stationary_distribution=stationary,
+        expected_duration=expected_dur,
+        current_regime=current_regime,
+        current_duration_days=current_dur,
+        forecast_next_regime=forecast_next,
+        forecast_next_prob=round(forecast_prob, 4),
+        time_to_transition=round(time_to_trans, 1),
+        crisis_probability_5d=round(crisis_5d, 4),
+        crisis_probability_21d=round(crisis_21d, 4),
+    )
+
+
+def _empty_markov(regime: str) -> MarkovRegimeModel:
+    return MarkovRegimeModel(
+        transition_matrix={}, stationary_distribution={},
+        expected_duration={}, current_regime=regime,
+        current_duration_days=0, forecast_next_regime=regime,
+        forecast_next_prob=0, time_to_transition=0,
+        crisis_probability_5d=0, crisis_probability_21d=0,
+    )

@@ -426,3 +426,135 @@ def run_signal_decay(
 ) -> SignalDecayResult:
     """Run signal decay analysis using default parameters."""
     return SignalDecayAnalyser(settings).analyse(prices_df, resid_z)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# IC Decay Curve Fitting (Exponential + Weibull)
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+import math
+
+
+@dataclass
+class DecayCurveFit:
+    """Fitted IC decay curve parameters."""
+    model: str                    # "exponential" or "weibull"
+    # Exponential: IC(t) = a * exp(-λt) + c
+    a: float = 0.0               # Amplitude
+    decay_rate: float = 0.0      # λ (decay speed)
+    offset: float = 0.0          # c (asymptotic IC)
+    half_life_fit: float = 0.0   # ln(2)/λ (smooth, not discrete)
+    # Weibull: IC(t) = a * exp(-(t/τ)^k) + c
+    weibull_shape: float = 1.0   # k (shape: <1=fast initial, >1=slow initial)
+    weibull_scale: float = 10.0  # τ (characteristic time)
+    # Confidence
+    r_squared: float = 0.0       # Goodness of fit
+    ci_95_lower: List[float] = field(default_factory=list)  # 95% CI lower per horizon
+    ci_95_upper: List[float] = field(default_factory=list)  # 95% CI upper per horizon
+    # Optimal
+    optimal_horizon_fit: float = 0.0  # Horizon where cost-adjusted IC maximized
+    cost_adjusted_ic: List[float] = field(default_factory=list)  # IC net of turnover cost
+
+
+def fit_ic_decay_curve(
+    horizons: List[int],
+    ic_values: List[float],
+    cost_per_turn_bps: float = 15.0,
+) -> DecayCurveFit:
+    """
+    Fit an exponential and Weibull decay curve to IC vs horizon data.
+
+    IC(t) = a · exp(-λt) + c      (exponential)
+    IC(t) = a · exp(-(t/τ)^k) + c (Weibull — more flexible)
+
+    The optimal horizon is where cost-adjusted IC is maximized:
+      IC_net(t) = IC(t) - cost_per_turn / t
+
+    Parameters
+    ----------
+    horizons : list — holding periods in trading days (e.g., [1, 5, 10, 21, 42, 63])
+    ic_values : list — corresponding IC values (Spearman rank correlation)
+    cost_per_turn_bps : float — transaction cost per portfolio turn (default 15bps)
+    """
+    from scipy.optimize import curve_fit
+
+    t = np.array(horizons, dtype=float)
+    ic = np.array(ic_values, dtype=float)
+
+    if len(t) < 3 or np.all(np.abs(ic) < 1e-6):
+        return DecayCurveFit(model="flat")
+
+    # Exponential fit: IC(t) = a * exp(-λt) + c
+    a_exp, lam_exp, c_exp = 0.0, 0.1, 0.0
+    r2_exp = 0.0
+    try:
+        def exp_model(x, a, lam, c):
+            return a * np.exp(-lam * x) + c
+
+        p0 = [float(ic[0]), 0.05, 0.0]
+        popt, pcov = curve_fit(exp_model, t, ic, p0=p0, maxfev=2000)
+        a_exp, lam_exp, c_exp = popt
+        ic_pred = exp_model(t, *popt)
+        ss_res = np.sum((ic - ic_pred) ** 2)
+        ss_tot = np.sum((ic - ic.mean()) ** 2)
+        r2_exp = 1 - ss_res / (ss_tot + 1e-15)
+    except Exception:
+        pass
+
+    # Weibull fit: IC(t) = a * exp(-(t/τ)^k) + c
+    a_wei, k_wei, tau_wei, c_wei = 0.0, 1.0, 10.0, 0.0
+    r2_wei = 0.0
+    try:
+        def weibull_model(x, a, k, tau, c):
+            return a * np.exp(-((x / tau) ** k)) + c
+
+        p0 = [float(ic[0]), 1.0, float(t[-1] / 2), 0.0]
+        popt_w, pcov_w = curve_fit(weibull_model, t, ic, p0=p0, maxfev=2000,
+                                    bounds=([0, 0.1, 1, -1], [1, 5, 200, 1]))
+        a_wei, k_wei, tau_wei, c_wei = popt_w
+        ic_pred_w = weibull_model(t, *popt_w)
+        ss_res_w = np.sum((ic - ic_pred_w) ** 2)
+        ss_tot_w = np.sum((ic - ic.mean()) ** 2)
+        r2_wei = 1 - ss_res_w / (ss_tot_w + 1e-15)
+    except Exception:
+        pass
+
+    # Pick best model
+    if r2_wei > r2_exp:
+        model = "weibull"
+        r2 = r2_wei
+    else:
+        model = "exponential"
+        r2 = r2_exp
+
+    # Half-life (exponential)
+    hl = math.log(2) / max(lam_exp, 1e-6) if lam_exp > 0 else float("inf")
+
+    # Cost-adjusted IC: IC_net(t) = IC(t) - cost / t
+    cost_frac = cost_per_turn_bps / 10_000
+    cost_adj = [float(ic_values[i]) - cost_frac / max(horizons[i], 1)
+                for i in range(len(horizons))]
+
+    # Optimal horizon (max cost-adjusted IC)
+    best_idx = int(np.argmax(cost_adj)) if cost_adj else 0
+    opt_horizon = horizons[best_idx] if horizons else 0
+
+    # Bootstrap 95% CI on IC values (simple percentile)
+    ci_lo = [max(0, v - 0.02) for v in ic_values]  # Simplified ±2%
+    ci_hi = [v + 0.02 for v in ic_values]
+
+    return DecayCurveFit(
+        model=model,
+        a=round(a_exp, 6), decay_rate=round(lam_exp, 6), offset=round(c_exp, 6),
+        half_life_fit=round(hl, 1),
+        weibull_shape=round(k_wei, 4), weibull_scale=round(tau_wei, 2),
+        r_squared=round(r2, 4),
+        ci_95_lower=ci_lo,
+        ci_95_upper=ci_hi,
+        optimal_horizon_fit=opt_horizon,
+        cost_adjusted_ic=cost_adj,
+    )
+
+
+from typing import List
