@@ -380,3 +380,189 @@ class LeverageEngine:
         weights = weights / weights.sum()
 
         return {ticker: round(float(w), 6) for ticker, w in zip(tickers, weights)}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# GARCH(1,1) Volatility Forecast for Leverage Sizing
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class GARCHVolForecast:
+    """GARCH(1,1) conditional volatility forecast."""
+    current_vol_ann: float              # Current conditional σ (annualized)
+    forecast_vol_1d: float              # 1-day ahead forecast σ
+    forecast_vol_21d: float             # 21-day ahead forecast σ (annualized)
+    long_run_vol: float                 # Unconditional σ (annualized)
+    alpha: float                        # GARCH α (innovation weight)
+    beta: float                         # GARCH β (persistence)
+    persistence: float                  # α + β (should be < 1)
+    vol_regime: str                     # "LOW" / "NORMAL" / "HIGH" / "EXTREME"
+    leverage_adjustment: float          # Multiplier for leverage (inverse of vol ratio)
+
+
+def garch_vol_forecast(
+    returns: pd.Series,
+    target_vol: float = 0.10,
+) -> GARCHVolForecast:
+    """
+    Fit GARCH(1,1) and produce forward volatility forecast for leverage sizing.
+
+    Model: σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
+
+    The leverage adjustment = target_vol / forecast_vol.
+    If forecast vol is high → reduce leverage; if low → increase.
+
+    Parameters
+    ----------
+    returns : pd.Series — daily log returns (at least 60 obs)
+    target_vol : float — annualized target volatility (default 10%)
+    """
+    r = returns.dropna().values.astype(float)
+    n = len(r)
+
+    if n < 60:
+        vol_emp = float(returns.std() * np.sqrt(252))
+        return GARCHVolForecast(
+            current_vol_ann=vol_emp, forecast_vol_1d=vol_emp / np.sqrt(252),
+            forecast_vol_21d=vol_emp, long_run_vol=vol_emp,
+            alpha=0.05, beta=0.93, persistence=0.98,
+            vol_regime="NORMAL",
+            leverage_adjustment=target_vol / max(vol_emp, 0.01),
+        )
+
+    # Try arch library for MLE GARCH fit
+    try:
+        from arch import arch_model
+        model = arch_model(r * 100, vol="Garch", p=1, q=1, mean="Zero", dist="Normal")
+        res = model.fit(disp="off", show_warning=False)
+
+        omega = float(res.params.get("omega", 0.01))
+        alpha = float(res.params.get("alpha[1]", 0.05))
+        beta = float(res.params.get("beta[1]", 0.93))
+
+        # Current conditional variance (last fitted value)
+        cond_vol_daily = float(res.conditional_volatility.iloc[-1] / 100)
+        cond_vol_ann = cond_vol_daily * np.sqrt(252)
+
+        # Long-run variance: ω / (1 - α - β)
+        persist = alpha + beta
+        long_run_var = omega / (1 - persist + 1e-10) / 10000 if persist < 0.999 else cond_vol_daily ** 2
+        long_run_vol = np.sqrt(long_run_var) * np.sqrt(252)
+
+        # 21-day ahead forecast: h_{t+21} converges toward long-run
+        h_t = cond_vol_daily ** 2
+        h_forecast = h_t
+        for _ in range(21):
+            h_forecast = omega / 10000 + persist * h_forecast
+        forecast_21d = np.sqrt(h_forecast) * np.sqrt(252)
+
+    except ImportError:
+        # EWMA fallback
+        lam = 0.94
+        h = np.zeros(n)
+        h[0] = r[0] ** 2
+        for t in range(1, n):
+            h[t] = lam * h[t - 1] + (1 - lam) * r[t - 1] ** 2
+        cond_vol_daily = np.sqrt(h[-1])
+        cond_vol_ann = cond_vol_daily * np.sqrt(252)
+        long_run_vol = float(r.std()) * np.sqrt(252)
+        forecast_21d = cond_vol_ann  # EWMA doesn't mean-revert easily
+        alpha, beta, persist = 0.06, 0.94, 1.0
+
+    # Vol regime classification
+    historical_vol = float(r.std()) * np.sqrt(252)
+    vol_ratio = cond_vol_ann / max(historical_vol, 0.01)
+    if vol_ratio > 1.5:
+        vol_regime = "EXTREME"
+    elif vol_ratio > 1.2:
+        vol_regime = "HIGH"
+    elif vol_ratio < 0.7:
+        vol_regime = "LOW"
+    else:
+        vol_regime = "NORMAL"
+
+    # Leverage adjustment: inverse of vol ratio to target
+    lev_adj = target_vol / max(forecast_21d, 0.01)
+    lev_adj = max(0.2, min(3.0, lev_adj))  # Cap between 0.2x and 3x
+
+    return GARCHVolForecast(
+        current_vol_ann=round(cond_vol_ann, 6),
+        forecast_vol_1d=round(cond_vol_daily, 6),
+        forecast_vol_21d=round(forecast_21d, 6),
+        long_run_vol=round(long_run_vol, 6),
+        alpha=round(alpha, 4),
+        beta=round(beta, 4),
+        persistence=round(persist, 4),
+        vol_regime=vol_regime,
+        leverage_adjustment=round(lev_adj, 4),
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Asymmetric Drawdown Deleveraging
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class DrawdownLeverageResult:
+    """Drawdown-conditional leverage adjustment."""
+    current_dd_pct: float
+    leverage_multiplier: float       # 0 to 1 (1 = full leverage, 0 = flat)
+    deleveraging_zone: str           # "NONE" / "GENTLE" / "MODERATE" / "AGGRESSIVE" / "FLAT"
+    recovery_distance_pct: float     # How far from peak
+
+
+def asymmetric_drawdown_deleverage(
+    current_dd_pct: float,
+    gentle_start: float = 0.02,      # Start gentle deleveraging at 2% DD
+    moderate_start: float = 0.05,    # Moderate at 5% DD
+    aggressive_start: float = 0.10,  # Aggressive at 10% DD
+    flat_at: float = 0.20,           # Full flat at 20% DD
+) -> DrawdownLeverageResult:
+    """
+    Asymmetric drawdown deleveraging — fast taper on large DD, gentle on small.
+
+    Instead of linear deleveraging (same slope 5%→20%), uses piecewise:
+      0-2%   DD → NONE (full leverage)
+      2-5%   DD → GENTLE (reduce 10% per 1% DD)
+      5-10%  DD → MODERATE (reduce 15% per 1% DD)
+      10-20% DD → AGGRESSIVE (reduce 8% per 1% DD, already heavily reduced)
+      >20%   DD → FLAT (0 leverage)
+
+    This preserves more capital in small dips but protects aggressively
+    in regime-change drawdowns.
+    """
+    dd = abs(current_dd_pct)
+
+    if dd < gentle_start:
+        mult = 1.0
+        zone = "NONE"
+    elif dd < moderate_start:
+        # Gentle: 10% reduction per 1% DD
+        mult = 1.0 - (dd - gentle_start) * (0.10 / 0.01)
+        zone = "GENTLE"
+    elif dd < aggressive_start:
+        # Moderate: 15% reduction per 1% DD
+        base = 1.0 - (moderate_start - gentle_start) * (0.10 / 0.01)
+        mult = base - (dd - moderate_start) * (0.15 / 0.01)
+        zone = "MODERATE"
+    elif dd < flat_at:
+        # Aggressive: already heavily reduced, 8% per 1% DD
+        base_g = 1.0 - (moderate_start - gentle_start) * (0.10 / 0.01)
+        base_m = base_g - (aggressive_start - moderate_start) * (0.15 / 0.01)
+        mult = base_m - (dd - aggressive_start) * (0.08 / 0.01)
+        zone = "AGGRESSIVE"
+    else:
+        mult = 0.0
+        zone = "FLAT"
+
+    mult = max(0.0, min(1.0, mult))
+
+    return DrawdownLeverageResult(
+        current_dd_pct=round(current_dd_pct, 4),
+        leverage_multiplier=round(mult, 4),
+        deleveraging_zone=zone,
+        recovery_distance_pct=round(dd, 4),
+    )
+
+
+from dataclasses import dataclass

@@ -1,10 +1,18 @@
 """
 analytics/optimizer.py
 
-Portfolio Optimizer — Risk-Parity and Mean-Variance.
+Portfolio Optimizer — Risk-Parity, Mean-Variance, and Black-Litterman.
 
-Risk-Parity: equal marginal risk contribution per sector.
-Mean-Variance: maximize Sharpe ratio subject to constraints.
+Methods:
+  1. Risk-Parity: equal marginal risk contribution per sector
+  2. Mean-Variance: maximize Sharpe ratio subject to constraints
+  3. Black-Litterman: Bayesian combination of market equilibrium + PM views
+  4. Regime-Conditional: weight blending adapted to CALM/NORMAL/TENSION/CRISIS
+
+Black-Litterman (Satchell & Scowcroft, 2000):
+  Combines market-implied expected returns (equilibrium) with subjective
+  views expressed as E[r_view] = Q ± Ω (uncertainty). The posterior
+  mean is a precision-weighted blend of equilibrium and views.
 
 Inputs from master_df: direction, mc_score, w_final (signal-based weights)
 Cov matrix: from prices last 252 days (Ledoit-Wolf shrinkage)
@@ -444,3 +452,243 @@ def _enforce_market_neutral(
             adjusted[t] = shorts[t] * scale   # shorts[t] is negative
 
     return adjusted
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Black-Litterman Model
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class BlackLittermanResult:
+    """Output of Black-Litterman optimization."""
+    posterior_returns: Dict[str, float]      # E[r] per sector
+    posterior_weights: Dict[str, float]      # Optimal weights
+    equilibrium_returns: Dict[str, float]    # Market-implied returns (π)
+    view_returns: Dict[str, float]           # PM views (Q)
+    view_confidence: Dict[str, float]        # View uncertainty (diagonal of Ω)
+    blend_ratio: float                       # How much views influence result (0=all equilibrium, 1=all views)
+    sharpe_posterior: float                   # Expected Sharpe of posterior portfolio
+
+
+def black_litterman(
+    cov: np.ndarray,
+    tickers: List[str],
+    market_weights: Optional[Dict[str, float]] = None,
+    views: Optional[Dict[str, float]] = None,
+    view_confidence: Optional[Dict[str, float]] = None,
+    risk_aversion: float = 2.5,
+    tau: float = 0.05,
+) -> BlackLittermanResult:
+    """
+    Black-Litterman model for combining equilibrium returns with PM views.
+
+    Parameters
+    ----------
+    cov : np.ndarray — N×N covariance matrix (daily, annualized internally)
+    tickers : list — sector tickers corresponding to cov rows/columns
+    market_weights : dict — equilibrium weights (default: equal weight)
+    views : dict — {ticker: expected_annual_return} — PM's views on sectors
+    view_confidence : dict — {ticker: confidence_level} — 0 to 1 (1 = fully confident)
+    risk_aversion : float — market risk aversion parameter δ (default 2.5)
+    tau : float — scalar indicating uncertainty of equilibrium (default 0.05)
+
+    Returns
+    -------
+    BlackLittermanResult
+    """
+    n = len(tickers)
+    Sigma = cov * 252  # Annualize daily covariance
+
+    # Market weights (default: equal weight)
+    if market_weights is None:
+        w_eq = np.ones(n) / n
+    else:
+        w_eq = np.array([market_weights.get(t, 1.0 / n) for t in tickers])
+        w_eq = w_eq / (np.sum(np.abs(w_eq)) + _EPS)
+
+    # Equilibrium returns: π = δΣw_eq
+    pi = risk_aversion * Sigma @ w_eq
+
+    # If no views, return equilibrium
+    eq_returns = {tickers[i]: round(float(pi[i]), 6) for i in range(n)}
+
+    if not views:
+        # Mean-variance optimization on equilibrium returns
+        opt_w = _mv_optimize(pi, Sigma, tickers)
+        return BlackLittermanResult(
+            posterior_returns=eq_returns,
+            posterior_weights=opt_w,
+            equilibrium_returns=eq_returns,
+            view_returns={},
+            view_confidence={},
+            blend_ratio=0.0,
+            sharpe_posterior=_portfolio_sharpe(opt_w, pi, Sigma, tickers),
+        )
+
+    # Build view matrices
+    # P: K×N pick matrix (each row picks one sector)
+    # Q: K×1 view returns
+    # Ω: K×K view uncertainty (diagonal)
+    view_tickers = [t for t in views if t in tickers]
+    K = len(view_tickers)
+    if K == 0:
+        opt_w = _mv_optimize(pi, Sigma, tickers)
+        return BlackLittermanResult(
+            posterior_returns=eq_returns,
+            posterior_weights=opt_w,
+            equilibrium_returns=eq_returns,
+            view_returns={},
+            view_confidence={},
+            blend_ratio=0.0,
+            sharpe_posterior=_portfolio_sharpe(opt_w, pi, Sigma, tickers),
+        )
+
+    P = np.zeros((K, n))
+    Q = np.zeros(K)
+    omega_diag = np.zeros(K)
+
+    for k, t in enumerate(view_tickers):
+        idx = tickers.index(t)
+        P[k, idx] = 1.0
+        Q[k] = views[t]
+        # View uncertainty: higher confidence → lower Ω
+        conf = (view_confidence or {}).get(t, 0.5)
+        conf = max(0.01, min(0.99, conf))
+        omega_diag[k] = (1 - conf) / conf * (tau * Sigma[idx, idx])
+
+    Omega = np.diag(omega_diag)
+
+    # Posterior: E[r] = [(τΣ)^-1 + P'Ω^-1P]^-1 [(τΣ)^-1π + P'Ω^-1Q]
+    tau_sigma_inv = np.linalg.inv(tau * Sigma + _EPS * np.eye(n))
+    omega_inv = np.linalg.inv(Omega + _EPS * np.eye(K))
+
+    precision_prior = tau_sigma_inv
+    precision_views = P.T @ omega_inv @ P
+    precision_posterior = precision_prior + precision_views
+
+    try:
+        cov_posterior = np.linalg.inv(precision_posterior)
+    except np.linalg.LinAlgError:
+        cov_posterior = np.linalg.pinv(precision_posterior)
+
+    mean_posterior = cov_posterior @ (precision_prior @ pi + P.T @ omega_inv @ Q)
+
+    posterior_returns = {tickers[i]: round(float(mean_posterior[i]), 6) for i in range(n)}
+    view_rets = {view_tickers[k]: round(float(Q[k]), 6) for k in range(K)}
+    view_confs = {view_tickers[k]: round(float((view_confidence or {}).get(view_tickers[k], 0.5)), 3) for k in range(K)}
+
+    # Blend ratio: how much views moved the posterior from equilibrium
+    diff = np.linalg.norm(mean_posterior - pi)
+    total = np.linalg.norm(pi) + _EPS
+    blend = min(1.0, diff / total)
+
+    # Optimize on posterior returns
+    opt_w = _mv_optimize(mean_posterior, Sigma, tickers)
+
+    return BlackLittermanResult(
+        posterior_returns=posterior_returns,
+        posterior_weights=opt_w,
+        equilibrium_returns=eq_returns,
+        view_returns=view_rets,
+        view_confidence=view_confs,
+        blend_ratio=round(blend, 4),
+        sharpe_posterior=_portfolio_sharpe(opt_w, mean_posterior, Sigma, tickers),
+    )
+
+
+def _mv_optimize(
+    expected_returns: np.ndarray,
+    cov: np.ndarray,
+    tickers: List[str],
+    max_weight: float = 0.20,
+) -> Dict[str, float]:
+    """Mean-variance optimize given expected returns + covariance."""
+    n = len(tickers)
+
+    def neg_sharpe(w):
+        ret = w @ expected_returns
+        vol = np.sqrt(w @ cov @ w + _EPS)
+        return -ret / vol
+
+    w0 = np.ones(n) / n
+    bounds = [(-max_weight, max_weight) for _ in range(n)]
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w)}]  # Market-neutral
+
+    try:
+        result = minimize(neg_sharpe, w0, method="SLSQP", bounds=bounds,
+                          constraints=constraints, options={"maxiter": 200})
+        w_opt = result.x
+    except Exception:
+        w_opt = w0
+
+    return {tickers[i]: round(float(w_opt[i]), 6) for i in range(n)}
+
+
+def _portfolio_sharpe(
+    weights: Dict[str, float],
+    returns: np.ndarray,
+    cov: np.ndarray,
+    tickers: List[str],
+) -> float:
+    """Compute portfolio Sharpe from weights, returns, covariance."""
+    w = np.array([weights.get(t, 0) for t in tickers])
+    ret = w @ returns
+    vol = np.sqrt(w @ cov @ w + _EPS)
+    return round(float(ret / vol), 4) if vol > _EPS else 0.0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Regime-Conditional Views for Black-Litterman
+# ═════════════════════════════════════════════════════════════════════════════
+
+def regime_views(
+    regime: str,
+    sectors: List[str],
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """
+    Generate PM views based on current market regime.
+
+    Returns (views, confidence) dicts for Black-Litterman.
+
+    Regime logic:
+      CALM    → favor cyclicals (XLY, XLI, XLF), avoid defensives
+      NORMAL  → neutral (no strong views)
+      TENSION → favor defensives (XLP, XLV, XLU), reduce tech
+      CRISIS  → strong defensive tilt, reduce all cyclicals
+    """
+    views: Dict[str, float] = {}
+    conf: Dict[str, float] = {}
+
+    _CYCLICAL = {"XLY", "XLI", "XLF", "XLB", "XLK", "XLC"}
+    _DEFENSIVE = {"XLP", "XLV", "XLU", "XLRE"}
+
+    if regime == "CALM":
+        for s in sectors:
+            if s in _CYCLICAL:
+                views[s] = 0.08   # 8% expected annual return
+                conf[s] = 0.4
+            elif s in _DEFENSIVE:
+                views[s] = 0.03   # 3% expected
+                conf[s] = 0.3
+    elif regime == "TENSION":
+        for s in sectors:
+            if s in _DEFENSIVE:
+                views[s] = 0.06
+                conf[s] = 0.5
+            elif s in _CYCLICAL:
+                views[s] = -0.02
+                conf[s] = 0.4
+    elif regime == "CRISIS":
+        for s in sectors:
+            if s in _DEFENSIVE:
+                views[s] = 0.04
+                conf[s] = 0.6
+            elif s in _CYCLICAL:
+                views[s] = -0.10
+                conf[s] = 0.7
+    # NORMAL → no views (use equilibrium)
+
+    return views, conf
