@@ -520,6 +520,297 @@ class TradeMonitorEngine:
 # Summary for agents / API
 # ─────────────────────────────────────────────────────────────────────────────
 
+    def monitor_all(
+        self,
+        active_tickets: list,
+        master_df: Optional[pd.DataFrame] = None,
+    ) -> PortfolioMonitorSummary:
+        """
+        Convenience method: extract z-scores from master_df and run monitor_portfolio.
+        Used by EngineService to avoid manual z-score extraction.
+        """
+        z_map = {}
+        safety_score = 1.0
+        safety_label = "SAFE"
+        days_map = {}
+        pnl_map = {}
+
+        if master_df is not None and not master_df.empty:
+            # Extract z-scores from master_df
+            for _, row in master_df.iterrows():
+                ticker = str(row.get("sector_ticker", ""))
+                z = row.get("pca_residual_z", row.get("z_score", float("nan")))
+                if ticker and isinstance(z, (int, float)):
+                    z_map[ticker] = float(z) if math.isfinite(float(z)) else 0.0
+
+            # Extract safety
+            if "market_state" in master_df.columns:
+                ms = str(master_df["market_state"].iloc[0])
+                safety_label = {"CALM": "SAFE", "NORMAL": "SAFE", "TENSION": "CAUTION",
+                                "CRISIS": "DANGER"}.get(ms, "SAFE")
+
+        return self.monitor_portfolio(
+            active_tickets=active_tickets,
+            current_zscores=z_map,
+            current_safety_score=safety_score,
+            current_safety_label=safety_label,
+            days_held_map=days_map,
+            pnl_map=pnl_map,
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Trailing Stop Logic
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class TrailingStopState:
+    """Tracking state for trailing stop on a position."""
+    trade_id: str
+    high_water_mark: float = 0.0     # Best P&L % seen
+    trailing_stop_level: float = 0.0  # Current stop level (HWM - trail_distance)
+    trail_distance_pct: float = 0.015 # Distance from HWM to trigger stop
+    is_triggered: bool = False
+    trigger_pnl: float = 0.0         # P&L when stop was triggered
+
+
+def compute_trailing_stop(
+    current_pnl_pct: float,
+    hwm: float,
+    trail_distance: float = 0.015,
+    activation_pnl: float = 0.005,
+) -> TrailingStopState:
+    """
+    Compute trailing stop state.
+
+    Trailing stop only activates after position reaches activation_pnl (0.5% profit).
+    Once activated, stop follows HWM down by trail_distance (1.5%).
+
+    Parameters
+    ----------
+    current_pnl_pct : float — current unrealized P&L (% of notional)
+    hwm : float — highest P&L % seen since entry
+    trail_distance : float — distance from HWM to stop (default 1.5%)
+    activation_pnl : float — minimum profit to activate trailing stop (default 0.5%)
+    """
+    # Update HWM
+    new_hwm = max(hwm, current_pnl_pct)
+
+    # Only activate after reaching activation threshold
+    if new_hwm < activation_pnl:
+        return TrailingStopState(
+            trade_id="", high_water_mark=new_hwm,
+            trailing_stop_level=float("-inf"),
+            trail_distance_pct=trail_distance,
+        )
+
+    # Compute stop level
+    stop_level = new_hwm - trail_distance
+    is_triggered = current_pnl_pct <= stop_level
+
+    return TrailingStopState(
+        trade_id="",
+        high_water_mark=new_hwm,
+        trailing_stop_level=stop_level,
+        trail_distance_pct=trail_distance,
+        is_triggered=is_triggered,
+        trigger_pnl=current_pnl_pct if is_triggered else 0.0,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Greek Exposure Monitoring
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class GreekExposure:
+    """Greek exposure for a single position."""
+    ticker: str
+    direction: str
+    notional: float
+    # Portfolio-level greeks (synthetic from factor betas)
+    delta_spy: float = 0.0       # $ exposure to SPY 1% move
+    delta_tnx: float = 0.0       # $ exposure to TNX 10bp move
+    delta_dxy: float = 0.0       # $ exposure to DXY 1% move
+    # Volatility exposure
+    vega_proxy: float = 0.0      # $ exposure to VIX 1-point move
+    # Time exposure
+    theta_proxy: float = 0.0     # Daily time decay ($)
+
+
+@dataclass
+class PortfolioGreekSummary:
+    """Aggregate greek exposure across all positions."""
+    net_delta_spy: float = 0.0
+    net_delta_tnx: float = 0.0
+    net_delta_dxy: float = 0.0
+    net_vega: float = 0.0
+    gross_exposure: float = 0.0
+    net_exposure: float = 0.0
+    positions: List[GreekExposure] = field(default_factory=list)
+    # Risk alerts
+    alerts: List[str] = field(default_factory=list)
+
+
+def compute_portfolio_greeks(
+    positions: List[Dict],
+    master_df: Optional[pd.DataFrame] = None,
+) -> PortfolioGreekSummary:
+    """
+    Compute portfolio-level greek exposure from positions + factor betas.
+
+    Uses beta_spy, beta_tnx, beta_dxy from master_df to estimate
+    synthetic greeks for each position.
+    """
+    exposures = []
+    total_long = 0.0
+    total_short = 0.0
+    net_spy = 0.0
+    net_tnx = 0.0
+    net_dxy = 0.0
+    net_vega = 0.0
+
+    for pos in positions:
+        ticker = pos.get("ticker", "")
+        direction = pos.get("direction", "LONG")
+        notional = pos.get("notional", 0)
+        sign = 1.0 if direction == "LONG" else -1.0
+
+        if direction == "LONG":
+            total_long += notional
+        else:
+            total_short += notional
+
+        # Get factor betas from master_df
+        beta_spy = 1.0
+        beta_tnx = 0.0
+        beta_dxy = 0.0
+        if master_df is not None and "sector_ticker" in master_df.columns:
+            row = master_df[master_df["sector_ticker"] == ticker]
+            if not row.empty:
+                beta_spy = float(row.iloc[0].get("beta_spy_delta", 1.0) or 1.0)
+                beta_tnx = float(row.iloc[0].get("beta_tnx_60d", 0.0) or 0.0)
+                beta_dxy = float(row.iloc[0].get("beta_dxy_60d", 0.0) or 0.0)
+
+        # Dollar exposure per factor
+        d_spy = sign * notional * beta_spy * 0.01   # Per 1% SPY move
+        d_tnx = sign * notional * beta_tnx * 0.001  # Per 10bp TNX move
+        d_dxy = sign * notional * beta_dxy * 0.01    # Per 1% DXY move
+        vega = sign * notional * 0.002               # Rough: 20bps per VIX point
+        theta = -abs(notional) * 0.0001              # ~1bps/day time decay for sector ETF
+
+        exposures.append(GreekExposure(
+            ticker=ticker, direction=direction, notional=notional,
+            delta_spy=round(d_spy, 2), delta_tnx=round(d_tnx, 2),
+            delta_dxy=round(d_dxy, 2), vega_proxy=round(vega, 2),
+            theta_proxy=round(theta, 2),
+        ))
+
+        net_spy += d_spy
+        net_tnx += d_tnx
+        net_dxy += d_dxy
+        net_vega += vega
+
+    gross = total_long + total_short
+    net = total_long - total_short
+
+    # Risk alerts
+    alerts = []
+    if abs(net_spy) > gross * 0.3:
+        alerts.append(f"High directional SPY exposure: ${net_spy:+,.0f} per 1% move")
+    if abs(net_vega) > gross * 0.01:
+        alerts.append(f"Significant vol exposure: ${net_vega:+,.0f} per VIX point")
+    if abs(net / gross) > 0.3 if gross > 0 else False:
+        alerts.append(f"Net exposure {net/gross:.0%} exceeds 30% threshold")
+
+    return PortfolioGreekSummary(
+        net_delta_spy=round(net_spy, 2),
+        net_delta_tnx=round(net_tnx, 2),
+        net_delta_dxy=round(net_dxy, 2),
+        net_vega=round(net_vega, 2),
+        gross_exposure=round(gross, 2),
+        net_exposure=round(net, 2),
+        positions=exposures,
+        alerts=alerts,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Position Aging Analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PositionAgingResult:
+    """Position aging analysis with severity scoring."""
+    trade_id: str
+    ticker: str
+    days_held: int
+    half_life: float                  # Expected MR half-life
+    hl_ratio: float                   # days_held / half_life (>2 = overstaying)
+    aging_score: float                # 0-1 (1 = fresh, 0 = severely aged)
+    aging_label: str                  # "FRESH" / "MATURING" / "AGING" / "EXPIRED"
+    alpha_decay_pct: float            # Estimated alpha remaining (from OU decay)
+    recommended_action: str           # "HOLD" / "REDUCE" / "EXIT"
+
+
+def analyse_position_aging(
+    trade_id: str,
+    ticker: str,
+    days_held: int,
+    half_life: float,
+    current_pnl_pct: float = 0.0,
+    max_hold_days: int = 30,
+) -> PositionAgingResult:
+    """
+    Score position aging based on holding period vs expected half-life.
+
+    Alpha decay model: alpha_remaining = exp(-ln(2) * days_held / half_life)
+    """
+    if not math.isfinite(half_life) or half_life <= 0:
+        half_life = 20  # Default assumption
+
+    hl_ratio = days_held / half_life if half_life > 0 else float("inf")
+    alpha_remaining = math.exp(-math.log(2) * days_held / half_life)
+
+    # Aging score: 1 = fresh, 0 = expired
+    aging_score = max(0, min(1.0, alpha_remaining))
+
+    # Classification
+    if hl_ratio < 0.5:
+        label = "FRESH"
+        action = "HOLD"
+    elif hl_ratio < 1.0:
+        label = "MATURING"
+        action = "HOLD"
+    elif hl_ratio < 2.0:
+        label = "AGING"
+        action = "REDUCE" if current_pnl_pct > 0 else "HOLD"
+    else:
+        label = "EXPIRED"
+        action = "EXIT"
+
+    # Override if past max hold
+    if days_held >= max_hold_days:
+        label = "EXPIRED"
+        action = "EXIT"
+
+    return PositionAgingResult(
+        trade_id=trade_id,
+        ticker=ticker,
+        days_held=days_held,
+        half_life=round(half_life, 1),
+        hl_ratio=round(hl_ratio, 2),
+        aging_score=round(aging_score, 4),
+        aging_label=label,
+        alpha_decay_pct=round(alpha_remaining * 100, 1),
+        recommended_action=action,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary for agents / API
+# ─────────────────────────────────────────────────────────────────────────────
+
 def monitor_summary_compact(summary: PortfolioMonitorSummary) -> dict:
     """Compact serializable summary for Claude / AgentBus."""
     return {

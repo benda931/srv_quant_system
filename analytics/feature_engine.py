@@ -764,3 +764,123 @@ class FeatureEngine:
             if sector in features.columns.get_level_values(0):
                 return features[sector].copy()
         return features.copy()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Interaction Term Generator
+# ═════════════════════════════════════════════════════════════════════════════
+
+def generate_interaction_features(
+    features: pd.DataFrame,
+    pairs: Optional[List[Tuple[str, str]]] = None,
+) -> pd.DataFrame:
+    """
+    Generate interaction terms between feature pairs.
+
+    Default pairs (empirically valuable for sector alpha):
+      - momentum × volatility     (vol-adjusted momentum)
+      - z_score × correlation     (regime-conditioned MR)
+      - momentum × z_score        (trend-value interaction)
+      - volatility × correlation  (vol-corr regime)
+
+    Parameters
+    ----------
+    features : pd.DataFrame — feature matrix (flat, single-level columns)
+    pairs : optional list of (col_a, col_b) to interact
+
+    Returns
+    -------
+    pd.DataFrame — original features + interaction columns
+    """
+    if features.empty:
+        return features
+
+    df = features.copy()
+    cols = set(df.columns)
+
+    # Default interaction pairs
+    if pairs is None:
+        pairs = []
+        # Find column names by pattern matching
+        mom_col = next((c for c in cols if "momentum" in c.lower() and "rank" not in c.lower()), None)
+        vol_col = next((c for c in cols if "vol" in c.lower() and "rank" not in c.lower()), None)
+        z_col = next((c for c in cols if "z_score" in c.lower() or "zscore" in c.lower()), None)
+        corr_col = next((c for c in cols if "corr" in c.lower() and "rank" not in c.lower()), None)
+        beta_col = next((c for c in cols if "beta" in c.lower()), None)
+
+        if mom_col and vol_col:
+            pairs.append((mom_col, vol_col))
+        if z_col and corr_col:
+            pairs.append((z_col, corr_col))
+        if mom_col and z_col:
+            pairs.append((mom_col, z_col))
+        if vol_col and corr_col:
+            pairs.append((vol_col, corr_col))
+        if beta_col and vol_col:
+            pairs.append((beta_col, vol_col))
+
+    for col_a, col_b in pairs:
+        if col_a in df.columns and col_b in df.columns:
+            # Multiplicative interaction
+            name = f"{col_a}__x__{col_b}"
+            df[name] = df[col_a] * df[col_b]
+
+            # Ratio (safe division)
+            name_ratio = f"{col_a}__div__{col_b}"
+            denom = df[col_b].replace(0, np.nan)
+            df[name_ratio] = df[col_a] / denom
+
+    return df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Cross-Sectional Features
+# ═════════════════════════════════════════════════════════════════════════════
+
+def compute_cross_sectional_features(
+    features: pd.DataFrame,
+    sectors: List[str],
+) -> pd.DataFrame:
+    """
+    Compute cross-sectional (rank/relative) features from per-sector features.
+
+    For each numeric feature, adds:
+      - {feature}_rank:  cross-sectional rank (1 = highest)
+      - {feature}_zscore: cross-sectional z-score (standardized across sectors)
+      - {feature}_vs_median: deviation from sector median
+
+    These features capture relative positioning — "is this sector's momentum
+    above/below the sector median?" — which is more predictive than raw levels.
+    """
+    if features.empty or not sectors:
+        return features
+
+    df = features.copy()
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+
+    # Only process original features (not interaction terms)
+    base_cols = [c for c in numeric_cols if "__x__" not in c and "__div__" not in c
+                 and "_rank" not in c and "_zscore" not in c and "_vs_median" not in c]
+
+    for col in base_cols[:15]:  # Cap at 15 to avoid feature explosion
+        vals = df[col].dropna()
+        if len(vals) < 3:
+            continue
+
+        # Cross-sectional rank (1 = highest value)
+        df[f"{col}_rank"] = df[col].rank(ascending=False, method="dense")
+
+        # Cross-sectional z-score
+        mu = float(vals.mean())
+        sd = float(vals.std())
+        if sd > 1e-10:
+            df[f"{col}_cs_zscore"] = (df[col] - mu) / sd
+
+        # Deviation from median
+        median = float(vals.median())
+        df[f"{col}_vs_median"] = df[col] - median
+
+    return df
+
+
+from typing import Tuple
