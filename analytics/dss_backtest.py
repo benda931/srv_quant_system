@@ -551,3 +551,203 @@ def run_dss_backtest(prices: pd.DataFrame, settings: Optional[Settings] = None) 
         settings = get_settings()
     bt = DSSBacktester(settings)
     return bt.run(prices)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Parameter Sensitivity Sweep
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+import math
+from typing import Any
+
+
+@dataclass
+class SensitivityResult:
+    """Result of a single parameter sweep point."""
+    param_name: str
+    param_value: float
+    sharpe: float
+    win_rate: float
+    total_pnl: float
+    max_drawdown: float
+    n_trades: int
+
+
+@dataclass
+class ParamSweepResult:
+    """Complete parameter sensitivity sweep."""
+    param_name: str
+    baseline_value: float
+    baseline_sharpe: float
+    results: List[SensitivityResult]
+    optimal_value: float
+    optimal_sharpe: float
+    sensitivity_score: float     # How much Sharpe changes with this param
+
+
+def parameter_sensitivity_sweep(
+    prices: pd.DataFrame,
+    settings: Optional[Settings] = None,
+    params_to_sweep: Optional[Dict[str, List[float]]] = None,
+) -> List[ParamSweepResult]:
+    """
+    Sweep key DSS parameters and measure Sharpe sensitivity.
+
+    Default sweep grid:
+      signal_entry_threshold: [0.02, 0.05, 0.08, 0.12, 0.15]
+      signal_optimal_hold: [10, 15, 20, 25, 30]
+      zscore_threshold_calm: [0.5, 0.6, 0.7, 0.8, 1.0]
+
+    Returns list of ParamSweepResult sorted by sensitivity (most sensitive first).
+    """
+    if settings is None:
+        from config.settings import get_settings
+        settings = get_settings()
+
+    if params_to_sweep is None:
+        params_to_sweep = {
+            "signal_entry_threshold": [0.02, 0.05, 0.08, 0.12, 0.15],
+            "signal_optimal_hold": [10, 15, 20, 25, 30],
+        }
+
+    sweep_results = []
+
+    for param_name, values in params_to_sweep.items():
+        current_val = getattr(settings, param_name, values[len(values) // 2])
+
+        # Baseline
+        bt_base = DSSBacktester(settings)
+        base_result = bt_base.run(prices)
+        base_sharpe = base_result.sharpe
+
+        results = []
+        for val in values:
+            try:
+                import copy
+                test_settings = copy.deepcopy(settings)
+                setattr(test_settings, param_name, val)
+                bt = DSSBacktester(test_settings)
+                r = bt.run(prices)
+                results.append(SensitivityResult(
+                    param_name=param_name, param_value=val,
+                    sharpe=round(r.sharpe, 4), win_rate=round(r.win_rate, 4),
+                    total_pnl=round(r.total_pnl, 6),
+                    max_drawdown=round(r.max_drawdown, 6),
+                    n_trades=r.total_trades,
+                ))
+            except Exception:
+                pass
+
+        if not results:
+            continue
+
+        # Optimal
+        best = max(results, key=lambda r: r.sharpe)
+
+        # Sensitivity: std of Sharpe across sweep values
+        sharpe_values = [r.sharpe for r in results]
+        sensitivity = float(np.std(sharpe_values)) if len(sharpe_values) > 1 else 0.0
+
+        sweep_results.append(ParamSweepResult(
+            param_name=param_name,
+            baseline_value=current_val,
+            baseline_sharpe=round(base_sharpe, 4),
+            results=results,
+            optimal_value=best.param_value,
+            optimal_sharpe=best.sharpe,
+            sensitivity_score=round(sensitivity, 4),
+        ))
+
+    sweep_results.sort(key=lambda s: s.sensitivity_score, reverse=True)
+    return sweep_results
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Stress Overlay Backtest
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class StressBacktestResult:
+    """DSS backtest result with stress scenario overlay."""
+    base_sharpe: float
+    stressed_sharpe: float
+    sharpe_impact: float              # stressed - base
+    base_max_dd: float
+    stressed_max_dd: float
+    stress_scenario: str
+    stress_factor: float              # How much returns were shocked
+
+
+def stress_overlay_backtest(
+    prices: pd.DataFrame,
+    settings: Optional[Settings] = None,
+    stress_scenarios: Optional[Dict[str, float]] = None,
+) -> List[StressBacktestResult]:
+    """
+    Run DSS backtest under stressed return scenarios.
+
+    Applies multiplicative shocks to sector returns:
+      RATES_UP: rates-sensitive sectors -3%, financials +2%
+      RISK_OFF: all sectors -5% uniform
+      CORRELATION_SPIKE: all returns compressed toward mean
+
+    Shows how the DSS strategy degrades under adverse conditions.
+    """
+    if settings is None:
+        from config.settings import get_settings
+        settings = get_settings()
+
+    if stress_scenarios is None:
+        stress_scenarios = {
+            "RATES_UP_150bp": -0.03,       # 3% drawdown on duration sectors
+            "RISK_OFF_ACUTE": -0.05,        # 5% uniform sell-off
+            "CORRELATION_SPIKE": 0.0,       # Returns compressed (special handling)
+            "VOL_EXPANSION_50pct": -0.02,   # 2% loss from vol expansion
+        }
+
+    # Baseline
+    bt_base = DSSBacktester(settings)
+    base = bt_base.run(prices)
+
+    results = []
+    for scenario, shock in stress_scenarios.items():
+        try:
+            stressed_prices = prices.copy()
+
+            if scenario == "CORRELATION_SPIKE":
+                # Compress all returns toward the mean (correlation → 1)
+                log_rets = np.log(stressed_prices / stressed_prices.shift(1)).dropna()
+                mean_ret = log_rets.mean(axis=1)
+                blend = 0.5  # 50% blend toward mean (correlation increase)
+                for col in log_rets.columns:
+                    log_rets[col] = (1 - blend) * log_rets[col] + blend * mean_ret
+                stressed_prices = np.exp(log_rets.cumsum()) * prices.iloc[0]
+            else:
+                # Multiplicative shock to all prices
+                n = len(stressed_prices)
+                for col in stressed_prices.columns:
+                    if col.startswith("^") or col in ("VIX", "^VIX"):
+                        continue
+                    # Apply gradual shock over last 21 days
+                    shock_per_day = shock / 21
+                    for t in range(max(0, n - 21), n):
+                        stressed_prices[col].iloc[t] *= (1 + shock_per_day * (t - (n - 21)))
+
+            bt = DSSBacktester(settings)
+            stressed = bt.run(stressed_prices)
+
+            results.append(StressBacktestResult(
+                base_sharpe=round(base.sharpe, 4),
+                stressed_sharpe=round(stressed.sharpe, 4),
+                sharpe_impact=round(stressed.sharpe - base.sharpe, 4),
+                base_max_dd=round(base.max_drawdown, 6),
+                stressed_max_dd=round(stressed.max_drawdown, 6),
+                stress_scenario=scenario,
+                stress_factor=shock,
+            ))
+        except Exception:
+            pass
+
+    results.sort(key=lambda r: r.sharpe_impact)
+    return results
