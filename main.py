@@ -939,8 +939,60 @@ def build_app() -> dash.Dash:
         external_stylesheets=[dbc.themes.CYBORG],
         compress=True,
         suppress_callback_exceptions=True,
+        meta_tags=[
+            {"name": "viewport", "content": "width=device-width, initial-scale=1.0"},
+        ],
     )
     app.title = "SRV Quantamental DSS"
+
+    # Mobile-responsive CSS overrides
+    app.index_string = '''<!DOCTYPE html>
+<html>
+<head>
+{%metas%}
+<title>{%title%}</title>
+{%favicon%}
+{%css%}
+<style>
+  /* Mobile responsive */
+  @media (max-width: 768px) {
+    .container-fluid { padding: 8px !important; }
+    .card-body { padding: 8px !important; }
+    .h4 { font-size: 1rem !important; }
+    .h5 { font-size: 0.85rem !important; }
+    .h6 { font-size: 0.75rem !important; }
+    .nav-tabs .nav-link { font-size: 0.7rem !important; padding: 4px 6px !important; }
+    table { font-size: 10px !important; }
+    .row { margin-left: 0 !important; margin-right: 0 !important; }
+    .col, .col-md-6, .col-md-7, .col-md-8, .col-md-5, .col-md-4 {
+      flex: 0 0 100% !important; max-width: 100% !important;
+    }
+  }
+  /* Tablet */
+  @media (max-width: 1024px) {
+    .nav-tabs { flex-wrap: wrap !important; }
+    .nav-tabs .nav-link { font-size: 0.8rem !important; padding: 6px 8px !important; }
+  }
+  /* General improvements */
+  .card { transition: box-shadow 0.2s; }
+  .card:hover { box-shadow: 0 2px 8px rgba(0,212,255,0.15); }
+  .nav-tabs .nav-link.active { border-bottom: 3px solid #00bc8c !important; }
+  .table-hover tbody tr:hover { background-color: rgba(0,188,140,0.08) !important; }
+  /* Smooth scrolling */
+  html { scroll-behavior: smooth; }
+  /* Better tab overflow */
+  .nav-tabs { overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: thin; }
+</style>
+</head>
+<body>
+{%app_entry%}
+<footer>
+{%config%}
+{%scripts%}
+{%renderer%}
+</footer>
+</body>
+</html>'''
 
     app.layout = dbc.Container(
         fluid=True,

@@ -3118,6 +3118,66 @@ def build_methodology_tab(lab_data: Optional[Dict] = None, governance_data: Opti
             dbc.CardBody(html.Ul(findings_content, style={"direction": "rtl", "textAlign": "right"})),
         ], className="border-success mb-3", style={"borderTop": "3px solid var(--bs-success)"}))
 
+    # ── Sharpe Comparison Chart ──────────────────────────────────────────
+    if lab_data and len(lab_data) >= 2:
+        chart_names = []
+        chart_sharpes = []
+        chart_colors = []
+        for name, data in sorted_strats:
+            s = data.get("sharpe", 0)
+            chart_names.append(name)
+            chart_sharpes.append(s)
+            chart_colors.append("#20c997" if s > 0.5 else "#ffc107" if s > 0 else "#dc3545")
+
+        sharpe_fig = go.Figure(go.Bar(
+            x=chart_names, y=chart_sharpes,
+            marker_color=chart_colors,
+            text=[f"{s:.2f}" for s in chart_sharpes],
+            textposition="outside",
+        ))
+        sharpe_fig.add_hline(y=0, line_color="#555", line_width=1)
+        sharpe_fig.add_hline(y=1, line_dash="dash", line_color="#20c997", opacity=0.3,
+                             annotation_text="Sharpe=1 (target)")
+        sharpe_fig.update_layout(
+            template="plotly_dark", height=350,
+            title="Strategy Sharpe Comparison",
+            xaxis_tickangle=-35,
+            yaxis_title="Sharpe Ratio",
+            margin=dict(l=60, r=20, t=50, b=100),
+            showlegend=False,
+        )
+        sections.append(dbc.Card(dbc.CardBody(
+            dcc.Graph(figure=sharpe_fig, config={"displayModeBar": False}),
+        ), className="mb-3"))
+
+    # ── Win Rate vs P&L Scatter ──────────────────────────────────────────
+    if lab_data and len(lab_data) >= 3:
+        scatter_fig = go.Figure()
+        for name, data in sorted_strats:
+            s = data.get("sharpe", 0)
+            wr = data.get("win_rate", 0) * 100
+            pnl = data.get("total_pnl", 0) * 100
+            color = "#20c997" if s > 0.5 else "#ffc107" if s > 0 else "#dc3545"
+            scatter_fig.add_trace(go.Scatter(
+                x=[wr], y=[pnl], mode="markers+text",
+                marker=dict(size=max(8, min(25, abs(s) * 15)), color=color, opacity=0.8),
+                text=[name[:15]], textposition="top center",
+                textfont=dict(size=9, color="#ccc"),
+                name=name, showlegend=False,
+                hovertemplate=f"<b>{name}</b><br>WR: {wr:.1f}%<br>P&L: {pnl:.1f}%<br>Sharpe: {s:.2f}<extra></extra>",
+            ))
+        scatter_fig.add_hline(y=0, line_color="#555", line_width=1)
+        scatter_fig.add_vline(x=50, line_color="#555", line_width=1, line_dash="dot")
+        scatter_fig.update_layout(
+            template="plotly_dark", height=350,
+            title="Win Rate vs Total P&L (bubble size = |Sharpe|)",
+            xaxis_title="Win Rate (%)", yaxis_title="Total P&L (%)",
+            margin=dict(l=60, r=20, t=50, b=40),
+        )
+        sections.append(dbc.Card(dbc.CardBody(
+            dcc.Graph(figure=scatter_fig, config={"displayModeBar": False}),
+        ), className="mb-3"))
+
     # ── Governance Data Section (appended if available) ────────────────────
     if governance_data:
         gov_sections = _build_governance_sections(governance_data)
