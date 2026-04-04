@@ -761,51 +761,30 @@ class Orchestrator:
             return {"status": "failed", "error": str(e)}
 
     def _task_auto_improve(self) -> dict:
-        """שיפור עצמי אוטונומי — Bayesian tuning + backtest validation."""
+        """שיפור עצמי אוטונומי — evaluate → diagnose → suggest → test → promote."""
         try:
-            from agents.auto_improve.engine import AutoImproveEngine
-            engine = AutoImproveEngine()
+            from agents.auto_improve.engine import AutoImprover
+            improver = AutoImprover()
+            result = improver.run_full_cycle()
 
-            # Governance: verify prerequisites
-            prereq = engine.check_governance_prerequisites()
-            if not prereq.get("ready", False):
-                return {"status": "skipped", "reason": prereq.get("reason", "prerequisites not met")}
-
-            # Run evaluation → identify weaknesses → suggest → test → promote
-            eval_result = engine.run_evaluation()
-            weaknesses = engine.identify_weaknesses(eval_result)
-            suggestions = engine.generate_smart_suggestions(weaknesses)
-
-            tested = 0
-            promoted = 0
-            for suggestion in suggestions[:5]:
-                test_result = engine.test_suggestion(suggestion)
-                tested += 1
-                if test_result.get("improved"):
-                    engine.promote_if_better(suggestion, test_result)
-                    promoted += 1
-
-            result = {
-                "status": "ok",
-                "weaknesses": len(weaknesses),
-                "suggestions": len(suggestions),
-                "tested": tested,
-                "promoted": promoted,
-            }
-
+            # Alert on promotions
+            promoted = result.get("promoted", 0)
             if promoted > 0:
                 self._dispatch_alert("INFO", "Auto-Improve: Parameters Promoted",
-                    f"{promoted} improvements promoted to settings.py")
+                    f"{promoted} improvements promoted | Best: {result.get('best_strategy')} "
+                    f"Sharpe={result.get('best_sharpe', 0):.3f}")
 
             return result
         except Exception as e:
+            log.warning("Auto-improve failed: %s", e, exc_info=True)
             return {"status": "failed", "error": str(e)}
 
     def _task_data_scout(self) -> dict:
         """סריקת מקורות חיצוניים — FRED, VIX anomalies, correlation breaks."""
         try:
-            from agents.data_scout.agent_data_scout import run
-            report = run(once=True)
+            from agents.data_scout.agent_data_scout import DataScout
+            scout = DataScout()
+            report = scout.run()
             n_anomalies = len(report.get("anomalies", [])) if isinstance(report, dict) else 0
 
             if n_anomalies > 0:
@@ -819,9 +798,10 @@ class Orchestrator:
     def _task_regime_forecaster(self) -> dict:
         """חיזוי משטר שוק — ML + regime-switching (intraday refresh)."""
         try:
-            from agents.regime_forecaster.agent_regime_forecaster import run
-            result = run(once=True)
-            regime = result.get("current_regime", "UNKNOWN") if isinstance(result, dict) else "UNKNOWN"
+            from agents.regime_forecaster.agent_regime_forecaster import RegimeForecaster
+            forecaster = RegimeForecaster()
+            result = forecaster.run()
+            regime = result.get("current_regime", result.get("predicted_regime", "UNKNOWN")) if isinstance(result, dict) else "UNKNOWN"
             confidence = result.get("confidence", 0) if isinstance(result, dict) else 0
 
             # Alert on regime change
@@ -838,8 +818,9 @@ class Orchestrator:
     def _task_portfolio_construction(self) -> dict:
         """בניית פורטפוליו — sector weights + hedge + sizing."""
         try:
-            from agents.portfolio_construction.agent_portfolio_construction import run
-            result = run(once=True)
+            from agents.portfolio_construction.agent_portfolio_construction import PortfolioConstructor
+            constructor = PortfolioConstructor()
+            result = constructor.run()
             return {"status": "ok", "result": str(result)[:200] if result else "empty"}
         except Exception as e:
             return {"status": "failed", "error": str(e)}
@@ -847,8 +828,9 @@ class Orchestrator:
     def _task_risk_guardian(self) -> dict:
         """שמירת סיכון — VIX kills, credit stress, exposure limits."""
         try:
-            from agents.risk_guardian.agent_risk_guardian import run
-            result = run(once=True)
+            from agents.risk_guardian.agent_risk_guardian import RiskGuardian
+            guardian = RiskGuardian()
+            result = guardian.run()
             vetoes = result.get("vetoes", []) if isinstance(result, dict) else []
             if vetoes:
                 self._dispatch_alert("CRITICAL", "Risk Guardian: Trade Vetoes",
@@ -860,8 +842,9 @@ class Orchestrator:
     def _task_alpha_decay(self) -> dict:
         """ניטור דעיכת אלפא — signal staleness + position aging."""
         try:
-            from agents.alpha_decay.agent_alpha_decay import run
-            result = run(once=True)
+            from agents.alpha_decay.agent_alpha_decay import StrategyEvidenceAssembler
+            assembler = StrategyEvidenceAssembler()
+            result = assembler.run()
             stale = result.get("stale_signals", 0) if isinstance(result, dict) else 0
             if stale > 3:
                 self._dispatch_alert("WARNING", "Alpha Decay: Stale Signals",

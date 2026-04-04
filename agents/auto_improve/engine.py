@@ -199,6 +199,97 @@ class AutoImprover:
             log.info("GPT bridge unavailable: %s — using rule-based suggestions only", e)
         return self._gpt
 
+    # ── Full Cycle (single-call orchestration) ──────────────────────────
+
+    def run_full_cycle(self) -> Dict:
+        """
+        Run a complete auto-improvement cycle: evaluate → diagnose → suggest → test → promote.
+
+        Single entry point for orchestrator. Returns summary dict with:
+          status, best_strategy, best_sharpe, weaknesses, suggestions, tested, promoted
+
+        This method handles all internal state (baseline tracking, governance)
+        so the caller doesn't need to manage it.
+        """
+        import time as _time
+        t0 = _time.time()
+
+        log.info("=" * 60)
+        log.info("AutoImprover: Starting full improvement cycle")
+        log.info("=" * 60)
+
+        # 1. Evaluate all strategies
+        log.info("[1/5] Running methodology evaluation...")
+        metrics = self.run_evaluation()
+        if not metrics:
+            log.warning("Evaluation returned empty — aborting cycle")
+            return {"status": "skipped", "reason": "empty evaluation"}
+
+        best_name = metrics.get("best_name", "?")
+        best_sharpe = metrics.get("best_sharpe", 0)
+        log.info("  Best strategy: %s (Sharpe=%.3f)", best_name, best_sharpe)
+
+        # Set baseline for test comparison
+        all_r = metrics.get("all_results", {})
+        rm = all_r.get("RELATIVE_MOMENTUM", all_r.get(best_name, {}))
+        self._last_baseline_sharpe = rm.get("sharpe", best_sharpe)
+        self._last_baseline_wr = rm.get("win_rate", 0.50)
+
+        # 2. Identify weaknesses
+        log.info("[2/5] Identifying weaknesses...")
+        weaknesses = self.identify_weaknesses(metrics)
+        log.info("  Found %d weaknesses", len(weaknesses))
+
+        # 3. Generate suggestions
+        log.info("[3/5] Generating parameter suggestions...")
+        suggestions = self.generate_parameter_suggestions(weaknesses)
+        log.info("  Generated %d suggestions", len(suggestions))
+
+        # 4. Test suggestions
+        log.info("[4/5] Testing suggestions via backtest...")
+        tested = 0
+        promoted = 0
+        for suggestion in suggestions[:5]:
+            test_result = self.test_suggestion(suggestion)
+            tested += 1
+            passed = test_result.get("passed", False)
+            delta = test_result.get("delta", 0)
+            log.info("  %s: %s → %s (Δ=%.4f) %s",
+                     suggestion.get("param"), suggestion.get("current"),
+                     suggestion.get("proposed"), delta,
+                     "PASS" if passed else "FAIL")
+
+            if passed:
+                did_promote = self.promote_if_better(suggestion, test_result)
+                if did_promote:
+                    promoted += 1
+
+        # 5. Save state
+        log.info("[5/5] Saving state...")
+        try:
+            self._save_cycle({
+                "tested": tested, "promoted": promoted,
+                "best_strategy": best_name, "best_sharpe": best_sharpe,
+            })
+        except Exception as _se:
+            log.debug("Save cycle failed: %s", _se)
+
+        elapsed = _time.time() - t0
+        log.info("=" * 60)
+        log.info("AutoImprover: Cycle complete in %.1fs | %d tested, %d promoted", elapsed, tested, promoted)
+        log.info("=" * 60)
+
+        return {
+            "status": "ok",
+            "best_strategy": best_name,
+            "best_sharpe": round(best_sharpe, 4),
+            "weaknesses": len(weaknesses),
+            "suggestions": len(suggestions),
+            "tested": tested,
+            "promoted": promoted,
+            "elapsed_s": round(elapsed, 1),
+        }
+
     # ── Institutional Methods ────────────────────────────────────────────
 
     def check_governance_prerequisites(self) -> Dict:
