@@ -2149,7 +2149,7 @@ def build_dss_tab(
                  "danger" if abs(getattr(cs, "frob_distortion_z", 0) or 0) > 2 else "info", small=True),
             _kpi("Market Mode Share", _ff(cs.market_mode_share, "{:.1%}"),
                  "warning" if (getattr(cs, "market_mode_share", 0) or 0) > 0.5 else "info", small=True),
-            _kpi("Avg Corr Current", _ff(cs.avg_corr_current, "{:.3f}"), "primary", small=True),
+            _kpi("Avg Corr Current", _ff(getattr(cs, "avg_corr_short", getattr(cs, "avg_corr_current", 0)), "{:.3f}"), "primary", small=True),
             _kpi("CoC Instability Z", _ff(cs.coc_instability_z, "{:+.2f}"),
                  "danger" if abs(getattr(cs, "coc_instability_z", 0) or 0) > 1.5 else "info", small=True),
         ], className="g-2")

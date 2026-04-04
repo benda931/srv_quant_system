@@ -172,7 +172,7 @@ class DSSBriefGenerator:
             "frob_distortion_z": round(_sf(cs.frob_distortion_z), 4),
             "market_mode_share": round(_sf(cs.market_mode_share), 4),
             "coc_instability_z": round(_sf(cs.coc_instability_z), 4),
-            "avg_corr_current": round(_sf(cs.avg_corr_current), 4),
+            "avg_corr_current": round(_sf(getattr(cs, "avg_corr_short", getattr(cs, "avg_corr_current", 0))), 4),
         }
 
     def _signal_stack_section(self, results) -> dict:
