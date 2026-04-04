@@ -526,6 +526,7 @@ def build_backtest_tab(backtest_result: Optional[Any]) -> html.Div:
         )
 
     br = backtest_result
+    import math as _m
 
     # ── KPI row ──────────────────────────────────────────────────────────────
     ic_mean    = getattr(br, "ic_mean",         float("nan"))
