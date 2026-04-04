@@ -783,3 +783,192 @@ def trade_book_summary(tickets: List[TradeTicket]) -> dict:
             for t in active
         ],
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Dynamic Hedge Ratio Recalculation
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+import math
+
+
+@dataclass
+class HedgeRecalcResult:
+    """Result of dynamic hedge ratio recalculation for an active trade."""
+    trade_id: str
+    ticker: str
+    original_hedge_ratio: float
+    current_hedge_ratio: float
+    drift_pct: float                 # How much hedge ratio has moved (%)
+    needs_rebalance: bool            # True if drift > threshold
+    rebalance_action: str            # "INCREASE_HEDGE" / "DECREASE_HEDGE" / "HOLD"
+    new_weight: float                # Suggested new weight after rebalance
+    cost_estimate_bps: float         # Estimated cost to rebalance
+
+
+def recalculate_hedge_ratios(
+    active_tickets: list,
+    prices: pd.DataFrame,
+    master_df: pd.DataFrame,
+    drift_threshold: float = 0.10,   # 10% hedge ratio drift triggers rebalance
+) -> List[HedgeRecalcResult]:
+    """
+    Recalculate hedge ratios for all active trades.
+
+    Uses rolling 21-day OLS beta vs SPY as the hedge ratio.
+    If the ratio has drifted > threshold from entry, flags for rebalance.
+    """
+    results = []
+
+    spy_col = "SPY" if "SPY" in prices.columns else None
+    if not spy_col:
+        return results
+
+    log_rets = np.log(prices / prices.shift(1)).dropna()
+    spy_rets = log_rets[spy_col].iloc[-21:] if len(log_rets) >= 21 else None
+    if spy_rets is None:
+        return results
+
+    for ticket in active_tickets:
+        if not ticket.is_active:
+            continue
+
+        ticker = ticket.ticker
+        if ticker not in log_rets.columns:
+            continue
+
+        sec_rets = log_rets[ticker].iloc[-21:]
+
+        # Current hedge ratio (beta to SPY)
+        try:
+            cov = float(np.cov(sec_rets, spy_rets)[0, 1])
+            var_spy = float(spy_rets.var())
+            current_beta = cov / var_spy if var_spy > 1e-10 else 1.0
+        except Exception:
+            current_beta = 1.0
+
+        # Original hedge ratio (from entry — approximated from entry_z)
+        original_beta = getattr(ticket, 'hedge_ratio', 1.0) or 1.0
+
+        # Drift
+        drift = abs(current_beta - original_beta) / abs(original_beta) if abs(original_beta) > 1e-10 else 0
+        needs_rebal = drift > drift_threshold
+
+        if needs_rebal:
+            if current_beta > original_beta:
+                action = "INCREASE_HEDGE"
+            else:
+                action = "DECREASE_HEDGE"
+        else:
+            action = "HOLD"
+
+        # New weight = original weight × (current_beta / original_beta)
+        new_w = ticket.final_weight * (current_beta / original_beta) if abs(original_beta) > 1e-10 else ticket.final_weight
+        cost = abs(new_w - ticket.final_weight) * 15  # 15bps per unit rebalanced
+
+        results.append(HedgeRecalcResult(
+            trade_id=ticket.trade_id,
+            ticker=ticker,
+            original_hedge_ratio=round(original_beta, 4),
+            current_hedge_ratio=round(current_beta, 4),
+            drift_pct=round(drift, 4),
+            needs_rebalance=needs_rebal,
+            rebalance_action=action,
+            new_weight=round(new_w, 6),
+            cost_estimate_bps=round(cost, 1),
+        ))
+
+    return results
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Live Greeks Recalculation for Active Trades
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class TradeGreeksUpdate:
+    """Updated Greeks for an active trade (recomputed from current market data)."""
+    trade_id: str
+    ticker: str
+    # Factor deltas
+    delta_spy: float                 # $ sensitivity to SPY 1% move
+    delta_tnx: float                 # $ sensitivity to TNX 10bp move
+    delta_dxy: float                 # $ sensitivity to DXY 1% move
+    # Vol sensitivity
+    vega_proxy: float                # $ per VIX 1-point move
+    # Time
+    theta_daily: float               # Daily time decay ($)
+    days_held: int
+    # P&L
+    unrealized_pnl_pct: float
+    pnl_from_entry: float
+
+
+def update_trade_greeks(
+    active_tickets: list,
+    master_df: pd.DataFrame,
+    prices: pd.DataFrame,
+) -> List[TradeGreeksUpdate]:
+    """
+    Recompute Greeks for all active trades using current market data.
+
+    Uses factor betas from master_df to estimate synthetic deltas.
+    """
+    results = []
+
+    for ticket in active_tickets:
+        if not ticket.is_active:
+            continue
+
+        ticker = ticket.ticker
+        weight = ticket.final_weight
+        notional = weight * 1_000_000  # Assume $1M portfolio
+
+        # Get current factor betas
+        beta_spy = 1.0
+        beta_tnx = 0.0
+        beta_dxy = 0.0
+        if master_df is not None and "sector_ticker" in master_df.columns:
+            row = master_df[master_df["sector_ticker"] == ticker]
+            if not row.empty:
+                beta_spy = float(row.iloc[0].get("beta_spy_delta", 1.0) or 1.0)
+                beta_tnx = float(row.iloc[0].get("beta_tnx_60d", 0.0) or 0.0)
+                beta_dxy = float(row.iloc[0].get("beta_dxy_60d", 0.0) or 0.0)
+
+        sign = 1.0 if ticket.direction == "LONG" else -1.0
+
+        # Dollar sensitivities
+        d_spy = sign * notional * beta_spy * 0.01
+        d_tnx = sign * notional * beta_tnx * 0.001
+        d_dxy = sign * notional * beta_dxy * 0.01
+        vega = sign * notional * 0.002
+        theta = -abs(notional) * 0.0001  # ~1bps/day
+
+        # Current P&L
+        pnl_pct = 0.0
+        if ticker in prices.columns:
+            current = float(prices[ticker].dropna().iloc[-1])
+            entry = ticket.entry_z  # Approximate
+            # Use z-score compression as P&L proxy
+            if math.isfinite(entry):
+                pnl_pct = sign * (entry - getattr(ticket, 'current_z', entry)) * 0.01
+
+        results.append(TradeGreeksUpdate(
+            trade_id=ticket.trade_id,
+            ticker=ticker,
+            delta_spy=round(d_spy, 2),
+            delta_tnx=round(d_tnx, 2),
+            delta_dxy=round(d_dxy, 2),
+            vega_proxy=round(vega, 2),
+            theta_daily=round(theta, 2),
+            days_held=0,
+            unrealized_pnl_pct=round(pnl_pct, 6),
+            pnl_from_entry=round(pnl_pct * notional, 2),
+        ))
+
+    return results
+
+
+import numpy as np
+from typing import Dict, List, Optional
