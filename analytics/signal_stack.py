@@ -982,3 +982,188 @@ def signal_stack_summary(results: List[SignalStackResult]) -> dict:
             for r in results[:10]
         ],
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Layer Ablation Analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+import numpy as np
+
+
+@dataclass
+class LayerAblationResult:
+    """Result of removing one layer from the signal stack."""
+    removed_layer: str                 # Which layer was ablated
+    original_n_passing: int
+    ablated_n_passing: int
+    delta_passing: int                 # How many more/fewer pass without this layer
+    original_avg_conviction: float
+    ablated_avg_conviction: float
+    delta_conviction: float            # Change in average conviction
+    importance_score: float            # 0-1: how critical this layer is
+
+
+@dataclass
+class AblationReport:
+    """Complete layer ablation analysis."""
+    layer_results: Dict[str, LayerAblationResult]
+    most_important_layer: str
+    least_important_layer: str
+    total_layers: int = 4
+
+
+def layer_ablation_analysis(
+    signal_results: List[SignalStackResult],
+) -> AblationReport:
+    """
+    Test each signal layer by "ablating" (removing) it and measuring impact.
+
+    For each layer (Distortion, Dislocation, MR, Safety):
+      - Replace that layer's score with 1.0 (neutral)
+      - Recompute conviction = product of remaining layers
+      - Compare n_passing and avg_conviction vs original
+
+    The layer that causes the most change when removed is most important.
+    """
+    if not signal_results:
+        return AblationReport(layer_results={}, most_important_layer="", least_important_layer="")
+
+    layers = {
+        "distortion": "distortion_score",
+        "dislocation": "dislocation_score",
+        "mean_reversion": "mean_reversion_score",
+        "regime_safety": "regime_safety_score",
+    }
+
+    # Original metrics
+    orig_passing = sum(1 for r in signal_results if r.passes_entry)
+    orig_convictions = [r.conviction_score for r in signal_results]
+    orig_avg = float(np.mean(orig_convictions)) if orig_convictions else 0
+
+    results = {}
+    for layer_name, attr_name in layers.items():
+        # Recompute conviction without this layer
+        ablated_convictions = []
+        ablated_passing = 0
+
+        for r in signal_results:
+            scores = {
+                "distortion_score": r.distortion_score,
+                "dislocation_score": r.dislocation_score,
+                "mean_reversion_score": r.mean_reversion_score,
+                "regime_safety_score": r.regime_safety_score,
+            }
+            # Replace ablated layer with 1.0 (neutral)
+            scores[attr_name] = 1.0
+            new_conviction = 1.0
+            for v in scores.values():
+                new_conviction *= v
+
+            ablated_convictions.append(new_conviction)
+            if new_conviction >= r.entry_threshold:
+                ablated_passing += 1
+
+        ablated_avg = float(np.mean(ablated_convictions)) if ablated_convictions else 0
+
+        # Importance: how much changes when this layer is removed
+        delta_pass = ablated_passing - orig_passing
+        delta_conv = ablated_avg - orig_avg
+        importance = abs(delta_conv) / (orig_avg + 1e-10)
+
+        results[layer_name] = LayerAblationResult(
+            removed_layer=layer_name,
+            original_n_passing=orig_passing,
+            ablated_n_passing=ablated_passing,
+            delta_passing=delta_pass,
+            original_avg_conviction=round(orig_avg, 6),
+            ablated_avg_conviction=round(ablated_avg, 6),
+            delta_conviction=round(delta_conv, 6),
+            importance_score=round(min(1.0, importance), 4),
+        )
+
+    most = max(results, key=lambda k: results[k].importance_score)
+    least = min(results, key=lambda k: results[k].importance_score)
+
+    return AblationReport(
+        layer_results=results,
+        most_important_layer=most,
+        least_important_layer=least,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Signal Sensitivity Analysis
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class SensitivityPoint:
+    """Result of perturbing one input parameter."""
+    param_name: str
+    param_value: float
+    n_passing: int
+    avg_conviction: float
+
+
+@dataclass
+class SignalSensitivity:
+    """How sensitive signal output is to input parameters."""
+    param_name: str
+    sensitivity_score: float           # Std of conviction across parameter sweep
+    sweep_results: List[SensitivityPoint]
+    current_value: float
+    optimal_value: float               # Value that maximizes n_passing
+
+
+def signal_entry_sensitivity(
+    signal_results: List[SignalStackResult],
+    thresholds: Optional[List[float]] = None,
+) -> SignalSensitivity:
+    """
+    How sensitive is entry_threshold to the number of passing signals?
+
+    Sweeps entry threshold from 0.01 to 0.20 and counts n_passing at each level.
+    """
+    if thresholds is None:
+        thresholds = [0.01, 0.02, 0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
+
+    if not signal_results:
+        return SignalSensitivity(
+            param_name="entry_threshold", sensitivity_score=0,
+            sweep_results=[], current_value=0.05, optimal_value=0.05,
+        )
+
+    current = signal_results[0].entry_threshold if signal_results else 0.05
+    points = []
+
+    for t in thresholds:
+        n_pass = sum(1 for r in signal_results if r.conviction_score >= t)
+        avg_conv = float(np.mean([r.conviction_score for r in signal_results if r.conviction_score >= t])) if n_pass > 0 else 0
+        points.append(SensitivityPoint(
+            param_name="entry_threshold",
+            param_value=t,
+            n_passing=n_pass,
+            avg_conviction=round(avg_conv, 6),
+        ))
+
+    n_values = [p.n_passing for p in points]
+    sensitivity = float(np.std(n_values)) / (float(np.mean(n_values)) + 1e-10) if n_values else 0
+
+    # Optimal: threshold where we get meaningful number of signals (3-6)
+    optimal = current
+    for p in points:
+        if 3 <= p.n_passing <= 6:
+            optimal = p.param_value
+            break
+
+    return SignalSensitivity(
+        param_name="entry_threshold",
+        sensitivity_score=round(sensitivity, 4),
+        sweep_results=points,
+        current_value=current,
+        optimal_value=optimal,
+    )
+
+
+from typing import Dict, List, Optional
