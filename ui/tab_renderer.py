@@ -498,12 +498,61 @@ def _render_overview(ctx: TabContext):
             ]),
         ], align="center")), className="mb-3 border-info", style={"borderWidth": "1px"})
 
+    # ── Best Strategy card ──
+    strategy_kpis = html.Div()
+    try:
+        meth_results = ctx.load_methodology_results() if ctx.load_methodology_results else None
+        if meth_results:
+            ranked = sorted(meth_results.items(),
+                           key=lambda x: x[1].get("sharpe", 0) if isinstance(x[1], dict) else 0,
+                           reverse=True)
+            best_name, best_data = ranked[0] if ranked else ("?", {})
+            if isinstance(best_data, dict):
+                bs = best_data.get("sharpe", 0)
+                bw = best_data.get("win_rate", 0)
+                bp = best_data.get("total_pnl", 0)
+                n_positive = sum(1 for _, d in ranked if isinstance(d, dict) and d.get("sharpe", 0) > 0)
+                strategy_kpis = dbc.Card(dbc.CardBody(dbc.Row([
+                    dbc.Col(html.Div("📈 Best Strategy", className="fw-bold"), width="auto"),
+                    dbc.Col([
+                        html.Span(f"{best_name} ", className="small fw-bold me-2"),
+                        html.Span(f"Sharpe: {bs:.2f} ", className=f"small fw-bold text-{'success' if bs > 0.5 else 'warning'} me-2"),
+                        html.Span(f"WR: {bw:.0%} ", className="small me-2"),
+                        html.Span(f"PnL: {bp:.1%} ", className="small me-2"),
+                        html.Span(f"({n_positive} positive / {len(ranked)} total)", className="small text-muted"),
+                    ]),
+                ], align="center")), className="mb-3 border-success", style={"borderWidth": "1px"})
+    except Exception:
+        pass
+
+    # ── Momentum card ──
+    momentum_kpis = html.Div()
+    try:
+        mom = ctx.compute_momentum_ranking() if ctx.compute_momentum_ranking else None
+        if mom and len(mom) >= 3:
+            top3 = [m["ticker"] for m in mom[:3]]
+            bot3 = [m["ticker"] for m in mom[-3:]]
+            momentum_kpis = dbc.Card(dbc.CardBody(dbc.Row([
+                dbc.Col(html.Div("🔄 Momentum Ranking (21d)", className="fw-bold"), width="auto"),
+                dbc.Col([
+                    html.Span("LONG: ", className="small text-muted"),
+                    html.Span(f"{', '.join(top3)} ", className="small fw-bold text-success me-3"),
+                    html.Span("SHORT: ", className="small text-muted"),
+                    html.Span(f"{', '.join(bot3)} ", className="small fw-bold text-danger me-3"),
+                    html.Span(f"Top: {mom[0]['momentum_21d']:+.1%}", className="small text-muted"),
+                ]),
+            ], align="center")), className="mb-3 border-primary", style={"borderWidth": "1px"})
+    except Exception:
+        pass
+
     return dbc.Container(fluid=True, children=[
         build_market_narrative(ctx.master_df),
         build_health_overview_banner(ctx.data_health) if ctx.data_health else html.Div(),
         build_regime_hero(row0),
         cards_top,
         cards_bottom,
+        strategy_kpis,
+        momentum_kpis,
         dss_kpis,
         mc_kpis,
         stress_kpis,
