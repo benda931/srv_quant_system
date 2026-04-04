@@ -158,7 +158,7 @@ def _render_scanner(ctx: TabContext):
 
 
 def _render_correlation(ctx: TabContext):
-    from ui.layout import build_correlation_panel
+    from ui.panels import build_correlation_panel
     return _loading([
         _tab_header("🔗 Correlation Structure — מבנה קורלציות סקטוריאליות",
                      "PCA eigenvector decomposition, rolling regime classification, "
@@ -235,8 +235,11 @@ def _render_regime(ctx: TabContext):
 
 
 def _render_health(ctx: TabContext):
-    from ui.layout import build_data_health_tab
-    return _loading([build_data_health_tab(ctx.data_health)])
+    try:
+        from ui.panels import build_data_health_tab
+        return _loading([build_data_health_tab(ctx.data_health)])
+    except ImportError:
+        return _loading([html.Div("Health tab unavailable", className="text-muted p-3")])
 
 
 def _render_journal(ctx: TabContext):
@@ -282,7 +285,7 @@ def _render_methodology(ctx: TabContext):
         _tab_header("🧪 Methodology Lab — מעבדת אסטרטגיות",
                      "השוואת מתודולוגיות, OOS validation, regime fitness, governance"),
         build_methodology_tab(
-            methodology_lab=_mlab,
+            lab_data=_mlab,
             alpha_research=_alpha,
             governance_data=_gov_data,
         ),
@@ -384,10 +387,15 @@ def _render_optimization(ctx: TabContext):
 
 
 def _render_tearsheet(ctx: TabContext):
-    from ui.layout import build_tearsheet_explainer, build_tearsheet_panel
-    return dbc.Container(fluid=True, children=[
-        build_tearsheet_explainer(), build_tearsheet_panel(),
-    ])
+    try:
+        from ui.panels import build_tearsheet_panel
+        from main import build_tearsheet_explainer
+        return dbc.Container(fluid=True, children=[
+            build_tearsheet_explainer(), build_tearsheet_panel(),
+        ])
+    except ImportError:
+        from ui.panels import build_tearsheet_panel
+        return dbc.Container(fluid=True, children=[build_tearsheet_panel()])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -417,12 +425,17 @@ _TAB_RENDERERS = {
 
 def _render_overview(ctx: TabContext):
     """Render the Overview tab with KPI snapshot cards."""
-    from ui.layout import (
+    from ui.panels import (
         build_market_narrative, build_regime_hero, build_action_plan,
         build_opportunities_section, build_stat_analysis_panel,
-        build_correlation_summary, build_health_overview_banner,
-        build_overview_kpi_rows, build_engine_outputs,
+        build_correlation_summary,
     )
+    # These are defined in main.py — import from there
+    try:
+        from main import build_health_overview_banner, build_overview_kpi_rows
+    except ImportError:
+        build_health_overview_banner = lambda h: html.Div()
+        build_overview_kpi_rows = lambda *a, **k: (html.Div(), html.Div())
 
     row0 = ctx.master_df.iloc[0].to_dict() if len(ctx.master_df) else {}
     cards_top, cards_bottom = build_overview_kpi_rows(ctx.master_df, ctx.settings, ctx.data_health)
