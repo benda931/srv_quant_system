@@ -54,6 +54,9 @@ class EngineResults:
     corr_vol_analysis: Any = None
     corr_snapshot: Any = None
 
+    # Typed scoring interface (wraps master_df)
+    scoring: Any = None                    # ScoringResult from analytics/scoring.py
+
     # DSS / Signals
     signal_results: Optional[List] = None
     trade_tickets: Optional[List] = None
@@ -110,6 +113,7 @@ class EngineService:
         # Phase 1: Data + Core
         self._step("data_load", self._load_data)
         self._step("quant_engine", self._run_quant_engine)
+        self._step("scoring", self._build_scoring)
         self._step("db_persist", self._persist_run)
 
         # Phase 2: Risk + Stress
@@ -200,6 +204,15 @@ class EngineService:
         self.ctx.prices_cols = len(engine.prices.columns)
         if hasattr(engine.prices.index, "max"):
             self.ctx.prices_latest_date = str(engine.prices.index.max().date())
+
+    def _build_scoring(self):
+        """Build typed scoring interface from master_df."""
+        from analytics.scoring import ScoringResult
+        self.results.scoring = ScoringResult.from_master_df(self.results.master_df)
+        sr = self.results.scoring
+        log.info("Scoring: %d sectors | %dL/%dS | regime=%s | avg_conv=%.3f",
+                 sr.portfolio.n_sectors, sr.portfolio.n_longs, sr.portfolio.n_shorts,
+                 sr.regime.state, sr.portfolio.avg_conviction)
 
     def _persist_run(self):
         from db.writer import DatabaseWriter
