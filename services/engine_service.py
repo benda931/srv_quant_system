@@ -334,6 +334,30 @@ class EngineService:
         )
         self.results.signal_results = signals
 
+        # If safety killed all signals, also compute hypothetical signals
+        # with safety=1.0 so DSS tab shows useful analytics
+        if safety.regime_safety_score < 0.1 and signals:
+            n_passing = sum(1 for s in signals if s.passes_entry)
+            if n_passing == 0:
+                log.info("DSS: safety=KILLED, computing hypothetical signals (safety=1.0)")
+                from types import SimpleNamespace
+                hypothetical_safety = SimpleNamespace(
+                    regime_safety_score=0.8, label="HYPOTHETICAL",
+                    size_cap=1.0, alerts=[], hard_kills=[],
+                )
+                hyp_signals = ss.score_from_master_df(
+                    frob_distortion_z=cs.frob_distortion_z if cs else 0.0,
+                    market_mode_share=cs.market_mode_share if cs else 0.3,
+                    coc_instability_z=cs.coc_instability_z if cs else 0.0,
+                    master_df=master_df,
+                    regime_safety_result=hypothetical_safety,
+                )
+                # Replace signals with hypothetical ones (for display)
+                # The trade tickets will still be empty (KILLED)
+                self.results.signal_results = hyp_signals
+                log.info("DSS: %d hypothetical signals (%d passing)",
+                         len(hyp_signals), sum(1 for s in hyp_signals if s.passes_entry))
+
         # Trade structure + sizing
         ts = TradeStructureEngine(self.settings)
         tickets = ts.construct_all_trades(signals, master_df=master_df)
