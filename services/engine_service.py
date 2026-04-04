@@ -240,8 +240,16 @@ class EngineService:
             for _, row in master_df.iterrows()
             if row.get("direction") in ("LONG", "SHORT")
         }
+        # If no active positions (e.g., CRISIS regime), use equal weights
+        # so the Risk tab still shows analytical content
         if not weights:
-            return
+            sectors = [str(row["sector_ticker"]) for _, row in master_df.iterrows()
+                       if "sector_ticker" in master_df.columns]
+            if sectors:
+                w = 1.0 / len(sectors)
+                weights = {s: w for s in sectors}
+            else:
+                return
 
         risk_engine = PortfolioRiskEngine()
         self.results.risk_report = risk_engine.full_risk_report(
@@ -342,6 +350,11 @@ class EngineService:
                 row["sector_ticker"]: float(row.get("w_final", 0))
                 for _, row in master_df.iterrows()
             }
+            # Fallback to equal weights if all zero
+            if not any(abs(v) > 0.001 for v in weights.values()):
+                n = len(weights)
+                if n > 0:
+                    weights = {k: 1.0 / n for k in weights}
             returns = np.log(prices / prices.shift(1)).iloc[1:]
             self.results.tail_risk_es = compute_expected_shortfall(
                 returns, weights, confidence=0.975,
@@ -408,12 +421,12 @@ class EngineService:
             ).fetchone()
             conn.close()
             if row is not None:
-                self.results.backtest_result = row  # Raw row; UI handles formatting
+                self.results.backtest_result = row
                 return
         except Exception:
             pass
 
-        # Fallback: load alpha research report
+        # Fallback 1: alpha research report
         try:
             import json
             reports = sorted(
@@ -429,8 +442,35 @@ class EngineService:
                         sharpe=best["oos_sharpe"],
                         source="alpha_research_oos",
                     )
+                    return
         except Exception:
             pass
+
+        # Fallback 2: quick methodology lab run on RelativeMomentum
+        try:
+            from analytics.methodology_lab import MethodologyLab, RelativeMomentum
+            prices = self.results.engine.prices
+            if prices is not None and len(prices) > 300:
+                lab = MethodologyLab(prices, self.settings, step=10, cost_bps=15)
+                result = lab.run_methodology(RelativeMomentum(
+                    lookback=int(getattr(self.settings, "momentum_lookback", 21)),
+                    top_n=int(getattr(self.settings, "momentum_top_n", 3)),
+                    rebal_days=int(getattr(self.settings, "momentum_rebal_days", 21)),
+                ))
+                from types import SimpleNamespace
+                self.results.backtest_result = SimpleNamespace(
+                    sharpe=result.sharpe,
+                    win_rate=result.win_rate,
+                    total_pnl=result.total_pnl,
+                    max_drawdown=result.max_drawdown,
+                    total_trades=result.total_trades,
+                    equity_curve=result.equity_curve,
+                    source="momentum_live",
+                )
+                log.info("Backtest: RelativeMomentum Sharpe=%.3f PnL=%.1f%%",
+                         result.sharpe, result.total_pnl * 100)
+        except Exception as e:
+            log.debug("Quick backtest failed: %s", e)
 
     def _run_ml_models(self):
         import pickle
