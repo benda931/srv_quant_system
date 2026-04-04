@@ -275,35 +275,13 @@ class DataLakeManager:
                 self.logger.debug("Legacy fallback failed for %s: %s", ticker, _leg_err)
                 hist = None
 
-        # ── yfinance fallback (when FMP stable + legacy both fail) ─────
-        if not hist:
-            try:
-                import yfinance as yf
-                yf_ticker = ticker.replace("^", "")  # yfinance uses VIX not ^VIX
-                if ticker.startswith("^"):
-                    yf_ticker = f"^{yf_ticker}"  # Keep ^ for indices
-                yf_data = yf.download(
-                    yf_ticker, start=start_date.isoformat(),
-                    end=(end_date or date.today()).isoformat(),
-                    progress=False, auto_adjust=True,
-                )
-                if not yf_data.empty:
-                    close_col = "Close"
-                    if isinstance(yf_data.columns, pd.MultiIndex):
-                        yf_data.columns = yf_data.columns.get_level_values(0)
-                    if close_col in yf_data.columns:
-                        s = yf_data[close_col].dropna()
-                        s.name = ticker
-                        s.index = pd.to_datetime(s.index).tz_localize(None)
-                        self.logger.info("yfinance fallback OK for %s: %d rows", ticker, len(s))
-                        return s
-            except ImportError:
-                self.logger.debug("yfinance not installed — skipping fallback for %s", ticker)
-            except Exception as _yf_err:
-                self.logger.debug("yfinance fallback failed for %s: %s", ticker, _yf_err)
+        # NOTE: yfinance fallback DISABLED — FMP is the only data source.
+        # yfinance was corrupting data (all tickers getting same VIX value).
 
         if not hist:
-            raise ValueError(f"No historical data returned for {ticker} (FMP + yfinance both failed)")
+            # FMP both endpoints failed — just skip this ticker silently
+            # Existing parquet data will be used as-is
+            raise ValueError(f"No historical data from FMP for {ticker} (stable + legacy both empty)")
 
         df = pd.DataFrame(hist)
         if df.empty or "date" not in df.columns:
