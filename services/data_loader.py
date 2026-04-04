@@ -142,10 +142,25 @@ class DataLoader:
                 else pd.Series(0, index=log_rets.index)
             )
 
+            # Use simple returns (not log) for more intuitive display
+            simple_rets = prices[sectors].pct_change().dropna()
+            spy_simple = prices[spy].pct_change().dropna() if spy in prices.columns else pd.Series(0, index=simple_rets.index)
+
             ranking = []
             for s in sectors:
-                m21 = float((log_rets[s].iloc[-21:] - spy_ret.iloc[-21:]).sum()) if len(log_rets) >= 21 else 0
-                m42 = float((log_rets[s].iloc[-42:] - spy_ret.iloc[-42:]).sum()) if len(log_rets) >= 42 else 0
+                if len(simple_rets) >= 21:
+                    # Simple return over 21 days, relative to SPY
+                    sec_21 = float((1 + simple_rets[s].iloc[-21:]).prod() - 1)
+                    spy_21 = float((1 + spy_simple.iloc[-21:]).prod() - 1)
+                    m21 = sec_21 - spy_21
+                else:
+                    m21 = 0
+                if len(simple_rets) >= 42:
+                    sec_42 = float((1 + simple_rets[s].iloc[-42:]).prod() - 1)
+                    spy_42 = float((1 + spy_simple.iloc[-42:]).prod() - 1)
+                    m42 = sec_42 - spy_42
+                else:
+                    m42 = 0
                 vol = float(log_rets[s].iloc[-60:].std() * np.sqrt(252)) if len(log_rets) >= 60 else 0.15
                 ranking.append({"ticker": s, "momentum_21d": m21, "momentum_42d": m42, "vol": vol})
 

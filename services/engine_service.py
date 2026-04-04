@@ -215,17 +215,36 @@ class EngineService:
 
     def _run_stress(self):
         from analytics.stress import StressEngine
-        self.results.stress_results = StressEngine().run_all(
-            self.results.master_df, self.settings,
-        )
+        master_df = self.results.master_df.copy()
+        # If all weights are zero (CRISIS/KILLED), use hypothetical equal weights
+        # so stress tab shows meaningful analytics instead of all zeros
+        if "w_final" in master_df.columns and not any(abs(master_df["w_final"]) > 0.001):
+            n = len(master_df)
+            if n > 0:
+                master_df["w_final"] = 1.0 / n
+                # Also set delta columns so stress can compute P&L
+                for col in ["delta_spy_i", "delta_tnx_i", "delta_dxy_i"]:
+                    if col in master_df.columns:
+                        master_df[col] = master_df["w_final"] * 0.5
+                log.info("Stress: using equal-weight hypothetical portfolio (CRISIS override)")
+        self.results.stress_results = StressEngine().run_all(master_df, self.settings)
 
     def _run_mc_stress(self):
         from analytics.stress import MonteCarloStressEngine
         prices = self.results.engine.prices
         if prices is not None and len(prices) > 60:
+            master_df = self.results.master_df.copy()
+            # Same CRISIS override: use equal weights for non-trivial MC results
+            if "w_final" in master_df.columns and not any(abs(master_df["w_final"]) > 0.001):
+                n = len(master_df)
+                if n > 0:
+                    master_df["w_final"] = 1.0 / n
+                    for col in ["delta_spy_i", "delta_tnx_i", "delta_dxy_i"]:
+                        if col in master_df.columns:
+                            master_df[col] = master_df["w_final"] * 0.5
             self.results.mc_stress_result = MonteCarloStressEngine(
                 n_simulations=10_000, horizon_days=21,
-            ).run(self.results.master_df, prices, self.settings)
+            ).run(master_df, prices, self.settings)
 
     def _run_portfolio_risk(self):
         from analytics.portfolio_risk import PortfolioRiskEngine
