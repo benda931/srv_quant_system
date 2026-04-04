@@ -931,3 +931,237 @@ def run_backtest(
         fundamentals_df=fundamentals_df,
         weights_df=weights_df,
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Regime-Conditional Walk-Forward Backtest
+# ═════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass, field
+import math
+
+
+@dataclass
+class RegimeWalkResult:
+    """Walk-forward result for a single regime."""
+    regime: str
+    n_walks: int
+    ic_mean: float
+    sharpe: float
+    hit_rate: float
+    max_drawdown: float
+    avg_signal_return: float
+    n_sectors_avg: float
+
+
+@dataclass
+class RegimeConditionalBacktest:
+    """Full regime-conditional backtest output."""
+    regime_results: Dict[str, RegimeWalkResult]
+    overall_sharpe: float
+    regime_sharpe_spread: float       # max regime Sharpe - min regime Sharpe
+    best_regime: str
+    worst_regime: str
+    regime_allocation_advice: Dict[str, str]  # {regime: "FULL" / "REDUCED" / "AVOID"}
+
+
+def regime_conditional_walk_forward(
+    prices_df: pd.DataFrame,
+    settings,
+    vix: Optional[pd.Series] = None,
+) -> RegimeConditionalBacktest:
+    """
+    Run walk-forward backtest separately for each regime.
+
+    Instead of one Sharpe across all regimes, computes per-regime Sharpe:
+      CALM:    walks where VIX < 16
+      NORMAL:  walks where 16 ≤ VIX < 21
+      TENSION: walks where 21 ≤ VIX < 32
+      CRISIS:  walks where VIX ≥ 32
+
+    This reveals where the strategy works and where it breaks.
+    """
+    import numpy as np
+
+    # Classify each date
+    if vix is None:
+        vix_col = next((c for c in prices_df.columns if "VIX" in c.upper()), None)
+        if vix_col:
+            vix = prices_df[vix_col]
+
+    if vix is None or len(vix) < 252:
+        return RegimeConditionalBacktest(
+            regime_results={}, overall_sharpe=0, regime_sharpe_spread=0,
+            best_regime="UNKNOWN", worst_regime="UNKNOWN", regime_allocation_advice={},
+        )
+
+    vix_soft = getattr(settings, "vix_level_soft", 21) if settings else 21
+    vix_hard = getattr(settings, "vix_level_hard", 32) if settings else 32
+
+    regimes_map = {}
+    for regime_name, lo, hi in [("CALM", 0, 16), ("NORMAL", 16, vix_soft), ("TENSION", vix_soft, vix_hard), ("CRISIS", vix_hard, 999)]:
+        mask = (vix >= lo) & (vix < hi)
+        regime_dates = vix[mask].index
+        if len(regime_dates) >= 60:
+            regimes_map[regime_name] = regime_dates
+
+    regime_results = {}
+    for regime, dates in regimes_map.items():
+        # Filter prices to this regime
+        regime_prices = prices_df.loc[prices_df.index.isin(dates)]
+        if len(regime_prices) < 100:
+            continue
+
+        # Run backtest on regime-filtered data
+        try:
+            bt = WalkForwardBacktester(settings)
+            result = bt.run_backtest(prices_df=regime_prices, fundamentals_df=pd.DataFrame(), weights_df=pd.DataFrame())
+
+            regime_results[regime] = RegimeWalkResult(
+                regime=regime,
+                n_walks=result.n_walks,
+                ic_mean=round(result.ic_mean, 4),
+                sharpe=round(result.sharpe, 4),
+                hit_rate=round(result.hit_rate, 4),
+                max_drawdown=round(result.max_drawdown, 6),
+                avg_signal_return=round(result.avg_signal_return, 6) if hasattr(result, 'avg_signal_return') else 0,
+                n_sectors_avg=round(result.n_sectors_avg, 1) if hasattr(result, 'n_sectors_avg') else 0,
+            )
+        except Exception:
+            pass
+
+    if not regime_results:
+        return RegimeConditionalBacktest(
+            regime_results={}, overall_sharpe=0, regime_sharpe_spread=0,
+            best_regime="UNKNOWN", worst_regime="UNKNOWN", regime_allocation_advice={},
+        )
+
+    sharpes = {r: rr.sharpe for r, rr in regime_results.items()}
+    best = max(sharpes, key=sharpes.get)
+    worst = min(sharpes, key=sharpes.get)
+    spread = sharpes[best] - sharpes[worst]
+    overall = float(np.mean(list(sharpes.values())))
+
+    # Allocation advice
+    advice = {}
+    for r, s in sharpes.items():
+        if s > 0.5:
+            advice[r] = "FULL"
+        elif s > 0:
+            advice[r] = "REDUCED"
+        else:
+            advice[r] = "AVOID"
+
+    return RegimeConditionalBacktest(
+        regime_results=regime_results,
+        overall_sharpe=round(overall, 4),
+        regime_sharpe_spread=round(spread, 4),
+        best_regime=best,
+        worst_regime=worst,
+        regime_allocation_advice=advice,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Bootstrap Confidence Intervals for Backtest Sharpe
+# ═════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class BootstrapCI:
+    """Bootstrap confidence interval for a statistic."""
+    statistic: str                     # "sharpe" / "hit_rate" / "max_drawdown"
+    point_estimate: float
+    ci_lower: float                    # Lower bound (e.g., 2.5th percentile)
+    ci_upper: float                    # Upper bound (e.g., 97.5th percentile)
+    ci_level: float                    # e.g., 0.95 for 95% CI
+    n_bootstrap: int
+    std_error: float                   # Standard error of the bootstrap distribution
+    is_significant: bool               # True if CI excludes zero
+
+
+def bootstrap_backtest_ci(
+    walk_returns: List[float],
+    n_bootstrap: int = 2000,
+    ci_level: float = 0.95,
+    ann_factor: float = None,
+) -> Dict[str, BootstrapCI]:
+    """
+    Bootstrap confidence intervals for Sharpe ratio, hit rate, and max drawdown.
+
+    Resamples walk-level returns with replacement and computes the statistic
+    for each resample. The CI is the percentile interval.
+
+    Parameters
+    ----------
+    walk_returns : list — per-walk signal returns
+    n_bootstrap : int — number of bootstrap resamples
+    ci_level : float — confidence level (default 0.95)
+    ann_factor : float — annualization factor (default: sqrt(252/step))
+    """
+    import numpy as np
+
+    r = np.array(walk_returns, dtype=float)
+    n = len(r)
+
+    if n < 10:
+        return {}
+
+    if ann_factor is None:
+        ann_factor = np.sqrt(252 / max(1, 10))  # Assume step=10
+
+    rng = np.random.default_rng(42)
+    alpha = (1 - ci_level) / 2
+
+    # Bootstrap distributions
+    sharpes = []
+    hit_rates = []
+    max_dds = []
+
+    for _ in range(n_bootstrap):
+        sample = rng.choice(r, size=n, replace=True)
+        mu = sample.mean()
+        sigma = sample.std(ddof=1)
+
+        # Sharpe
+        s = mu / sigma * ann_factor if sigma > 1e-10 else 0
+        sharpes.append(s)
+
+        # Hit rate
+        hr = (sample > 0).mean()
+        hit_rates.append(hr)
+
+        # Max drawdown
+        cum = np.cumprod(1 + sample)
+        peak = np.maximum.accumulate(cum)
+        dd = (cum - peak) / peak
+        max_dds.append(float(dd.min()))
+
+    results = {}
+
+    for name, dist, point in [
+        ("sharpe", sharpes, float(r.mean() / r.std(ddof=1) * ann_factor) if r.std() > 1e-10 else 0),
+        ("hit_rate", hit_rates, float((r > 0).mean())),
+        ("max_drawdown", max_dds, float(np.cumprod(1 + r).min() / np.cumprod(1 + r).max() - 1)),
+    ]:
+        arr = np.array(dist)
+        lo = float(np.percentile(arr, alpha * 100))
+        hi = float(np.percentile(arr, (1 - alpha) * 100))
+        se = float(arr.std())
+        sig = (lo > 0) or (hi < 0)  # CI excludes zero
+
+        results[name] = BootstrapCI(
+            statistic=name,
+            point_estimate=round(point, 4),
+            ci_lower=round(lo, 4),
+            ci_upper=round(hi, 4),
+            ci_level=ci_level,
+            n_bootstrap=n_bootstrap,
+            std_error=round(se, 4),
+            is_significant=sig,
+        )
+
+    return results
+
+
+from typing import Dict, List, Optional
+import pandas as pd

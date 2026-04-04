@@ -151,6 +151,12 @@ TASKS = {
         "description": "סיכום ערב + P&L",
         "function": "_task_evening_recap",
     },
+    "daily_report": {
+        "schedule": "18:00_weekdays",
+        "depends_on": ["evening_recap"],
+        "description": "דוח PM יומי — Slack + file",
+        "function": "_task_daily_report",
+    },
     "health_check": {
         "schedule": "every_15min",
         "description": "בדיקת בריאות מערכת",
@@ -861,6 +867,16 @@ class Orchestrator:
                 self._dispatch_alert("WARNING", "Alpha Decay: Stale Signals",
                     f"{stale} signals showing decay — consider position reduction")
             return {"status": "ok", "stale_signals": stale}
+        except Exception as e:
+            return {"status": "failed", "error": str(e)}
+
+    def _task_daily_report(self) -> dict:
+        """דוח PM יומי — Slack + file."""
+        try:
+            from scripts.daily_report import generate_daily_report
+            report = generate_daily_report(preview=False)
+            n_lines = len(report.split("\n"))
+            return {"status": "ok", "lines": n_lines}
         except Exception as e:
             return {"status": "failed", "error": str(e)}
 
