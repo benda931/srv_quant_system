@@ -1939,9 +1939,66 @@ class QuantEngine:
             .reset_index(drop=True)
         )
 
-        # ==========================================================
+        # Post-loop enrichment: global context, attribution, sizing, greeks, risk
+        master = self._enrich_master_df(
+            master=master,
+            returns=returns,
+            prices=prices,
+            sectors=sectors,
+            spy=spy,
+            regime=regime,
+            corr_metrics=corr_metrics,
+            latest_credit_z=latest_credit_z,
+            credit_stress=credit_stress,
+            latest_vix=latest_vix,
+            latest_vix_pct=latest_vix_pct,
+            spy_pe=spy_pe,
+            spy_ey=spy_ey,
+            spy_val=spy_val,
+        )
+
+        master = master.sort_values(
+            ["decision_rank", "decision_score", "mc_score", "conviction_score", "pca_residual_z"],
+            ascending=[True, False, False, False, True],
+        ).reset_index(drop=True)
+
+        self.master_df = master
+        return master
+
+    # ──────────────────────────────────────────────────────────────────────
+    # Post-loop enrichment (extracted from calculate_conviction_score)
+    # ──────────────────────────────────────────────────────────────────────
+    def _enrich_master_df(
+        self,
+        master: pd.DataFrame,
+        returns: pd.DataFrame,
+        prices: pd.DataFrame,
+        sectors: List[str],
+        spy: str,
+        regime,
+        corr_metrics,
+        latest_credit_z: float,
+        credit_stress: bool,
+        latest_vix: float,
+        latest_vix_pct: float,
+        spy_pe: float,
+        spy_ey: float,
+        spy_val: dict,
+    ) -> pd.DataFrame:
+        """
+        Enrich the raw sector rows with:
+          - Global market context (credit, VIX, regime)
+          - SPY beta / correlation snapshots
+          - Attribution / MC scoring
+          - Decision layer (ENTER/WATCH/REDUCE/AVOID)
+          - Delta-1 portfolio construction (vol-scaled, beta-neutral)
+          - Synthetic greeks & exposure proxies
+          - Risk decomposition
+
+        Extracted from calculate_conviction_score() for testability.
+        All inputs are explicit — no hidden state dependencies.
+        """
         # Global market context
-        # ==========================================================
         master["credit_z"] = latest_credit_z
         master["credit_stress"] = credit_stress
         master["vix_level"] = latest_vix
@@ -2271,12 +2328,6 @@ class QuantEngine:
 
         master["execution_regime"] = exec_regime
 
-        master = master.sort_values(
-            ["decision_rank", "decision_score", "mc_score", "conviction_score", "pca_residual_z"],
-            ascending=[True, False, False, False, True],
-        ).reset_index(drop=True)
-        
-        self.master_df = master
         return master
 
     # -----------------------------
