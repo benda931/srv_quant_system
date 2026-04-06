@@ -158,12 +158,105 @@ def _render_scanner(ctx: TabContext):
 
 
 def _render_correlation(ctx: TabContext):
-    from ui.panels import build_correlation_panel
+    import plotly.graph_objects as go
+    import numpy as np
+
+    # Build correlation figures from available data
+    master_df = ctx.master_df
+    engine = ctx.engine
+
+    # Current correlation heatmap
+    corr_fig = go.Figure()
+    delta_fig = go.Figure()
+    ts_fig = go.Figure()
+    contrib_fig = go.Figure()
+
+    try:
+        if engine and hasattr(engine, 'prices') and engine.prices is not None:
+            sectors = [s for s in ctx.settings.sector_list() if s in engine.prices.columns] if ctx.settings else []
+            if sectors and len(engine.prices) > 60:
+                log_rets = np.log(engine.prices[sectors] / engine.prices[sectors].shift(1)).dropna()
+
+                # Current correlation matrix
+                C = log_rets.tail(60).corr()
+                corr_fig = go.Figure(data=go.Heatmap(
+                    z=C.values, x=sectors, y=sectors,
+                    colorscale="RdYlGn", zmid=0,
+                    text=np.round(C.values, 2), texttemplate="%{text:.2f}",
+                ))
+                corr_fig.update_layout(
+                    template="plotly_dark", height=400,
+                    title="Sector Correlation Matrix (60d)",
+                    margin=dict(l=80, r=20, t=50, b=80),
+                )
+
+                # Baseline correlation
+                C_base = log_rets.tail(252).corr()
+                delta_C = C - C_base
+                delta_fig = go.Figure(data=go.Heatmap(
+                    z=delta_C.values, x=sectors, y=sectors,
+                    colorscale="RdBu_r", zmid=0,
+                    text=np.round(delta_C.values, 3), texttemplate="%{text:.3f}",
+                ))
+                delta_fig.update_layout(
+                    template="plotly_dark", height=400,
+                    title="Correlation Change (60d vs 252d baseline)",
+                    margin=dict(l=80, r=20, t=50, b=80),
+                )
+
+                # Rolling average correlation
+                n = len(log_rets)
+                iu = np.triu_indices(len(sectors), k=1)
+                dates = []
+                avg_corrs = []
+                for t in range(60, n, 5):
+                    window = log_rets.iloc[t-60:t]
+                    Cw = window.corr().values
+                    avg_corrs.append(float(np.mean(Cw[iu])))
+                    dates.append(log_rets.index[t])
+
+                ts_fig = go.Figure()
+                ts_fig.add_trace(go.Scatter(x=dates, y=avg_corrs, mode="lines",
+                    line=dict(color="#00d4ff", width=1.5), name="Avg Correlation"))
+                ts_fig.add_hline(y=0.5, line_dash="dash", line_color="#ffc107", opacity=0.5,
+                                 annotation_text="Tension threshold")
+                ts_fig.update_layout(
+                    template="plotly_dark", height=300,
+                    title="Rolling Average Pairwise Correlation (60d)",
+                    yaxis_title="Avg Correlation",
+                    margin=dict(l=60, r=20, t=50, b=30),
+                )
+
+                # Sector contribution to distortion
+                delta_abs = np.abs(delta_C.values)
+                sector_contrib = delta_abs.sum(axis=1) / (delta_abs.sum() + 1e-10)
+                contrib_fig = go.Figure(go.Bar(
+                    x=sectors, y=sector_contrib * 100,
+                    marker_color=["#dc3545" if v > 0.12 else "#ffc107" if v > 0.08 else "#20c997" for v in sector_contrib],
+                    text=[f"{v:.1f}%" for v in sector_contrib * 100],
+                    textposition="outside",
+                ))
+                contrib_fig.update_layout(
+                    template="plotly_dark", height=300,
+                    title="Sector Contribution to Correlation Distortion",
+                    yaxis_title="% of total distortion",
+                    margin=dict(l=60, r=20, t=50, b=30),
+                    showlegend=False,
+                )
+    except Exception:
+        pass
+
     return _loading([
-        _tab_header("🔗 Correlation Structure — מבנה קורלציות סקטוריאליות",
-                     "PCA eigenvector decomposition, rolling regime classification, "
-                     "factor loadings, and sectoral distortion scoring"),
-        build_correlation_panel(ctx.master_df),
+        _tab_header("Correlation Structure",
+                     "Sector pairwise correlation matrix, change from baseline, rolling time series, and distortion contribution"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=corr_fig, config={"displayModeBar": False}), md=6),
+            dbc.Col(dcc.Graph(figure=delta_fig, config={"displayModeBar": False}), md=6),
+        ], className="mb-3"),
+        dbc.Row([
+            dbc.Col(dcc.Graph(figure=ts_fig, config={"displayModeBar": False}), md=7),
+            dbc.Col(dcc.Graph(figure=contrib_fig, config={"displayModeBar": False}), md=5),
+        ]),
     ])
 
 
@@ -235,11 +328,89 @@ def _render_regime(ctx: TabContext):
 
 
 def _render_health(ctx: TabContext):
+    """System health diagnostics — data freshness, quality checks, pipeline status."""
+    sections = []
+    sections.append(_tab_header("Health Diagnostics",
+                                 "Data freshness, quality checks, pipeline status, agent health"))
+
     try:
-        from ui.panels import build_data_health_tab
-        return _loading([build_data_health_tab(ctx.data_health)])
-    except ImportError:
-        return _loading([html.Div("Health tab unavailable", className="text-muted p-3")])
+        from db.repository import Repository
+        from config.settings import get_settings
+        repo = Repository(get_settings().db_path)
+
+        # Data freshness
+        freshness = repo.data_freshness()
+        fresh_color = "success" if freshness.is_fresh else "danger"
+        sections.append(dbc.Row([
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.Div("Data Freshness", className="text-muted", style={"fontSize": "11px"}),
+                html.Div("FRESH" if freshness.is_fresh else "STALE",
+                         className=f"h4 text-{fresh_color} fw-bold text-center"),
+            ]), className=f"border-{fresh_color}"), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.Div("Prices Latest", className="text-muted", style={"fontSize": "11px"}),
+                html.Div(str(freshness.prices_latest or "—"), className="h5 text-center"),
+            ])), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.Div("Price Rows", className="text-muted", style={"fontSize": "11px"}),
+                html.Div(f"{freshness.prices_rows:,}", className="h5 text-center"),
+            ])), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([
+                html.Div("Total Runs", className="text-muted", style={"fontSize": "11px"}),
+                html.Div(str(freshness.runs_count), className="h5 text-center"),
+            ])), md=3),
+        ], className="g-2 mb-3"))
+
+        if freshness.warnings:
+            for w in freshness.warnings:
+                sections.append(dbc.Alert(w, color="warning", className="py-1 mb-1"))
+
+        # Quality checks
+        checks = repo.run_data_quality_checks()
+        check_rows = []
+        for c in checks:
+            icon = "✓" if c.status == "PASS" else "⚠" if c.status == "WARN" else "✗"
+            color = "success" if c.status == "PASS" else "warning" if c.status == "WARN" else "danger"
+            check_rows.append(html.Tr([
+                html.Td(icon, className=f"text-{color} text-center"),
+                html.Td(c.check_name, style={"fontSize": "12px"}),
+                html.Td(c.table_name or "—", style={"fontSize": "11px", "color": "#888"}),
+                html.Td(dbc.Badge(c.status, color=color, style={"fontSize": "10px"})),
+                html.Td(c.message[:60], style={"fontSize": "11px"}),
+            ]))
+
+        if check_rows:
+            sections.append(dbc.Card([
+                dbc.CardHeader(html.Strong("Data Quality Checks")),
+                dbc.CardBody(dbc.Table([
+                    html.Thead(html.Tr([
+                        html.Th("", style={"width": "30px"}),
+                        html.Th("Check"), html.Th("Table"),
+                        html.Th("Status"), html.Th("Details"),
+                    ])),
+                    html.Tbody(check_rows),
+                ], bordered=True, dark=True, hover=True, size="sm")),
+            ], className="mb-3"))
+
+        # Latest run
+        run_summary = repo.run_summary()
+        if run_summary:
+            sections.append(dbc.Card([
+                dbc.CardHeader(html.Strong("Latest Pipeline Run")),
+                dbc.CardBody(dbc.Row([
+                    dbc.Col([html.Div("Run ID", className="text-muted small"), html.Div(f"#{run_summary.run_id}", className="fw-bold")]),
+                    dbc.Col([html.Div("Date", className="text-muted small"), html.Div(run_summary.run_date)]),
+                    dbc.Col([html.Div("Regime", className="text-muted small"), html.Div(run_summary.regime)]),
+                    dbc.Col([html.Div("Duration", className="text-muted small"), html.Div(f"{run_summary.duration_s:.0f}s")]),
+                    dbc.Col([html.Div("Steps", className="text-muted small"), html.Div(f"{run_summary.steps_ok} OK / {run_summary.steps_fail} fail")]),
+                    dbc.Col([html.Div("Health", className="text-muted small"), html.Div(run_summary.data_health)]),
+                ])),
+            ], className="mb-3"))
+
+    except Exception as e:
+        sections.append(dbc.Alert(f"Health diagnostics error: {str(e)[:100]}", color="danger"))
+
+    return _loading(sections)
 
 
 def _render_journal(ctx: TabContext):
