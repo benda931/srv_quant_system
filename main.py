@@ -1325,6 +1325,10 @@ def build_app() -> dash.Dash:
         load_json_safe=_load_json_safe,
         engine_error_banner=_engine_error_banner,
     )
+    # Pass main.py functions through TabContext to avoid circular imports
+    _tab_ctx._build_health_banner = build_health_overview_banner
+    _tab_ctx._build_kpi_rows = build_overview_kpi_rows
+    _tab_ctx._tearsheet_explainer = build_tearsheet_explainer()
 
     @app.callback(
         Output("tab-content", "children"),

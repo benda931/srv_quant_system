@@ -387,15 +387,12 @@ def _render_optimization(ctx: TabContext):
 
 
 def _render_tearsheet(ctx: TabContext):
-    try:
-        from ui.panels import build_tearsheet_panel
-        from main import build_tearsheet_explainer
-        return dbc.Container(fluid=True, children=[
-            build_tearsheet_explainer(), build_tearsheet_panel(),
-        ])
-    except ImportError:
-        from ui.panels import build_tearsheet_panel
-        return dbc.Container(fluid=True, children=[build_tearsheet_panel()])
+    from ui.panels import build_tearsheet_panel
+    # NOTE: build_tearsheet_explainer lives in main.py — access via ctx if available
+    explainer = html.Div()
+    if hasattr(ctx, '_tearsheet_explainer') and ctx._tearsheet_explainer:
+        explainer = ctx._tearsheet_explainer
+    return dbc.Container(fluid=True, children=[explainer, build_tearsheet_panel()])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -430,12 +427,13 @@ def _render_overview(ctx: TabContext):
         build_opportunities_section, build_stat_analysis_panel,
         build_correlation_summary,
     )
-    # These are defined in main.py — import from there
-    try:
-        from main import build_health_overview_banner, build_overview_kpi_rows
-    except ImportError:
-        build_health_overview_banner = lambda h: html.Div()
-        build_overview_kpi_rows = lambda *a, **k: (html.Div(), html.Div())
+    # These are passed via TabContext from main.py — no circular import
+    build_health_overview_banner = lambda h: html.Div()
+    build_overview_kpi_rows = lambda *a, **k: (html.Div(), html.Div())
+    if hasattr(ctx, '_build_health_banner') and ctx._build_health_banner:
+        build_health_overview_banner = ctx._build_health_banner
+    if hasattr(ctx, '_build_kpi_rows') and ctx._build_kpi_rows:
+        build_overview_kpi_rows = ctx._build_kpi_rows
 
     row0 = ctx.master_df.iloc[0].to_dict() if len(ctx.master_df) else {}
     cards_top, cards_bottom = build_overview_kpi_rows(ctx.master_df, ctx.settings, ctx.data_health)

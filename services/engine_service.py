@@ -470,12 +470,11 @@ class EngineService:
     def _run_backtest(self):
         # Try loading from DuckDB cache first
         try:
-            import duckdb
-            conn = duckdb.connect(str(self.settings.db_path), read_only=True)
+            from db.connection import get_connection
+            conn = get_connection(self.settings.db_path)
             row = conn.execute(
                 "SELECT * FROM analytics.backtest_cache ORDER BY cache_date DESC LIMIT 1"
             ).fetchone()
-            conn.close()
             if row is not None:
                 self.results.backtest_result = row
                 return
