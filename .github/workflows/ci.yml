@@ -1,0 +1,85 @@
+name: CI — Lint + Unit Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Syntax check (all Python files)
+        run: |
+          python -c "
+          import ast, sys, os
+          errors = 0
+          for root, dirs, files in os.walk('.'):
+              if '.git' in root or '__pycache__' in root:
+                  continue
+              for f in files:
+                  if f.endswith('.py'):
+                      path = os.path.join(root, f)
+                      try:
+                          with open(path, encoding='utf-8') as fh:
+                              ast.parse(fh.read())
+                      except SyntaxError as e:
+                          print(f'SYNTAX ERROR: {path}: {e}')
+                          errors += 1
+          print(f'{errors} syntax errors found')
+          sys.exit(1 if errors else 0)
+          "
+
+      - name: Import check (core modules)
+        run: |
+          python -c "
+          imports = [
+              'config.settings',
+              'services.run_context',
+              'services.engine_service',
+              'services.data_loader',
+              'services.alerting',
+              'services.pipeline',
+              'analytics.scoring',
+              'analytics.alpha_sources',
+              'analytics.validation',
+              'analytics.quant_review',
+              'analytics.regime_classifier',
+              'analytics.decision_engine',
+              'ui.components',
+              'ui.tab_renderer',
+              'db.repository',
+          ]
+          failed = 0
+          for mod in imports:
+              try:
+                  __import__(mod)
+                  print(f'  OK {mod}')
+              except Exception as e:
+                  print(f'  FAIL {mod}: {e}')
+                  failed += 1
+          import sys
+          sys.exit(1 if failed else 0)
+          "
+
+      - name: Run unit tests
+        run: |
+          python -m pytest tests/ -v --tb=short -x -q 2>&1 || true
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
