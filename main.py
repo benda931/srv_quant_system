@@ -945,7 +945,7 @@ def build_app() -> dash.Dash:
     )
     app.title = "SRV Quantamental DSS"
 
-    # Mobile-responsive CSS overrides
+    # Institutional design system CSS
     app.index_string = '''<!DOCTYPE html>
 <html>
 <head>
@@ -954,34 +954,162 @@ def build_app() -> dash.Dash:
 {%favicon%}
 {%css%}
 <style>
-  /* Mobile responsive */
+  /* ══════════════════════════════════════════════════════════════
+     SRV Quantamental DSS — Institutional Design System
+     Color semantics: green=long/safe, red=short/danger,
+     amber=caution, cyan=info, white=primary text
+     ══════════════════════════════════════════════════════════════ */
+
+  /* ── Typography ─────────────────────────────────────────────── */
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, monospace;
+    font-size: 13px;
+    letter-spacing: 0.01em;
+    -webkit-font-smoothing: antialiased;
+  }
+  .h1,.h2,.h3,.h4,.h5,.h6,h1,h2,h3,h4,h5,h6 {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  /* ── Navigation ─────────────────────────────────────────────── */
+  .nav-tabs {
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    scrollbar-width: thin;
+    border-bottom: 1px solid #2a2a3a;
+    padding-bottom: 0;
+    gap: 2px;
+  }
+  .nav-tabs .nav-link {
+    font-size: 0.78rem;
+    font-weight: 500;
+    padding: 8px 14px;
+    color: #8a8a9a;
+    border: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s ease;
+    letter-spacing: 0.02em;
+  }
+  .nav-tabs .nav-link:hover {
+    color: #ccc;
+    border-bottom-color: #444;
+  }
+  .nav-tabs .nav-link.active {
+    color: #00d4ff !important;
+    border-bottom: 2px solid #00d4ff !important;
+    background: transparent !important;
+    font-weight: 600;
+  }
+
+  /* ── Cards ──────────────────────────────────────────────────── */
+  .card {
+    border-radius: 4px;
+    border-color: #1e1e2e;
+    transition: box-shadow 0.15s ease;
+  }
+  .card:hover {
+    box-shadow: 0 1px 6px rgba(0,212,255,0.08);
+  }
+  .card-header {
+    background: #16162a !important;
+    border-bottom: 1px solid #2a2a3a;
+    padding: 8px 12px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .card-body {
+    padding: 12px;
+  }
+
+  /* ── Tables ─────────────────────────────────────────────────── */
+  .table {
+    font-size: 11.5px;
+    margin-bottom: 0;
+  }
+  .table thead th {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #8a8a9a;
+    font-weight: 600;
+    border-bottom: 1px solid #2a2a3a;
+    padding: 6px 8px;
+  }
+  .table td {
+    padding: 5px 8px;
+    border-color: #1a1a2e;
+    vertical-align: middle;
+  }
+  .table-hover tbody tr:hover {
+    background-color: rgba(0,212,255,0.04) !important;
+  }
+
+  /* ── KPI Cards (override heavy borders) ─────────────────────── */
+  .card[class*="border-"] {
+    border-width: 1px !important;
+  }
+  .card[style*="borderTop: 3px"] {
+    border-top-width: 2px !important;
+  }
+
+  /* ── Badges ─────────────────────────────────────────────────── */
+  .badge {
+    font-weight: 500;
+    letter-spacing: 0.03em;
+    padding: 3px 8px;
+  }
+
+  /* ── Charts ─────────────────────────────────────────────────── */
+  .js-plotly-plot .plotly .modebar {
+    opacity: 0;
+    transition: opacity 0.2s;
+  }
+  .js-plotly-plot:hover .plotly .modebar {
+    opacity: 0.5;
+  }
+
+  /* ── Alerts ─────────────────────────────────────────────────── */
+  .alert {
+    border-radius: 4px;
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+
+  /* ── Scrollbar ──────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #111; }
+  ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+  /* ── Loading spinner ────────────────────────────────────────── */
+  ._dash-loading { opacity: 0.5; }
+
+  /* ── Responsive ─────────────────────────────────────────────── */
   @media (max-width: 768px) {
-    .container-fluid { padding: 8px !important; }
+    .container-fluid { padding: 6px !important; }
     .card-body { padding: 8px !important; }
-    .h4 { font-size: 1rem !important; }
-    .h5 { font-size: 0.85rem !important; }
-    .h6 { font-size: 0.75rem !important; }
-    .nav-tabs .nav-link { font-size: 0.7rem !important; padding: 4px 6px !important; }
+    .h4 { font-size: 0.95rem !important; }
+    .h5 { font-size: 0.82rem !important; }
+    .nav-tabs .nav-link { font-size: 0.68rem !important; padding: 5px 8px !important; }
     table { font-size: 10px !important; }
-    .row { margin-left: 0 !important; margin-right: 0 !important; }
     .col, .col-md-6, .col-md-7, .col-md-8, .col-md-5, .col-md-4 {
       flex: 0 0 100% !important; max-width: 100% !important;
     }
   }
-  /* Tablet */
-  @media (max-width: 1024px) {
-    .nav-tabs { flex-wrap: wrap !important; }
-    .nav-tabs .nav-link { font-size: 0.8rem !important; padding: 6px 8px !important; }
+  @media (max-width: 1200px) {
+    .nav-tabs .nav-link { font-size: 0.72rem !important; padding: 6px 10px !important; }
   }
-  /* General improvements */
-  .card { transition: box-shadow 0.2s; }
-  .card:hover { box-shadow: 0 2px 8px rgba(0,212,255,0.15); }
-  .nav-tabs .nav-link.active { border-bottom: 3px solid #00bc8c !important; }
-  .table-hover tbody tr:hover { background-color: rgba(0,188,140,0.08) !important; }
-  /* Smooth scrolling */
+
+  /* ── Utility ────────────────────────────────────────────────── */
+  .text-profit { color: #00d4aa !important; }
+  .text-loss { color: #ff4757 !important; }
+  .text-caution { color: #ffa502 !important; }
+  .text-info-dim { color: #5f9ea0 !important; }
+  .border-subtle { border-color: #2a2a3a !important; }
   html { scroll-behavior: smooth; }
-  /* Better tab overflow */
-  .nav-tabs { overflow-x: auto; overflow-y: hidden; white-space: nowrap; scrollbar-width: thin; }
 </style>
 </head>
 <body>
@@ -1002,11 +1130,13 @@ def build_app() -> dash.Dash:
                 [
                     dbc.Col(
                         [
-                            html.H2("מערכת SRV Quantamental DSS", className="mt-3 mb-1", style=RTL_STYLE),
+                            html.Div([
+                                html.Span("SRV", style={"color": "#00d4ff", "fontWeight": "700", "fontSize": "1.4rem", "letterSpacing": "-0.02em"}),
+                                html.Span(" Quantamental DSS", style={"color": "#888", "fontWeight": "400", "fontSize": "1.1rem", "marginLeft": "4px"}),
+                            ], className="mt-3 mb-0"),
                             html.Div(
-                                "מערכת תומכת החלטה ל-Discretionary Quant PM עבור Sector Relative Value.",
-                                className="text-muted mb-2",
-                                style=RTL_STYLE,
+                                "Sector Relative Value — Decision Support System",
+                                style={"fontSize": "11px", "color": "#555", "letterSpacing": "0.05em", "textTransform": "uppercase"},
                             ),
                         ],
                         md=9,
@@ -1014,9 +1144,10 @@ def build_app() -> dash.Dash:
                     dbc.Col(
                         [
                             dbc.Button(
-                                "📰 Daily Brief",
+                                "Daily Brief",
                                 id="open-brief-modal",
-                                color="info",
+                                color="outline-info",
+                                size="sm",
                                 className="mt-3 me-2",
                                 disabled=not bool(_brief_txt),
                             ),
@@ -1037,24 +1168,28 @@ def build_app() -> dash.Dash:
                 id="main-tabs",
                 active_tab="tab-overview",
                 children=[
-                    dbc.Tab(label="Overview 📊",    tab_id="tab-overview"),
-                    dbc.Tab(label="DSS 🎯",         tab_id="tab-dss"),
-                    dbc.Tab(label="Scanner 🔍",     tab_id="tab-scanner"),
-                    dbc.Tab(label="Correlation 🔗", tab_id="tab-correlation"),
-                    dbc.Tab(label="Tear Sheet 📋",  tab_id="tab-tearsheet"),
-                    dbc.Tab(label="Stress ⚡",      tab_id="tab-stress"),
-                    dbc.Tab(label="Risk 🛡️",        tab_id="tab-risk"),
-                    dbc.Tab(label="Corr&Vol 📈",    tab_id="tab-corrvol"),
-                    dbc.Tab(label="P&L 💰",         tab_id="tab-pnl"),
-                    dbc.Tab(label="Backtest 🔬",    tab_id="tab-backtest"),
-                    dbc.Tab(label="Decay 📉",       tab_id="tab-decay"),
-                    dbc.Tab(label="Regime 🌡️",      tab_id="tab-regime"),
-                    dbc.Tab(label="Health 🏥",      tab_id="tab-health"),
-                    dbc.Tab(label="Portfolio 💼",   tab_id="tab-portfolio"),
-                    dbc.Tab(label="Methodology 🧪", tab_id="tab-methodology"),
-                    dbc.Tab(label="Optimization 🎯", tab_id="tab-optimization"),
-                    dbc.Tab(label="ML 🧠",          tab_id="tab-ml"),
-                    dbc.Tab(label="Agents 🤖",      tab_id="tab-agents"),
+                    # ── Trading ──
+                    dbc.Tab(label="Overview",       tab_id="tab-overview"),
+                    dbc.Tab(label="DSS",            tab_id="tab-dss"),
+                    dbc.Tab(label="Scanner",        tab_id="tab-scanner"),
+                    dbc.Tab(label="Portfolio",      tab_id="tab-portfolio"),
+                    # ── Risk ──
+                    dbc.Tab(label="Risk",           tab_id="tab-risk"),
+                    dbc.Tab(label="Stress",         tab_id="tab-stress"),
+                    dbc.Tab(label="Regime",         tab_id="tab-regime"),
+                    # ── Analytics ──
+                    dbc.Tab(label="P&L",            tab_id="tab-pnl"),
+                    dbc.Tab(label="Backtest",       tab_id="tab-backtest"),
+                    dbc.Tab(label="Correlation",    tab_id="tab-correlation"),
+                    dbc.Tab(label="Corr&Vol",       tab_id="tab-corrvol"),
+                    dbc.Tab(label="Decay",          tab_id="tab-decay"),
+                    dbc.Tab(label="Tear Sheet",     tab_id="tab-tearsheet"),
+                    # ── Research ──
+                    dbc.Tab(label="Methodology",    tab_id="tab-methodology"),
+                    dbc.Tab(label="Optimization",   tab_id="tab-optimization"),
+                    dbc.Tab(label="ML",             tab_id="tab-ml"),
+                    dbc.Tab(label="Agents",         tab_id="tab-agents"),
+                    dbc.Tab(label="Health",         tab_id="tab-health"),
                 ],
                 className="mt-2",
                 style={"flexWrap": "wrap", "overflow": "visible"},
